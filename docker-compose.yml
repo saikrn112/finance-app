@@ -1,0 +1,62 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - ${FINANCE_APP_HOST_DATA_DIR:-./data}:/app/data
+    ports:
+      - "${FINANCE_APP_HOST_API_PORT:-8000}:${FINANCE_APP_PORT:-8000}"   # Backend API
+      - "${FINANCE_APP_HOST_WEB_PORT:-5173}:${VITE_PORT:-5173}"   # Vite dev server
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FINANCE_APP_PORT=${FINANCE_APP_PORT:-8000}
+      - FINANCE_APP_DATA_DIR=/app/data
+      - FINANCE_APP_RUNTIME_DIR=${FINANCE_APP_RUNTIME_DIR:-/app/data/runtime/prod}
+      - FINANCE_APP_DB_PATH=${FINANCE_APP_DB_PATH:-/app/data/runtime/prod/finances.db}
+      - VITE_PORT=${VITE_PORT:-5173}
+      - VITE_API_PROXY_TARGET=${VITE_API_PROXY_TARGET:-http://localhost:8000}
+      - FINANCE_APP_GOOGLE_REDIRECT_URI=${FINANCE_APP_GOOGLE_REDIRECT_URI:-http://localhost:8000/api/settings/vault/google/callback}
+    working_dir: /app
+    command: ["/bin/bash", "/app/scripts/start_from_docker.sh", "prod"]
+
+  app-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    ports:
+      - "8001:8001"   # Demo backend API
+      - "5174:5174"   # Demo Vite dev server
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FINANCE_APP_MODE=demo
+      - FINANCE_APP_DATA_DIR=/app/data
+      - FINANCE_APP_RUNTIME_DIR=/app/data/runtime/demo
+      - FINANCE_APP_DB_PATH=/app/data/runtime/demo/finances-demo.db
+    working_dir: /app
+    command: ["/bin/bash", "/app/scripts/start_from_docker.sh", "demo"]
+
+  app-replay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    ports:
+      - "8002:8002"
+      - "5175:5175"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FINANCE_APP_DATA_DIR=/app/data
+      - FINANCE_APP_RUNTIME_DIR=/app/data/runtime/replay
+      - FINANCE_APP_DB_PATH=/app/data/runtime/replay/finances-replay.db
+      - FINANCE_APP_PORT=8002
+      - VITE_PORT=5175
+      - VITE_API_PROXY_TARGET=http://localhost:8002
+    working_dir: /app
+    command: ["/bin/bash", "/app/scripts/start_from_docker.sh", "replay"]

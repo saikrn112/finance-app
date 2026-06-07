@@ -1,0 +1,28 @@
+# API Keys (copy to config.yaml and fill in)
+# Get Plaid keys at: https://dashboard.plaid.com/developers/keys
+plaid:
+  client_id: ""
+  secret: ""
+  environment: "sandbox"  # sandbox, development, or production
+
+gemini:
+  api_key: ""
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+app:
+  data_dir: "data"
+  runtime_dir: "data/runtime/prod"
+
+database:
+  path: "data/runtime/prod/finances.db"
+
+google_drive:
+  client_id: ""
+  client_secret: ""
+  oauth_client_type: "desktop"
+  # redirect_uri auto-derives from server.port: http://localhost:{port}/api/settings/vault/google/callback
+  appdata_manifest_prefix: "finance-app-vault"
+  folder_name: "Finance Vault"

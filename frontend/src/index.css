@@ -1,0 +1,354 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --surface-page: #f6efe3;
+  --surface-primary: #fffaf2;
+  --surface-secondary: #fff7ec;
+  --surface-elevated: #ffffff;
+
+  /* Borders */
+  --border-default: #dfcfb8;
+  --border-soft: #eaddca;
+  --border-strong: #c4a882;
+
+  /* Text */
+  --text-primary: #322c23;
+  --text-secondary: #5c5347;
+  --text-muted: #756a5c;
+  --text-inverse: #ffffff;
+
+  /* Interactive */
+  --hover-bg: #f0e6d6;
+  --active-bg: #e8dbc7;
+  --focus-ring: #b8860b;
+
+  /* Semantic */
+  --color-positive: #047857;
+  --color-positive-bg: rgba(4, 120, 87, 0.08);
+  --color-negative: #be123c;
+  --color-negative-bg: rgba(190, 18, 60, 0.08);
+  --color-warning: #b45309;
+  --color-warning-bg: rgba(180, 83, 9, 0.08);
+  --color-info: #1d4ed8;
+  --color-info-bg: rgba(29, 78, 216, 0.08);
+  --color-neutral: #64748b;
+  --color-neutral-bg: rgba(100, 116, 139, 0.08);
+
+  /* Charts */
+  --chart-bg: #fff8ef;
+  --chart-grid: #eadfcf;
+  --chart-text: #7a6d5c;
+  --chart-bar-track: #f0e6d6;
+  --chart-tooltip-bg: #fffaf2;
+  --chart-tooltip-border: #dfcfb8;
+  --chart-line-1: #2563eb;
+  --chart-line-2: #059669;
+  --chart-line-3: #d97706;
+  --chart-line-4: #e11d48;
+  --chart-line-5: #7c3aed;
+  --chart-spending: rgba(221, 105, 124, 0.86);
+  --chart-income: rgba(87, 191, 141, 0.82);
+
+  /* Inputs */
+  --input-bg: #fffaf2;
+  --input-border: #dfcfb8;
+  --input-border-focus: #b8860b;
+  --input-text: #322c23;
+  --input-placeholder: #756a5c;
+
+  /* Sidebar */
+  --sidebar-bg: #fffaf2;
+  --sidebar-border: #eaddca;
+  --sidebar-hover: #f0e6d6;
+  --sidebar-selected: #e8dbc7;
+  --sidebar-text: #322c23;
+  --sidebar-text-muted: #756a5c;
+
+  /* AG Grid */
+  --grid-bg: #fffaf2;
+  --grid-header-bg: #fff7ec;
+  --grid-row-hover: #f0e6d6;
+  --grid-row-selected: #e8dbc7;
+  --grid-border: #eaddca;
+  --grid-text: #322c23;
+  --grid-text-secondary: #5c5347;
+
+  /* Buttons */
+  --btn-primary-bg: #322c23;
+  --btn-primary-text: #ffffff;
+  --btn-primary-hover: #4a4138;
+  --btn-secondary-bg: transparent;
+  --btn-secondary-text: #322c23;
+  --btn-secondary-hover: #f0e6d6;
+
+  /* Misc */
+  --shadow-color: rgba(120, 93, 52, 0.08);
+  --overlay-dim: rgba(255, 255, 255, 0.55);
+
+  /* Legacy aliases */
+  --app-bg: var(--surface-page);
+  --app-surface: var(--surface-primary);
+  --app-surface-2: var(--surface-secondary);
+  --app-border: var(--border-default);
+  --app-border-soft: var(--border-soft);
+  --app-text: var(--text-primary);
+  --app-muted: var(--text-muted);
+  --app-shadow: 0 10px 30px var(--shadow-color);
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --surface-page: #020617;
+  --surface-primary: #0f172a;
+  --surface-secondary: #1e293b;
+  --surface-elevated: #1e293b;
+
+  /* Borders */
+  --border-default: #334155;
+  --border-soft: #1e293b;
+  --border-strong: #475569;
+
+  /* Text */
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-inverse: #0f172a;
+
+  /* Interactive */
+  --hover-bg: #1e293b;
+  --active-bg: #334155;
+  --focus-ring: #38bdf8;
+
+  /* Semantic */
+  --color-positive: #34d399;
+  --color-positive-bg: rgba(52, 211, 153, 0.12);
+  --color-negative: #fb7185;
+  --color-negative-bg: rgba(251, 113, 133, 0.12);
+  --color-warning: #fbbf24;
+  --color-warning-bg: rgba(251, 191, 36, 0.12);
+  --color-info: #60a5fa;
+  --color-info-bg: rgba(96, 165, 250, 0.12);
+  --color-neutral: #94a3b8;
+  --color-neutral-bg: rgba(148, 163, 184, 0.12);
+
+  /* Charts */
+  --chart-bg: #0f172a;
+  --chart-grid: #1e293b;
+  --chart-text: #94a3b8;
+  --chart-bar-track: #1e293b;
+  --chart-tooltip-bg: #1e293b;
+  --chart-tooltip-border: #334155;
+  --chart-line-1: #60a5fa;
+  --chart-line-2: #34d399;
+  --chart-line-3: #fbbf24;
+  --chart-line-4: #fb7185;
+  --chart-line-5: #a78bfa;
+  --chart-spending: rgba(221, 105, 124, 0.86);
+  --chart-income: rgba(52, 211, 153, 0.7);
+
+  /* Inputs */
+  --input-bg: #0f172a;
+  --input-border: #334155;
+  --input-border-focus: #38bdf8;
+  --input-text: #f1f5f9;
+  --input-placeholder: #64748b;
+
+  /* Sidebar */
+  --sidebar-bg: #020617;
+  --sidebar-border: #1e293b;
+  --sidebar-hover: #1e293b;
+  --sidebar-selected: #334155;
+  --sidebar-text: #f1f5f9;
+  --sidebar-text-muted: #94a3b8;
+
+  /* AG Grid */
+  --grid-bg: #0f172a;
+  --grid-header-bg: #1e293b;
+  --grid-row-hover: #1e293b;
+  --grid-row-selected: #334155;
+  --grid-border: #334155;
+  --grid-text: #e2e8f0;
+  --grid-text-secondary: #94a3b8;
+
+  /* Buttons */
+  --btn-primary-bg: #f1f5f9;
+  --btn-primary-text: #0f172a;
+  --btn-primary-hover: #ffffff;
+  --btn-secondary-bg: transparent;
+  --btn-secondary-text: #f1f5f9;
+  --btn-secondary-hover: #1e293b;
+
+  /* Misc */
+  --shadow-color: rgba(0, 0, 0, 0.3);
+  --overlay-dim: rgba(0, 0, 0, 0.6);
+
+  /* Legacy aliases */
+  --app-bg: var(--surface-page);
+  --app-surface: var(--surface-primary);
+  --app-surface-2: var(--surface-secondary);
+  --app-border: var(--border-default);
+  --app-border-soft: var(--border-soft);
+  --app-text: var(--text-primary);
+  --app-muted: var(--text-muted);
+  --app-shadow: 0 10px 30px var(--shadow-color);
+}
+
+body {
+  background: radial-gradient(circle at top, #fbf5ea 0%, var(--surface-page) 52%, #efe5d2 100%);
+  color: var(--text-primary);
+}
+
+.dark body {
+  background: var(--surface-page);
+  color: var(--text-primary);
+}
+
+/* ─── Shared Utility Classes ─── */
+
+.app-shell {
+  background: linear-gradient(180deg, #fbf5ea 0%, var(--surface-page) 100%);
+}
+
+.dark .app-shell {
+  background: var(--surface-page);
+}
+
+.app-surface {
+  background: var(--surface-primary);
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 10px 30px var(--shadow-color);
+}
+
+.app-surface-strong {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  box-shadow: 0 10px 30px var(--shadow-color);
+}
+
+.app-card {
+  background: var(--surface-primary);
+  border: 1px solid var(--border-soft);
+  border-radius: 0.75rem;
+  box-shadow: 0 10px 30px var(--shadow-color);
+}
+
+.app-input {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--input-text);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  transition: border-color 150ms;
+}
+
+.app-input:focus {
+  border-color: var(--input-border-focus);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.app-input::placeholder {
+  color: var(--input-placeholder);
+}
+
+.app-hover {
+  transition: background-color 150ms;
+}
+.app-hover:hover {
+  background-color: var(--hover-bg);
+}
+
+.app-selected {
+  background-color: var(--active-bg);
+}
+
+.app-elevated {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  box-shadow: 0 4px 12px var(--shadow-color), 0 1px 3px var(--shadow-color);
+}
+
+.app-btn-primary {
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background-color 150ms;
+}
+.app-btn-primary:hover {
+  background: var(--btn-primary-hover);
+}
+
+.app-btn-secondary {
+  background: var(--btn-secondary-bg);
+  color: var(--btn-secondary-text);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background-color 150ms;
+}
+.app-btn-secondary:hover {
+  background: var(--btn-secondary-hover);
+}
+
+.app-badge-positive {
+  background: var(--color-positive-bg);
+  color: var(--color-positive);
+}
+
+.app-badge-negative {
+  background: var(--color-negative-bg);
+  color: var(--color-negative);
+}
+
+.app-badge-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.app-badge-info {
+  background: var(--color-info-bg);
+  color: var(--color-info);
+}
+
+.app-badge-neutral {
+  background: var(--color-neutral-bg);
+  color: var(--color-neutral);
+}
+
+.sidebar-hover {
+  transition: background-color 150ms;
+}
+.sidebar-hover:hover {
+  background-color: var(--sidebar-hover);
+}
+
+/* Overlay scrollbar - floats on top, doesn't take space */
+* { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+*:hover { scrollbar-color: rgba(100,116,139,0.4) transparent; }
+::-webkit-scrollbar { width: 6px; height: 6px; background: transparent; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 3px; }
+*:hover::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.4); }
+*:hover::-webkit-scrollbar-thumb:hover { background: rgba(100,116,139,0.6); }
+
+/* Remove focus outline on chart clicks */
+.recharts-wrapper, .recharts-wrapper:focus, .recharts-surface, .recharts-surface:focus,
+.recharts-wrapper *:focus { outline: none !important; }
+
+/* Hide lightweight-charts watermark */
+[class*="apply-common-tooltip"] { display: none !important; }
+a[href*="tradingview"] { display: none !important; }
