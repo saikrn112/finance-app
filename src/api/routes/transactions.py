@@ -61,7 +61,12 @@ def _normalize_category(value: str | None) -> str:
 
 
 def _load_rule_categories() -> dict[str, set[str]]:
-    rules_path = Path(__file__).resolve().parents[3] / "rules" / "categories.yaml"
+    import os
+    env_plugins_dir = os.environ.get("FINANCE_PLUGINS_DIR")
+    if env_plugins_dir and (Path(env_plugins_dir) / "rules" / "categories.yaml").exists():
+        rules_path = Path(env_plugins_dir) / "rules" / "categories.yaml"
+    else:
+        rules_path = Path(__file__).resolve().parents[3] / "rules" / "categories.yaml"
     categories: dict[str, set[str]] = defaultdict(set)
     if not rules_path.exists():
         return categories
@@ -119,7 +124,12 @@ def _quote_yaml(value: str) -> str:
 
 
 def _append_rule_to_yaml(category: str, match_text: str, merchant_clean: str | None) -> bool:
-    rules_path = Path(__file__).resolve().parents[3] / "rules" / "categories.yaml"
+    import os
+    env_plugins_dir = os.environ.get("FINANCE_PLUGINS_DIR")
+    if env_plugins_dir:
+        rules_path = Path(env_plugins_dir) / "rules" / "categories.yaml"
+    else:
+        rules_path = Path(__file__).resolve().parents[3] / "rules" / "categories.yaml"
     existing_data: dict = {}
     if rules_path.exists():
         with rules_path.open() as handle:

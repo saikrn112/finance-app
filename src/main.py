@@ -217,10 +217,6 @@ def _run_server(host: str, port: int, demo: bool, reload: bool):
         uvicorn.run("src.api.server:app", host=host, port=port, reload=False)
 
 
-if __name__ == "__main__":
-    cli()
-
-
 @cli.command("backfill-schema")
 def backfill_schema():
     """One-time migration: backfill normalized tables from SyncLog JSON."""
@@ -234,3 +230,22 @@ def backfill_schema():
         click.echo("Backfill complete.")
     finally:
         db.close()
+
+
+@cli.command("backfill-payslips")
+def backfill_payslips_command():
+    """One-time migration: backfill normalized payslips from SyncLog JSON."""
+    from src.models import SessionLocal, init_db
+    from src.ingestion.backfill_schema import backfill_payslips
+
+    init_db()
+    db = SessionLocal()
+    try:
+        inserted = backfill_payslips(db)
+        click.echo(f"Payslip backfill complete. Inserted {inserted} row(s).")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    cli()

@@ -50,6 +50,7 @@ def _payslips_from_normalized(db: Session, currency: str) -> list[dict] | None:
         db.query(
             PayslipLineItem,
             (PayslipLineItem._amount * lr.c.rate).label("converted_amount"),
+            (PayslipLineItem._ytd * lr.c.rate).label("converted_ytd"),
         )
         .join(Payslip, Payslip.id == PayslipLineItem.payslip_id)
         .join(lr, and_(
@@ -62,13 +63,13 @@ def _payslips_from_normalized(db: Session, currency: str) -> list[dict] | None:
 
     # Group line items by payslip and section
     from collections import defaultdict
-    line_items_by_payslip: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    line_items_by_payslip: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
     for li_row in line_items_raw:
         li = li_row.PayslipLineItem
-        line_items_by_payslip[li.payslip_id][li.section].append({
-            "label": li.label,
-            "amount": round(float(li_row.converted_amount or 0), 2),
-        })
+        section = line_items_by_payslip[li.payslip_id][li.section]
+        section[li.label] = round(float(li_row.converted_amount or 0), 2)
+        if li_row.converted_ytd is not None:
+            section[f"{li.label}_ytd"] = round(float(li_row.converted_ytd or 0), 2)
 
     payslips: list[dict] = []
     for row in rows:
@@ -77,15 +78,18 @@ def _payslips_from_normalized(db: Session, currency: str) -> list[dict] | None:
         payslip_dict = {
             "employer": p.employer,
             "pay_date": p.pay_date.isoformat() if p.pay_date else None,
+            "period_start": p.pay_period_start.isoformat() if getattr(p, "pay_period_start", None) else None,
+            "period_end": p.pay_period_end.isoformat() if getattr(p, "pay_period_end", None) else None,
             "pay_period_start": p.pay_period_start.isoformat() if getattr(p, "pay_period_start", None) else None,
             "pay_period_end": p.pay_period_end.isoformat() if getattr(p, "pay_period_end", None) else None,
             "gross": round(float(row.gross or 0), 2),
             "net": round(float(row.net or 0), 2),
             "total_taxes": round(float(row.total_taxes or 0), 2),
             "total_deductions": round(float(row.total_deductions or 0), 2),
-            "taxes": items_by_section.get("taxes", []),
-            "deductions": items_by_section.get("deductions", []),
-            "earnings": items_by_section.get("earnings", []),
+            "taxes": items_by_section.get("taxes", {}),
+            "deductions": items_by_section.get("deductions", {}),
+            "earnings": items_by_section.get("earnings", {}),
+            "benefits": {},
         }
         payslips.append(payslip_dict)
 

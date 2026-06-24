@@ -20,7 +20,9 @@ class RuleMatcher:
         self.rules = []
         # Load from plugins/rules/categories.yaml first if it exists (user-specific),
         # otherwise fall back to the default rules/categories.yaml
-        plugin_rules_path = Path("plugins/rules/categories.yaml")
+        import os
+        env_plugins_dir = os.environ.get("FINANCE_PLUGINS_DIR")
+        plugin_rules_path = Path(env_plugins_dir) / "rules" / "categories.yaml" if env_plugins_dir else Path("plugins/rules/categories.yaml")
         effective_path = plugin_rules_path if plugin_rules_path.exists() else rules_path
         if effective_path.exists():
             with open(effective_path) as f:

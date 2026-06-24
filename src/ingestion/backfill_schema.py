@@ -1,7 +1,7 @@
 """Backfill normalized schema tables from SyncLog payloads.
 
 Idempotent: skips rows that already exist (unique constraint enforcement).
-Called on startup after migrate_import_artifact_paths().
+Intended for explicit migration commands, not automatic startup repair.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_backfill(db: Session) -> None:
-    """Run all backfill passes. Safe to call on every startup."""
+    """Run all backfill passes."""
     backfill_payslips(db)
     backfill_retirement(db)
 

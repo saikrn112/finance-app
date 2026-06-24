@@ -125,7 +125,7 @@ start_prod() {
   export FINANCE_APP_DATA_DIR="/app/data"
   export FINANCE_APP_RUNTIME_DIR="/app/data/runtime/prod"
   export FINANCE_APP_DB_PATH="/app/data/runtime/prod/finances.db"
-  export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${API_PORT}/api/settings/vault/google/callback"
+  export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${WEB_PORT}/api/settings/vault/google/callback"
 
   COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/finances-start.XXXXXX.yml")"
   trap 'rm -f "${COMPOSE_FILE}"' EXIT
@@ -156,7 +156,7 @@ services:
     volumes:
       - ${REPO_ROOT}:/app
       - ${FINANCE_APP_HOST_DATA_DIR}:/app/data
-$([ -n "${FINANCE_PLUGINS_DIR}" ] && echo "      - ${FINANCE_PLUGINS_DIR}:${FINANCE_PLUGINS_DIR}:ro")
+$([ -n "${FINANCE_PLUGINS_DIR}" ] && echo "      - ${FINANCE_PLUGINS_DIR}:${FINANCE_PLUGINS_DIR}")
 EOF
 
   echo "Starting finance app project '${PROJECT_NAME}' (prod)"

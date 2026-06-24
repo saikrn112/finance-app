@@ -43,9 +43,15 @@ def _run_sync_and_optional_backup(*, trigger: str, run_backup: bool) -> None:
 
 
 def _worker_loop(stop_event: threading.Event) -> None:
-    _run_sync_and_optional_backup(trigger="startup", run_backup=False)
+    try:
+        _run_sync_and_optional_backup(trigger="startup", run_backup=False)
+    except Exception:
+        logger.exception("auto-task startup sync crashed")
     while not stop_event.wait(AUTO_SYNC_INTERVAL.total_seconds()):
-        _run_sync_and_optional_backup(trigger="interval", run_backup=True)
+        try:
+            _run_sync_and_optional_backup(trigger="interval", run_backup=True)
+        except Exception:
+            logger.exception("auto-task interval run crashed")
 
 
 def start_auto_tasks() -> None:
