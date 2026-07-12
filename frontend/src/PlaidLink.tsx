@@ -1,27 +1,27 @@
 import { useCallback, useEffect, useState } from 'react'
 import { usePlaidLink } from 'react-plaid-link'
-import { Plus } from 'lucide-react'
+import { Plus, RefreshCw } from 'lucide-react'
 import { api } from './api'
 
-export function PlaidLinkButton({ onSuccess, compact, products }: { onSuccess?: () => void; compact?: boolean; products?: string }) {
+export function PlaidLinkButton({ onSuccess, compact, products, accountId, label }: { onSuccess?: () => void; compact?: boolean; products?: string; accountId?: string; label?: string }) {
   const [linkToken, setLinkToken] = useState<string>('')
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
 
   useEffect(() => {
-    api.getLinkToken(products)
+    api.getLinkToken(products, accountId)
       .then(data => {
         setLinkToken(data.link_token || '')
         setStatus(data.link_token ? 'ready' : 'error')
       })
       .catch(() => setStatus('error'))
-  }, [])
+  }, [products, accountId])
 
   const handleSuccess = useCallback(async (public_token: string, metadata: any) => {
     const institutionName = metadata?.institution?.name || ""
-    await api.exchangeToken(public_token, institutionName)
+    await api.exchangeToken(public_token, institutionName, accountId)
     await api.syncPlaid()
     onSuccess?.()
-  }, [onSuccess])
+  }, [onSuccess, accountId])
 
   const { open, ready } = usePlaidLink({ token: linkToken, onSuccess: handleSuccess })
 
@@ -46,9 +46,9 @@ export function PlaidLinkButton({ onSuccess, compact, products }: { onSuccess?: 
         onClick={() => open()}
         disabled={!ready}
         className="p-1.5 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-        title="Connect another bank"
+        title={accountId ? 'Reconnect bank' : 'Connect another bank'}
       >
-        <Plus size={16} />
+        {accountId ? <RefreshCw size={16} /> : <Plus size={16} />}
       </button>
     )
   }
@@ -59,7 +59,7 @@ export function PlaidLinkButton({ onSuccess, compact, products }: { onSuccess?: 
       disabled={!ready}
       className="px-3 py-2 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50"
     >
-      + Connect Bank
+      {label || '+ Connect Bank'}
     </button>
   )
 }

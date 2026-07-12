@@ -151,6 +151,12 @@ class TransactionProjectItem(BaseModel):
     color: Optional[str] = None
 
 
+class ContactItem(BaseModel):
+    id: str
+    name: str
+    color: Optional[str] = None
+
+
 class TransactionItem(BaseModel):
     id: str
     date: Optional[str] = None
@@ -167,6 +173,8 @@ class TransactionItem(BaseModel):
     is_recurring: Optional[bool] = None
     tags: list[str] = []
     projects: list[TransactionProjectItem] = []
+    description: Optional[str] = None
+    splits: list[ContactItem] = []
 
 
 class TransactionListResponse(FinancialResponse):
@@ -334,6 +342,7 @@ class ProjectItem(FinancialResponse):
 class ProjectDetailResponse(ProjectItem):
     categories: list[ProjectCategoryItem] = []
     transactions: list[TransactionItem] = []
+    members: list[ContactItem] = []
 
 
 # ---------------------------------------------------------------------------

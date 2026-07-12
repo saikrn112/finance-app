@@ -47,6 +47,7 @@ app.include_router(recurring.router, prefix="/api/recurring", tags=["recurring"]
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(reconciliation.router, prefix="/api/reconciliation", tags=["reconciliation"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
+app.include_router(projects.contacts_router, prefix="/api/contacts", tags=["contacts"])
 app.include_router(retirement.router, prefix="/api/retirement", tags=["retirement"])
 app.include_router(payslips.router, prefix="/api/payslips", tags=["payslips"])
 

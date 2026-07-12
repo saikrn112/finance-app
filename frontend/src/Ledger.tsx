@@ -9,7 +9,7 @@ import { useFilterStore } from './store'
 import { useProjects } from './hooks'
 import { getGridTheme } from './gridTheme'
 import { api } from './api'
-import type { ProjectDetail, Transaction, TransactionCategoryOption } from './api'
+import type { Contact, ProjectDetail, Transaction, TransactionCategoryOption } from './api'
 import { formatCurrency } from './privacy'
 
 ModuleRegistry.registerModules([AllCommunityModule])
@@ -59,6 +59,81 @@ function buildProjectCategories(transactions: Transaction[]) {
     }))
 }
 
+function SplitFilterHeader(props: any) {
+  const { members, onFilterChange } = props
+  const [open, setOpen] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const btnRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: PointerEvent) => {
+      const target = e.target as HTMLElement
+      if (target.closest('[data-split-filter-popup]') || target === btnRef.current) return
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', handler)
+    return () => document.removeEventListener('pointerdown', handler)
+  }, [open])
+
+  const toggle = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      onFilterChange(Array.from(next))
+      return next
+    })
+  }
+
+  const clearAll = () => {
+    setSelected(new Set())
+    onFilterChange([])
+  }
+
+  const hasFilter = selected.size > 0
+  const rect = btnRef.current?.getBoundingClientRect()
+
+  return (
+    <div className="ag-header-cell-label" style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
+      <span className="ag-header-cell-text">Split</span>
+      <button
+        ref={btnRef}
+        onPointerDown={e => { e.stopPropagation(); e.preventDefault(); setOpen(!open) }}
+        style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, borderRadius: 4, color: hasFilter ? '#3b82f6' : 'var(--text-muted)' }}
+        title="Filter by people"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+      </button>
+      {open && rect && createPortal(
+        <div
+          data-split-filter-popup
+          className="fixed z-[1300] min-w-[160px] rounded-lg p-2 shadow-lg app-elevated"
+          style={{ top: rect.bottom + 4, left: rect.left - 120 }}
+        >
+          <div className="space-y-0.5 max-h-48 overflow-y-auto">
+            {(members || []).map((m: any) => (
+              <button
+                key={m.id}
+                className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs ${selected.has(m.id) ? 'app-selected' : 'app-hover'}`}
+                onClick={() => toggle(m.id)}
+              >
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: m.color }} />
+                <span className="truncate flex-1 text-left">{m.name}</span>
+                {selected.has(m.id) ? <span className="text-blue-500 text-[10px]">✓</span> : null}
+              </button>
+            ))}
+          </div>
+          {hasFilter && (
+            <button onClick={clearAll} className="mt-1 w-full text-center text-[10px] text-slate-400 hover:text-blue-400">Clear filter</button>
+          )}
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
+}
+
 function AmountCell(props: ICellRendererParams) {
   const v = props.value as number
   const privacyMode = useFilterStore((state) => state.privacyMode)
@@ -84,11 +159,15 @@ export function Ledger({
   title = 'Transactions',
   useGlobalFilters = true,
   helperText,
+  projectId,
+  members,
 }: {
   transactions: Transaction[]
   title?: string
   useGlobalFilters?: boolean
   helperText?: string
+  projectId?: string
+  members?: { id: string; name: string; color: string }[]
 }) {
   const gridRef = useRef<AgGridReact>(null)
   const storeSearch = useFilterStore(s => s.search)
@@ -439,6 +518,124 @@ export function Ledger({
     return Array.from(s).sort()
   }, [transactions])
 
+  const [editingDesc, setEditingDesc] = useState<string | null>(null)
+  const [splitFilterIds, setSplitFilterIds] = useState<string[]>([])
+  const [descDraft, setDescDraft] = useState('')
+
+  const ProjectMerchantCell = useCallback((props: ICellRendererParams) => {
+    const txn = props.data as Transaction
+    const label = txn.merchant_clean || txn.merchant_raw
+    const isEditing = editingDesc === txn.id
+    const saveDescription = async (value: string) => {
+      if (!projectId) return
+      await api.updateTransactionProject(projectId, txn.id, { description: value || '' })
+      txn.description = value || undefined
+      setEditingDesc(null)
+      props.api.refreshCells({ rowNodes: [props.node], force: true })
+    }
+    return (
+      <div className="flex flex-col justify-center min-w-0 py-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate">{label}</span>
+          {txn.pending ? (
+            <span className="shrink-0 text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>(pending)</span>
+          ) : null}
+        </div>
+        {isEditing ? (
+          <input
+            autoFocus
+            className="mt-0.5 text-[11px] bg-transparent border-b border-blue-400 outline-none w-full"
+            style={{ color: 'var(--text-muted)' }}
+            value={descDraft}
+            onChange={(e) => setDescDraft(e.target.value)}
+            onBlur={() => void saveDescription(descDraft)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void saveDescription(descDraft); if (e.key === 'Escape') setEditingDesc(null) }}
+          />
+        ) : (
+          <span
+            className="mt-0.5 text-[11px] truncate cursor-pointer hover:text-blue-400"
+            style={{ color: 'var(--text-muted)', fontStyle: txn.description ? 'normal' : 'italic' }}
+            onClick={() => { setEditingDesc(txn.id); setDescDraft(txn.description || '') }}
+          >
+            {txn.description || 'Add note...'}
+          </span>
+        )}
+      </div>
+    )
+  }, [projectId, editingDesc, descDraft])
+
+  const SplitCell = useCallback((props: ICellRendererParams) => {
+    const txn = props.data as Transaction
+    const splits = txn.splits || []
+    const [menuOpen, setMenuOpen] = useState(false)
+    const [menuPos, setMenuPos] = useState({ left: 0, top: 0 })
+
+    const toggleMember = async (contactId: string) => {
+      if (!projectId) return
+      const current = txn.splits || []
+      const has = current.some(s => s.id === contactId)
+      const next = has ? current.filter(s => s.id !== contactId) : [...current, (members || []).find(m => m.id === contactId)!]
+      await api.updateTransactionSplits(projectId, txn.id, next.map(s => s.id))
+      txn.splits = next
+      props.api.refreshCells({ rowNodes: [props.node], force: true })
+    }
+
+    return (
+      <div className="flex h-full w-full items-center gap-1 overflow-hidden">
+        {splits.length > 0 ? (
+          <button
+            type="button"
+            title={splits.map(s => s.name).join(', ')}
+            className="min-w-0 self-center flex-1 inline-flex items-center justify-start gap-1 rounded-md border px-2 py-1"
+            style={{ borderColor: 'var(--border-default)', background: 'var(--surface-secondary)' }}
+            onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenuPos({ left: r.left, top: r.bottom + 8 }); setMenuOpen(!menuOpen) }}
+          >
+            <span className="flex shrink-0 items-center gap-1">
+              {splits.slice(0, 4).map(s => (
+                <span key={s.id} className="h-3 w-3 rounded-full" style={{ backgroundColor: s.color }} />
+              ))}
+            </span>
+            {splits.length > 4 ? <span className="ml-1 text-[10px] font-semibold" style={{ color: 'var(--text-secondary)' }}>+{splits.length - 4}</span> : null}
+          </button>
+        ) : null}
+        {!splits.length && members && members.length > 0 ? (
+          <span
+            className="h-5 w-5 shrink-0 self-center flex items-center justify-center rounded-full border border-dashed cursor-pointer hover:border-blue-500 hover:text-blue-500 text-sm leading-none"
+            style={{ borderColor: 'var(--border-default)', color: 'var(--text-muted)' }}
+            onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenuPos({ left: r.left, top: r.bottom + 8 }); setMenuOpen(true) }}
+          >+</span>
+        ) : null}
+        {menuOpen && members && createPortal(
+          <div
+            className="fixed z-[1200] min-w-[200px] rounded-lg p-2 shadow-lg app-elevated"
+            style={{ left: Math.min(menuPos.left, window.innerWidth - 220), top: Math.min(menuPos.top, window.innerHeight - 150) }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Split with</div>
+            <div className="space-y-0.5">
+              {members.map(m => {
+                const active = splits.some(s => s.id === m.id)
+                return (
+                  <button
+                    key={m.id}
+                    className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs ${active ? 'app-selected' : 'app-hover'}`}
+                    onClick={() => void toggleMember(m.id)}
+                  >
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: m.color }} />
+                    <span className="truncate flex-1 text-left">{m.name}</span>
+                    {active ? <span className="text-blue-500">✓</span> : null}
+                  </button>
+                )
+              })}
+            </div>
+            <button className="mt-1 w-full text-center text-[10px] text-slate-400 hover:text-slate-200" onClick={() => setMenuOpen(false)}>Close</button>
+          </div>,
+          document.body,
+        )}
+      </div>
+    )
+  }, [projectId, members])
+
   const colDefs = useMemo<ColDef[]>(() => [
     {
       field: 'effective_date',
@@ -456,7 +653,8 @@ export function Ledger({
     { field: 'merchant_clean', headerName: 'Merchant', flex: 2,
       tooltipValueGetter: (p: any) => p.data.merchant_clean || p.data.merchant_raw,
       valueGetter: (p: any) => p.data.merchant_clean || p.data.merchant_raw,
-      cellRenderer: MerchantCell },
+      cellRenderer: projectId ? ProjectMerchantCell : MerchantCell,
+      ...(projectId ? { cellStyle: { lineHeight: '1.2', paddingTop: '2px', paddingBottom: '2px' }, autoHeight: true } : {}) },
     { field: 'category', headerName: 'Category', flex: 1,
       cellRenderer: EditableCategoryCell,
       valueGetter: (p: any) => (p.data.category || 'Uncategorized').split('/')[0] },
@@ -481,9 +679,22 @@ export function Ledger({
       },
       valueFormatter: () => '',
     },
+    ...(projectId && members && members.length > 0 ? [{
+      field: 'splits',
+      headerName: 'Split',
+      width: 150,
+      maxWidth: 180,
+      cellRenderer: SplitCell,
+      filter: false,
+      sortable: false,
+      headerComponent: SplitFilterHeader,
+      headerComponentParams: { members, onFilterChange: (ids: string[]) => setSplitFilterIds(ids) },
+      cellStyle: { overflow: 'visible', display: 'flex', alignItems: 'center', paddingTop: '0', paddingBottom: '0' },
+      valueFormatter: () => '',
+    }] : []),
     { field: 'amount', headerName: 'Amount', width: 130, type: 'rightAligned',
       cellRenderer: AmountCell, filter: false, sortingOrder: ['asc', 'desc', null] },
-  ], [EditableCategoryCell, EditableSubcategoryCell, ProjectCell])
+  ], [EditableCategoryCell, EditableSubcategoryCell, ProjectCell, ProjectMerchantCell, SplitCell, SplitFilterHeader, projectId, members, setSplitFilterIds])
 
   const defaultColDef = useMemo(() => ({
     sortable: true,
@@ -501,10 +712,16 @@ export function Ledger({
     }
     if (catFilter) result = result.filter(t => (t.category || 'Uncategorized').split('/')[0] === catFilter)
     if (acctFilter) result = result.filter(t => t.source === acctFilter)
+    if (splitFilterIds.length > 0) {
+      result = result.filter(t => {
+        const txnSplitIds = new Set((t.splits || []).map(s => s.id))
+        return splitFilterIds.every(id => txnSplitIds.has(id)) && txnSplitIds.size === splitFilterIds.length
+      })
+    }
     return result
-  }, [transactions, globalSearch, catFilter, acctFilter])
+  }, [transactions, globalSearch, catFilter, acctFilter, splitFilterIds])
 
-  const hasFilters = globalSearch || catFilter || acctFilter
+  const hasFilters = globalSearch || catFilter || acctFilter || splitFilterIds.length > 0
 
   return (
     <div>
@@ -513,7 +730,7 @@ export function Ledger({
           <h2 className="font-semibold">{title} ({filtered.length})</h2>
           {helperText ? <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{helperText}</span> : null}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
             className="app-input px-2 py-1.5 text-xs rounded">
             <option value="">All Categories</option>
@@ -528,7 +745,7 @@ export function Ledger({
             onChange={e => setGlobalSearch(e.target.value)}
             className="app-input px-2 py-1.5 text-xs rounded w-48" />
           {hasFilters && (
-            <button onClick={() => { setGlobalSearch(''); setCatFilter(''); setAcctFilter('') }}
+            <button onClick={() => { setGlobalSearch(''); setCatFilter(''); setAcctFilter(''); setSplitFilterIds([]) }}
               className="text-xs text-blue-500 hover:underline">Clear</button>
           )}
         </div>

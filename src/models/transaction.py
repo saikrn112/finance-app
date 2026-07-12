@@ -272,6 +272,31 @@ class TransactionProject(Base):
 
     transaction_id = Column(String, ForeignKey("transactions.id"), primary_key=True)
     project_id = Column(String, ForeignKey("projects.id"), primary_key=True)
+    description = Column(String)
+
+
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    name = Column(String, nullable=False, unique=True)
+    color = Column(String, default="#6366f1")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+
+    project_id = Column(String, ForeignKey("projects.id"), primary_key=True)
+    contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
+
+
+class TransactionProjectSplit(Base):
+    __tablename__ = "transaction_project_splits"
+
+    transaction_id = Column(String, primary_key=True)
+    project_id = Column(String, primary_key=True)
+    contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
 
 
 class Payslip(Base):

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, Trash2 } from 'lucide-react'
-import { api, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
+import { api, type Contact, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
 import { GETTING_STARTED_DASHBOARD_KEY, GETTING_STARTED_DONE_KEY } from './GettingStartedGuide'
 import { PlaidLinkButton } from './PlaidLink'
 import { SUPPORTED_CURRENCIES } from './currency'
@@ -25,7 +25,20 @@ interface SettingsData {
     drive_folder_id?: string | null
     google_drive_ready: boolean
   }
-  accounts: Array<{ id: string; source: string; status: string; last_sync: string | null }>
+  accounts: Array<{
+    id: string
+    plaid_item_id?: string | null
+    source: string
+    status: string
+    last_sync: string | null
+    last_sync_error?: {
+      type?: string | null
+      message?: string | null
+      code?: string | null
+      display_message?: string | null
+      documentation_url?: string | null
+    } | null
+  }>
 }
 
 export function SettingsPanel({ open, onClose, onDataChange }: { 
@@ -194,6 +207,14 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
     try {
       const job = await api.startGoogleDriveBackupJob()
       setBackupJob(job)
+    } catch (err: any) {
+      if (err?.status === 401) {
+        if (confirm('Google Drive session expired. Reconnect now?')) {
+          handleConnectGoogleDrive()
+        }
+      } else {
+        setBackupJob({ job_id: '', status: 'error', error: err?.message || 'Backup failed', stage: '', progress: 0, message: '' })
+      }
     } finally {
       if (!backupRunning) {
         setVaultBusy(false)
@@ -339,6 +360,9 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
                 </div>
                 <p className={`mt-2 text-xs ${backupJob.status === 'error' ? 'text-rose-500' : 'text-gray-500 dark:text-gray-400'}`}>
                   {backupJob.error || backupJob.message}
+                  {backupJob.status === 'error' && backupJob.error?.includes('expired') ? (
+                    <button onClick={handleConnectGoogleDrive} className="ml-2 underline text-blue-500">Reconnect</button>
+                  ) : null}
                 </p>
               </div>
             ) : null}
@@ -429,17 +453,29 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           {data?.accounts.length ? (
             <ul className="space-y-2">
               {data.accounts.map((a) => (
-                <li key={a.id} className="flex justify-between items-center p-2 bg-[var(--app-surface-2)] dark:bg-gray-700 rounded">
-                  <span className="text-sm">
-                    {a.source} ({a.status})
-                    {a.last_sync ? <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">last linked {new Date(a.last_sync).toLocaleDateString('en-US')}</span> : null}
-                  </span>
-                  <button 
-                    onClick={() => handleDisconnect(a.id)}
-                    className="text-red-500 hover:text-red-600 p-1"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                <li key={a.id} className="flex justify-between items-center gap-3 p-2 bg-[var(--app-surface-2)] dark:bg-gray-700 rounded">
+                  <div className="min-w-0 text-sm">
+                    <div>
+                      {a.source} ({a.status})
+                      {a.last_sync ? <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">last sync {new Date(a.last_sync).toLocaleDateString('en-US')}</span> : null}
+                    </div>
+                    {a.last_sync_error ? (
+                      <div className="mt-1 text-xs text-rose-500 dark:text-rose-400">
+                        {a.last_sync_error.code || 'Sync error'}: {a.last_sync_error.display_message || a.last_sync_error.message}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {a.last_sync_error ? (
+                      <PlaidLinkButton onSuccess={refreshSettings} accountId={a.id} label="Reconnect" />
+                    ) : null}
+                    <button 
+                      onClick={() => handleDisconnect(a.id)}
+                      className="text-red-500 hover:text-red-600 p-1"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -473,6 +509,9 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
             )}
           </div>
         </div>
+
+        {/* Members */}
+        <ContactsManager />
 
         {/* Danger Zone */}
         <div className="border-t dark:border-gray-700 pt-4">
@@ -558,6 +597,97 @@ function DisplayCurrencySelector() {
       <span className="text-xs text-gray-500 dark:text-gray-400">
         Analytics totals will be shown in {displayCurrency}
       </span>
+    </div>
+  )
+}
+
+
+function ContactsManager() {
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editColor, setEditColor] = useState('')
+  const [deleting, setDeleting] = useState<{ id: string; splits: number; projects: number } | null>(null)
+
+  useEffect(() => {
+    api.getContacts().then(setContacts).catch(() => {})
+  }, [])
+
+  const startEdit = (c: Contact) => {
+    setEditingId(c.id)
+    setEditName(c.name)
+    setEditColor(c.color)
+  }
+
+  const saveEdit = async () => {
+    if (!editingId || !editName.trim()) return
+    try {
+      const updated = await api.updateContact(editingId, { name: editName.trim(), color: editColor })
+      setContacts(prev => prev.map(c => c.id === editingId ? updated : c))
+      setEditingId(null)
+    } catch { /* dupe name */ }
+  }
+
+  const confirmDelete = async (c: Contact) => {
+    const usage = await api.getContactUsage(c.id)
+    setDeleting({ id: c.id, splits: usage.split_count, projects: usage.project_count })
+  }
+
+  const executeDelete = async () => {
+    if (!deleting) return
+    try {
+      await api.deleteContact(deleting.id)
+      setContacts(prev => prev.filter(c => c.id !== deleting.id))
+    } catch (e) {
+      console.error('Failed to delete contact:', e)
+    }
+    setDeleting(null)
+  }
+
+  if (contacts.length === 0) return null
+
+  return (
+    <div className="border-t dark:border-gray-700 pt-4">
+      <h3 className="font-medium mb-3">Members (Contacts)</h3>
+      <div className="space-y-2">
+        {contacts.map(c => (
+          <div key={c.id} className="flex items-center gap-2 text-sm">
+            {editingId === c.id ? (
+              <>
+                <input type="color" value={editColor} onChange={e => setEditColor(e.target.value)} className="w-5 h-5 rounded cursor-pointer" />
+                <input
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
+                  className="app-input px-2 py-1 text-sm rounded flex-1"
+                  onKeyDown={e => { if (e.key === 'Enter') void saveEdit(); if (e.key === 'Escape') setEditingId(null) }}
+                  autoFocus
+                />
+                <button onClick={() => void saveEdit()} className="text-xs text-blue-500 hover:underline">Save</button>
+                <button onClick={() => setEditingId(null)} className="text-xs text-slate-400 hover:underline">Cancel</button>
+              </>
+            ) : (
+              <>
+                <span className="w-3 h-3 rounded-full" style={{ backgroundColor: c.color }} />
+                <span className="flex-1">{c.name}</span>
+                <button onClick={() => startEdit(c)} className="text-xs text-blue-500 hover:underline">Edit</button>
+                <button onClick={() => void confirmDelete(c)} className="text-xs text-red-400 hover:underline">Delete</button>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      {deleting && (
+        <div className="mt-3 rounded border border-red-400/50 bg-red-500/10 p-3 text-sm">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-red-400">⚠</span>
+            <span>Deleting this member will affect <strong>{deleting.splits}</strong> transaction split(s) across <strong>{deleting.projects}</strong> project(s).</span>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => void executeDelete()} className="px-2 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600">Delete anyway</button>
+            <button onClick={() => setDeleting(null)} className="px-2 py-1 text-xs app-btn-secondary rounded">Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

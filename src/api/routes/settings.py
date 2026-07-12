@@ -67,6 +67,13 @@ _restore_jobs: dict[str, dict] = {}
 _restore_jobs_lock = threading.Lock()
 
 
+def _plaid_institution_key(log: SyncLog) -> str:
+    institution = ((log.extra_data or {}).get("institution_name") or "").strip()
+    if institution:
+        return institution.casefold()
+    return (log.plaid_item_id or log.id or "unknown").casefold()
+
+
 def _connected_institutions(db: Session) -> list[SyncLog]:
     logs = (
         db.query(SyncLog)
@@ -77,8 +84,7 @@ def _connected_institutions(db: Session) -> list[SyncLog]:
 
     grouped: dict[str, SyncLog] = {}
     for log in logs:
-        institution = (log.extra_data or {}).get("institution_name", "Unknown")
-        key = log.plaid_item_id or institution
+        key = _plaid_institution_key(log)
         grouped.setdefault(key, log)
     return list(grouped.values())
 
@@ -319,12 +325,14 @@ def get_settings(db: Session = Depends(get_db)):
         "accounts": [
             {
                 "id": account.id,
+                "plaid_item_id": account.plaid_item_id,
                 "source": (account.extra_data or {}).get("institution_name", "Unknown"),
                 "sync_type": account.sync_type,
                 "status": account.status,
-                "last_sync": account.created_at.isoformat() if account.created_at else None,
+                "last_sync": ((account.extra_data or {}).get("last_sync_at") or (account.created_at.isoformat() if account.created_at else None)),
                 "records_synced": int(account.record_count) if account.record_count else 0,
                 "institution_name": (account.extra_data or {}).get("institution_name", ""),
+                "last_sync_error": (account.extra_data or {}).get("last_sync_error"),
             }
             for account in accounts
         ],
@@ -337,7 +345,19 @@ def disconnect_account(account_id: str, db: Session = Depends(get_db)):
     log = db.query(SyncLog).filter(SyncLog.id == account_id).first()
     if log:
         if log.source == "plaid" and log.plaid_item_id:
-            db.query(SyncLog).filter(SyncLog.plaid_item_id == log.plaid_item_id).delete()
+            institution_key = _plaid_institution_key(log)
+            linked_logs = db.query(SyncLog).filter(
+                SyncLog.source == "plaid",
+                SyncLog.status == "connected",
+            ).all()
+            delete_ids = [
+                item.id for item in linked_logs
+                if _plaid_institution_key(item) == institution_key
+            ]
+            if delete_ids:
+                db.query(SyncLog).filter(SyncLog.id.in_(delete_ids)).delete(synchronize_session=False)
+            else:
+                db.query(SyncLog).filter(SyncLog.plaid_item_id == log.plaid_item_id).delete()
         else:
             db.delete(log)
         db.commit()

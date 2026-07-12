@@ -116,9 +116,14 @@ def refresh_google_token(refresh_token: str) -> dict[str, Any]:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    response = _json_request(request)
+    try:
+        response = _json_request(request)
+    except HTTPException as exc:
+        if "invalid_grant" in (exc.detail or ""):
+            raise HTTPException(status_code=401, detail="Google Drive session expired. Please reconnect.") from exc
+        raise
     if not response.get("access_token"):
-        raise HTTPException(status_code=500, detail="Google token refresh failed")
+        raise HTTPException(status_code=401, detail="Google Drive session expired. Please reconnect.")
     return response
 
 
@@ -400,7 +405,7 @@ def ensure_fresh_google_access_token(extra_data: dict[str, Any]) -> tuple[str, d
         except Exception:
             pass
     if not refresh_token:
-        raise HTTPException(status_code=400, detail="Google Drive needs to be reconnected")
+        raise HTTPException(status_code=401, detail="Google Drive session expired. Please reconnect.")
     refreshed = refresh_google_token(refresh_token)
     updated = dict(extra_data)
     updated["access_token"] = refreshed["access_token"]

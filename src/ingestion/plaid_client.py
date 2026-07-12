@@ -34,17 +34,22 @@ def get_plaid_client():
     return plaid_api.PlaidApi(plaid.ApiClient(configuration))
 
 
-def create_link_token(user_id: str = "user-1", products: list[str] = None) -> str:
+def create_link_token(user_id: str = "user-1", products: list[str] = None, access_token: str | None = None) -> str:
     """Create a link token for Plaid Link initialization."""
     client = get_plaid_client()
     
     prods = [Products(p) for p in (products or ["transactions"])]
-    request = LinkTokenCreateRequest(
+    request_kwargs = dict(
         products=prods,
         client_name="Finance App",
         country_codes=[CountryCode("US")],
         language="en",
         user=LinkTokenCreateRequestUser(client_user_id=user_id),
+    )
+    if access_token:
+        request_kwargs["access_token"] = access_token
+    request = LinkTokenCreateRequest(
+        **request_kwargs,
     )
     response = client.link_token_create(request)
     return response.link_token

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import tempfile
 import os
+import json
 
 from sqlalchemy import and_, func, literal
 
@@ -50,6 +51,15 @@ def _get_retirement_source_label() -> str:
         if p.domain == "retirement":
             return p.label
     return "Retirement"
+
+
+def _plaid_institution_key(log: SyncLog) -> str:
+    institution = ((log.extra_data or {}).get("institution_name") or "").strip()
+    if institution:
+        return institution.casefold()
+    return (log.plaid_item_id or log.id or "unknown").casefold()
+
+
 def _connected_plaid_logs(db: Session) -> list[SyncLog]:
     logs = (
         db.query(SyncLog)
@@ -59,10 +69,30 @@ def _connected_plaid_logs(db: Session) -> list[SyncLog]:
     )
     grouped: dict[str, SyncLog] = {}
     for log in logs:
-        institution = (log.extra_data or {}).get("institution_name", "Unknown")
-        key = log.plaid_item_id or institution
+        key = _plaid_institution_key(log)
         grouped.setdefault(key, log)
     return list(grouped.values())
+
+
+def _plaid_sync_error_payload(exc: Exception) -> dict:
+    payload = {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "code": None,
+        "display_message": None,
+        "documentation_url": None,
+    }
+    body = getattr(exc, "body", None)
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                payload["code"] = parsed.get("error_code")
+                payload["display_message"] = parsed.get("display_message") or parsed.get("error_message")
+                payload["documentation_url"] = parsed.get("documentation_url")
+        except Exception:
+            pass
+    return payload
 
 
 def _transaction_balance_map(db: Session, target_currency: str | None = None) -> dict[str, float]:
@@ -732,34 +762,60 @@ async def upload_csv(
 
 
 @router.post("/plaid/link-token")
-def get_link_token(products: str = "transactions"):
+def get_link_token(products: str = "transactions", account_id: str | None = None, db: Session = Depends(get_db)):
     """Get Plaid Link token for frontend. Pass products=investments for investment accounts."""
     if settings.is_demo:
         return {"link_token": f"demo-link-{products.replace(',', '-')}"}
     try:
-        token = create_link_token(products=products.split(","))
+        access_token = None
+        if account_id:
+            log = db.query(SyncLog).filter(SyncLog.id == account_id, SyncLog.source == "plaid", SyncLog.status == "connected").first()
+            if not log:
+                raise HTTPException(status_code=404, detail="Plaid connection not found")
+            access_token = (log.extra_data or {}).get("access_token")
+            if not access_token:
+                raise HTTPException(status_code=400, detail="Plaid access token missing for reconnect")
+        token = create_link_token(products=products.split(","), access_token=access_token)
         return {"link_token": token}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/plaid/exchange")
-def exchange_token(public_token: str, institution_name: str = "", db: Session = Depends(get_db)):
+def exchange_token(public_token: str, institution_name: str = "", account_id: str | None = None, db: Session = Depends(get_db)):
     """Exchange public token and store access token."""
     if settings.is_demo:
         return {"status": "connected", "item_id": f"demo-{institution_name or 'plaid'}"}
     try:
         access_token, item_id, _ = exchange_public_token(public_token)
-        
-        # Store in sync_log
-        log = SyncLog(
-            source="plaid",
-            sync_type="plaid",
-            plaid_item_id=item_id,
-            status="connected",
-            extra_data={"access_token": access_token, "institution_name": institution_name},
-        )
-        db.add(log)
+
+        existing_log = None
+        if account_id:
+            existing_log = db.query(SyncLog).filter(SyncLog.id == account_id, SyncLog.source == "plaid").first()
+        if not existing_log and item_id:
+            existing_log = db.query(SyncLog).filter(SyncLog.plaid_item_id == item_id, SyncLog.source == "plaid").order_by(SyncLog.created_at.desc()).first()
+
+        if existing_log:
+            extra = dict(existing_log.extra_data or {})
+            extra["access_token"] = access_token
+            if institution_name:
+                extra["institution_name"] = institution_name
+            extra.pop("last_sync_error", None)
+            existing_log.extra_data = extra
+            existing_log.plaid_item_id = item_id
+            existing_log.status = "connected"
+            log = existing_log
+        else:
+            log = SyncLog(
+                source="plaid",
+                sync_type="plaid",
+                plaid_item_id=item_id,
+                status="connected",
+                extra_data={"access_token": access_token, "institution_name": institution_name},
+            )
+            db.add(log)
         record_plaid_usage(
             db,
             endpoint="item_public_token_exchange",
@@ -769,6 +825,8 @@ def exchange_token(public_token: str, institution_name: str = "", db: Session = 
         db.commit()
         
         return {"status": "connected", "item_id": item_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -839,12 +897,22 @@ def sync_plaid(db: Session = Depends(get_db)):
           extra_data = dict(log.extra_data or {})
           extra_data["last_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_counts"] = account_counts
+          extra_data.pop("last_sync_error", None)
           log.extra_data = extra_data
           log.plaid_cursor = cursor
           log.record_count = (log.record_count or 0) + account_counts["added"]
           log.status = "connected"
           account_results.append({"source": institution, **account_counts})
-        except Exception:
+        except Exception as exc:
+          extra_data = dict(log.extra_data or {})
+          extra_data["last_sync_error"] = _plaid_sync_error_payload(exc)
+          log.extra_data = extra_data
+          account_results.append({
+              "source": institution,
+              "status": "error",
+              "error": extra_data["last_sync_error"],
+              **account_counts,
+          })
           continue  # skip accounts that error (e.g. consent required)
     
     snapshots = _refresh_sidebar_snapshots(db, logs=logs)

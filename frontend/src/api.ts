@@ -89,6 +89,8 @@ export interface Transaction {
   is_recurring: boolean
   tags: string[]
   projects: { id: string; name: string; color: string }[]
+  description?: string
+  splits?: { id: string; name: string; color: string }[]
 }
 
 export interface TransactionCategoryOption {
@@ -305,9 +307,16 @@ export interface ProjectCategoryBreakdown {
   subcategories: { name: string; total: number }[]
 }
 
+export interface Contact {
+  id: string
+  name: string
+  color: string
+}
+
 export interface ProjectDetail extends ProjectSummary {
   categories: ProjectCategoryBreakdown[]
   transactions: Transaction[]
+  members: Contact[]
 }
 
 export interface NetWorthHistoryPoint {
@@ -446,9 +455,17 @@ export interface SettingsResponse {
   vault: VaultStatus
   accounts: Array<{
     id: string
+    plaid_item_id?: string | null
     source: string
     status: string
     last_sync: string | null
+    last_sync_error?: {
+      type?: string | null
+      message?: string | null
+      code?: string | null
+      display_message?: string | null
+      documentation_url?: string | null
+    } | null
   }>
 }
 
@@ -568,9 +585,9 @@ export const api = {
   updateTransaction: (id: string, data: Partial<Pick<Transaction, 'category' | 'merchant_clean' | 'is_recurring' | 'tags'>>, currency = 'USD') =>
     request<Transaction>(`/transactions/${id}?currency=${encodeURIComponent(currency)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   // Plaid
-  getLinkToken: (products?: string) => request<{ link_token?: string }>(`/sync/plaid/link-token${products ? `?products=${products}` : ''}`, { method: 'POST' }),
-  exchangeToken: (public_token: string, institution_name: string = "") =>
-    request(`/sync/plaid/exchange?public_token=${public_token}&institution_name=${encodeURIComponent(institution_name)}`, { method: 'POST' }),
+  getLinkToken: (products?: string, accountId?: string) => request<{ link_token?: string }>(`/sync/plaid/link-token?${new URLSearchParams({ ...(products ? { products } : {}), ...(accountId ? { account_id: accountId } : {}) }).toString()}`, { method: 'POST' }),
+  exchangeToken: (public_token: string, institution_name: string = "", accountId?: string) =>
+    request(`/sync/plaid/exchange?${new URLSearchParams({ public_token, institution_name, ...(accountId ? { account_id: accountId } : {}) }).toString()}`, { method: 'POST' }),
   syncPlaid: () => request(`/sync/plaid/sync`, { method: 'POST' }),
   getSyncStatus: () => fetchJson<{ accounts: Array<{ source: string; status: string; last_sync: string | null }> }>(`/sync/status`),
   // Imports
@@ -659,4 +676,15 @@ export const api = {
   deleteProject: (id: string) => request<{ ok: true }>(`/projects/${id}`, { method: 'DELETE' }),
   addToProject: (projectId: string, txnIds: string[]) => request<{ added: number }>(`/projects/${projectId}/transactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transaction_ids: txnIds }) }),
   removeFromProject: (projectId: string, txnId: string) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}`, { method: 'DELETE' }),
+  updateTransactionProject: (projectId: string, txnId: string, data: { description?: string }) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  updateTransactionSplits: (projectId: string, txnId: string, contactIds: string[]) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}/splits`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contact_ids: contactIds }) }),
+  // Project members
+  addProjectMembers: (projectId: string, contactIds: string[]) => request<{ added: number }>(`/projects/${projectId}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contact_ids: contactIds }) }),
+  removeProjectMember: (projectId: string, contactId: string) => request<{ ok: true }>(`/projects/${projectId}/members/${contactId}`, { method: 'DELETE' }),
+  // Contacts
+  getContacts: () => fetchJson<Contact[]>(`/contacts/`),
+  createContact: (name: string, color?: string) => request<Contact>(`/contacts/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, color }) }),
+  updateContact: (id: string, data: { name?: string; color?: string }) => request<Contact>(`/contacts/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  getContactUsage: (id: string) => fetchJson<{ split_count: number; project_count: number }>(`/contacts/${id}/usage`),
+  deleteContact: (id: string) => request<{ ok: true }>(`/contacts/${id}`, { method: 'DELETE' }),
 }

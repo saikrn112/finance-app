@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useProjects, useProject } from './hooks'
-import { api, ApiError, type ProjectDetail as ProjectDetailType, type ProjectSummary } from './api'
+import { api, ApiError, type Contact, type Transaction, type ProjectDetail as ProjectDetailType, type ProjectSummary } from './api'
 import { useFilterStore } from './store'
 import { formatCount, formatCurrency } from './privacy'
 import { Ledger } from './Ledger'
 import { getCategoryColor } from './colors'
 
 const COLORS = ['#22c55e', '#3b82f6', '#eab308', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4']
+const MEMBER_COLORS = ['#22c55e', '#3b82f6', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f43f5e', '#a855f7', '#84cc16', '#0ea5e9']
+
+function pickRandomColor(usedColors: string[]): string {
+  const available = MEMBER_COLORS.filter(c => !usedColors.includes(c))
+  const pool = available.length > 0 ? available : MEMBER_COLORS
+  return pool[Math.floor(Math.random() * pool.length)]
+}
 
 function formatProjectDate(value: string | null | undefined) {
   if (!value) return null
@@ -48,11 +55,14 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
     return 'Something went wrong. Try again.'
   }
 
-  const handleCreate = async (data: Partial<ProjectSummary>) => {
+  const handleCreate = async (data: Partial<ProjectSummary>, memberIds: string[] = []) => {
     setBusy('create')
     setError(null)
     try {
       const created = await api.createProject(data)
+      if (memberIds.length > 0) {
+        await api.addProjectMembers(created.id, memberIds)
+      }
       setSelectedId(created.id)
       setCreating(false)
       await Promise.all([
@@ -333,7 +343,13 @@ function ProjectDetail({
           </div>
         )}
         {saveError ? <div className="mt-3 text-xs" style={{ color: 'var(--color-negative)' }}>{saveError}</div> : null}
+        <div className="mt-4 border-t border-slate-200/30 pt-3">
+          <MembersSection projectId={p.id} members={p.members || []} />
+        </div>
       </div>
+
+      {/* Member-wise split summary */}
+      <MemberSplitSummary transactions={p.transactions} members={p.members || []} fmt={fmt} />
 
       {/* Stats */}
       <div className={`grid gap-3 mb-5 ${p.budget ? 'grid-cols-5' : 'grid-cols-3'}`}>
@@ -410,6 +426,8 @@ function ProjectDetail({
           title="Transactions"
           useGlobalFilters={false}
           helperText="Click Category/Sub to edit. Use + in Projects to reassign."
+          projectId={p.id}
+          members={p.members || []}
         />
       </div>
 
@@ -431,13 +449,48 @@ function CreateForm({
   onCancel,
   saving,
 }: {
-  onSubmit: (data: Partial<ProjectSummary>) => void
+  onSubmit: (data: Partial<ProjectSummary>, memberIds: string[]) => void
   onCancel: () => void
   saving: boolean
 }) {
   const [name, setName] = useState('')
   const [color, setColor] = useState(COLORS[0])
   const [budget, setBudget] = useState('')
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set())
+  const [newMemberName, setNewMemberName] = useState('')
+  const [newMemberColor, setNewMemberColor] = useState(() => pickRandomColor([]))
+  const [showColorPicker, setShowColorPicker] = useState(false)
+
+  useEffect(() => {
+    api.getContacts().then(list => {
+      setContacts(list)
+      const ore = list.find(c => c.name === 'ore')
+      if (ore) setSelectedMembers(new Set([ore.id]))
+      setNewMemberColor(pickRandomColor(list.map(c => c.color)))
+    }).catch(() => {})
+  }, [])
+
+  const toggleMember = (id: string) => {
+    setSelectedMembers(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const addNewMember = async () => {
+    if (!newMemberName.trim()) return
+    try {
+      const c = await api.createContact(newMemberName.trim(), newMemberColor)
+      setContacts(prev => [...prev, c])
+      setSelectedMembers(prev => new Set([...prev, c.id]))
+      setNewMemberName('')
+      setNewMemberColor(pickRandomColor([...contacts.map(ct => ct.color), c.color]))
+      setShowColorPicker(false)
+    } catch { /* dupe */ }
+  }
 
   return (
     <div className="app-surface rounded-lg p-3 space-y-2">
@@ -452,10 +505,175 @@ function CreateForm({
       </div>
       <input value={budget} onChange={e => setBudget(e.target.value)} placeholder="Budget (optional)" type="number"
         className="app-input w-full text-sm px-2 py-1.5 rounded" />
+      <div>
+        <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">Members</div>
+        <div className="flex flex-wrap gap-1.5 mb-1.5">
+          {contacts.map(c => (
+            <button key={c.id} type="button" onClick={() => toggleMember(c.id)}
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] border ${selectedMembers.has(c.id) ? 'border-blue-500 bg-blue-500/10' : 'border-slate-500/30 opacity-50'}`}
+              style={{ color: c.color }}
+            >
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: c.color }} />
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1">
+          <input value={newMemberName} onChange={e => setNewMemberName(e.target.value)} placeholder="+ New person"
+            className="app-input px-2 py-1 text-[11px] rounded w-24"
+            onKeyDown={e => { if (e.key === 'Enter') void addNewMember() }} />
+          {newMemberName && (
+            <>
+              <span className="w-4 h-4 rounded-full cursor-pointer border border-slate-500/30" style={{ backgroundColor: newMemberColor }} onClick={() => setShowColorPicker(!showColorPicker)} title="Click to change color" />
+              {showColorPicker && <input type="color" value={newMemberColor} onChange={e => setNewMemberColor(e.target.value)} className="w-5 h-5 rounded cursor-pointer" />}
+              <button onClick={() => void addNewMember()} className="text-[11px] text-blue-500">Add</button>
+            </>
+          )}
+        </div>
+      </div>
       <div className="flex gap-2">
-        <button onClick={() => name.trim() && onSubmit({ name: name.trim(), color, budget: budget ? parseFloat(budget) : undefined })}
+        <button onClick={() => name.trim() && onSubmit({ name: name.trim(), color, budget: budget ? parseFloat(budget) : undefined }, Array.from(selectedMembers))}
           className="app-btn-primary text-xs disabled:opacity-60" disabled={!name.trim() || saving}>{saving ? 'Creating…' : 'Create'}</button>
         <button onClick={onCancel} disabled={saving} className="app-btn-secondary text-xs disabled:opacity-60">Cancel</button>
+      </div>
+    </div>
+  )
+}
+
+
+function MembersSection({ projectId, members }: { projectId: string; members: Contact[] }) {
+  const qc = useQueryClient()
+  const [contacts, setContacts] = useState<Contact[]>([])
+  const [adding, setAdding] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newColor, setNewColor] = useState(() => pickRandomColor([]))
+  const [showColorPicker, setShowColorPicker] = useState(false)
+
+  useEffect(() => {
+    api.getContacts().then(list => {
+      setContacts(list)
+      setNewColor(pickRandomColor(list.map(c => c.color)))
+    }).catch(() => {})
+  }, [])
+
+  const unassigned = contacts.filter(c => !members.some(m => m.id === c.id))
+
+  const addMember = async (contactId: string) => {
+    await api.addProjectMembers(projectId, [contactId])
+    await qc.invalidateQueries({ queryKey: ['project', projectId] })
+  }
+
+  const removeMember = async (contactId: string) => {
+    try {
+      await api.removeProjectMember(projectId, contactId)
+      await qc.invalidateQueries({ queryKey: ['project', projectId] })
+    } catch (e) {
+      console.error('Failed to remove member:', e)
+    }
+  }
+
+  const createAndAdd = async () => {
+    if (!newName.trim()) return
+    try {
+      const contact = await api.createContact(newName.trim(), newColor)
+      setContacts(prev => [...prev, contact])
+      await api.addProjectMembers(projectId, [contact.id])
+      await qc.invalidateQueries({ queryKey: ['project', projectId] })
+      setNewName('')
+      setNewColor(pickRandomColor([...contacts.map(c => c.color), contact.color]))
+      setShowColorPicker(false)
+      setAdding(false)
+    } catch { /* ignore dupe */ }
+  }
+
+  return (
+    <div className="app-surface rounded-lg p-4 mb-5">
+      <h3 className="text-sm font-semibold mb-3">Members (Split)</h3>
+      <div className="flex flex-wrap gap-2 mb-3">
+        {members.map(m => (
+          <span key={m.id} className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs" style={{ backgroundColor: `${m.color}22`, color: m.color, border: `1px solid ${m.color}44` }}>
+            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: m.color }} />
+            {m.name}
+            <button onClick={() => void removeMember(m.id)} className="ml-0.5 hover:opacity-70">×</button>
+          </span>
+        ))}
+      </div>
+      <div className="flex items-center gap-2">
+        {unassigned.length > 0 && (
+          <select
+            className="app-input px-2 py-1.5 text-xs rounded"
+            value=""
+            onChange={e => { if (e.target.value) void addMember(e.target.value) }}
+          >
+            <option value="">Add existing...</option>
+            {unassigned.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        )}
+        {adding ? (
+          <div className="flex items-center gap-1">
+            <input
+              autoFocus
+              className="app-input px-2 py-1.5 text-xs rounded w-28"
+              placeholder="Name"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') void createAndAdd() }}
+            />
+            <span className="w-5 h-5 rounded-full cursor-pointer border border-slate-500/30" style={{ backgroundColor: newColor }} onClick={() => setShowColorPicker(!showColorPicker)} title="Click to change color" />
+            {showColorPicker && <input type="color" value={newColor} onChange={e => setNewColor(e.target.value)} className="w-5 h-5 rounded cursor-pointer" />}
+            <button onClick={() => void createAndAdd()} className="text-xs text-blue-500 hover:underline">Add</button>
+            <button onClick={() => { setAdding(false); setShowColorPicker(false) }} className="text-xs text-slate-400 hover:underline">Cancel</button>
+          </div>
+        ) : (
+          <button onClick={() => setAdding(true)} className="text-xs text-blue-500 hover:underline">+ New person</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+function MemberSplitSummary({
+  transactions,
+  members,
+  fmt,
+}: {
+  transactions: Transaction[]
+  members: Contact[]
+  fmt: (n: number) => string
+}) {
+  if (!members || members.length === 0) return null
+
+  const totals = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const m of members) map.set(m.id, 0)
+    for (const txn of transactions) {
+      if (txn.amount >= 0) continue
+      const splits = txn.splits || []
+      if (splits.length === 0) continue
+      const perPerson = Math.abs(txn.amount) / splits.length
+      for (const s of splits) {
+        map.set(s.id, (map.get(s.id) || 0) + perPerson)
+      }
+    }
+    return members.map(m => ({ ...m, total: map.get(m.id) || 0 })).filter(m => m.total > 0)
+  }, [transactions, members])
+
+  if (totals.length === 0) return null
+
+  return (
+    <div className="app-surface rounded-lg p-4 mb-5">
+      <h3 className="text-sm font-semibold mb-3">Split Summary</h3>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        {totals.map(m => (
+          <div key={m.id} className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: m.color }} />
+            <div className="min-w-0">
+              <div className="text-xs truncate">{m.name}</div>
+              <div className="text-sm font-semibold">{fmt(m.total)}</div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )
