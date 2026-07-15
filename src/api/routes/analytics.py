@@ -549,7 +549,7 @@ def _compute_net_worth(
 
     for row in history_rows:
         raw_key = row.source_key or row.source
-        source_key = classify_source(raw_key)
+        source_key = classify_source(raw_key) or raw_key
         event_day = row.date
         group = _normalize_history_group(row.source, row.account_group)
         row_currency = getattr(row, "currency", "USD") or "USD"

@@ -16,19 +16,19 @@ const mockData = {
     { category: 'Dining', total: 600 },
   ],
   merchants: [
-    { merchant: 'Amazon', total: 450 },
-    { merchant: 'Whole Foods', total: 350 },
+    { merchant: 'Example Shop', total: 450 },
+    { merchant: 'Example Grocer', total: 350 },
   ],
   trends: [
     { period: '2026-02-01', total: 300 },
     { period: '2026-02-02', total: 450 },
   ],
   subscriptions: [
-    { merchant: 'Netflix', amount: 15.99, frequency: 'monthly', last_charge: '2026-02-01', occurrences: 12 },
+    { merchant: 'Example Stream', amount: 15.99, frequency: 'monthly', last_charge: '2026-02-01', occurrences: 12 },
   ],
   transactions: {
     transactions: [
-      { id: '1', date: '2026-02-06', amount: -87.32, merchant_raw: 'WHOLE FOODS', merchant_clean: 'Whole Foods', category: 'Groceries', source: 'chase', account_last4: '4521', is_recurring: false, tags: [] },
+      { id: '1', date: '2026-02-06', amount: -87.32, merchant_raw: 'EXAMPLE GROCER', merchant_clean: 'Example Grocer', category: 'Groceries', source: 'example_card', account_last4: '4521', is_recurring: false, tags: [] },
     ],
     total: 1,
     offset: 0,

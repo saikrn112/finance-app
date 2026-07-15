@@ -58,7 +58,7 @@ Files starting with `_` are ignored. Broken plugins are skipped with a warning l
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `source_key` | `str` | Yes | Unique machine identifier (e.g., `"hdfc"`, `"amex"`) |
+| `source_key` | `str` | Yes | Unique machine identifier (e.g., `"example_bank"`) |
 | `label` | `str` | Yes | Human-readable name shown in UI |
 | `record_type` | `str` | Yes | One of: `"transactions"`, `"payslip"`, `"retirement"`, `"investment"` |
 | `allowed_kinds` | `set[str]` | Yes | File types accepted: `"csv"`, `"statement_pdf"`, `"payslip_pdf"`, `"retirement_csv"`, `"retirement_statement_pdf"`, `"investment_csv"` |
@@ -195,7 +195,7 @@ def my_parser(file_path: str) -> dict:
             "type": "Contribution",                 # Transaction type
             "date": "2026-01-15",                   # ISO date
             "source": "Employee",                   # Source of funds
-            "fund": "Vanguard 2060 Fund",           # Fund/investment name
+            "fund": "Example Target Fund",           # Fund/investment name
             "units": 12.5,                          # Units purchased
             "unit_price": 45.20,                    # Price per unit
             "amount": 565.00,                       # Dollar amount
@@ -209,10 +209,10 @@ def my_parser(file_path: str) -> dict:
 }
 ```
 
-**Expected return (statement-based, e.g., Fidelity 401k):**
+**Expected return (statement-based retirement account):**
 ```python
 {
-    "source_type": "fidelity_401k",                 # Identifier for this source
+    "source_type": "example_retirement",            # Identifier for this source
     "plan_name": "401k Savings Plan",               # Optional
     "statements": [                                 # Periodic balance statements
         {
@@ -230,7 +230,7 @@ def my_parser(file_path: str) -> dict:
     "activity": [                                   # Optional — individual transactions
         {
             "date": "2026-02-15",
-            "investment": "Vanguard 2060",
+            "investment": "Example Target Fund",
             "transaction_type": "Contribution",
             "amount": 1500.00,
             "shares": 33.2,
@@ -274,7 +274,7 @@ def my_parser(file_path: str) -> dict:
         {
             "security_id": "unique-hash",           # For dedup
             "symbol": "VTI",                        # Ticker symbol
-            "description": "Vanguard Total Stock",
+            "description": "Example Broad Market",
             "quantity": 50.0,
             "price": 245.30,
             "value": 12265.00,

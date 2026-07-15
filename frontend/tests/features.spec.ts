@@ -22,11 +22,11 @@ const mockCategories = [
 ]
 
 const mockMerchants = [
-  { merchant: 'Amazon', total: 450 },
-  { merchant: 'Whole Foods', total: 350 },
-  { merchant: 'Uber Eats', total: 280 },
-  { merchant: 'Target', total: 200 },
-  { merchant: 'Starbucks', total: 120 },
+  { merchant: 'Example Shop', total: 450 },
+  { merchant: 'Example Grocer', total: 350 },
+  { merchant: 'Example Delivery', total: 280 },
+  { merchant: 'Example Store', total: 200 },
+  { merchant: 'Example Coffee', total: 120 },
 ]
 
 const mockTrends = [
@@ -38,18 +38,18 @@ const mockTrends = [
 ]
 
 const mockSubscriptions = [
-  { merchant: 'Netflix', amount: 15.99, frequency: 'monthly', last_charge: '2026-02-01', occurrences: 12 },
-  { merchant: 'Spotify', amount: 10.99, frequency: 'monthly', last_charge: '2026-02-05', occurrences: 24 },
-  { merchant: 'iCloud', amount: 2.99, frequency: 'monthly', last_charge: '2026-02-03', occurrences: 36 },
+  { merchant: 'Example Stream', amount: 15.99, frequency: 'monthly', last_charge: '2026-02-01', occurrences: 12 },
+  { merchant: 'Example Music', amount: 10.99, frequency: 'monthly', last_charge: '2026-02-05', occurrences: 24 },
+  { merchant: 'Example Cloud', amount: 2.99, frequency: 'monthly', last_charge: '2026-02-03', occurrences: 36 },
 ]
 
 const mockTransactions = {
   transactions: [
-    { id: '1', date: '2026-02-06', amount: -87.32, merchant_raw: 'WHOLE FOODS', merchant_clean: 'Whole Foods', category: 'Groceries', source: 'chase', account_last4: '4521', is_recurring: false, tags: [] },
-    { id: '2', date: '2026-02-05', amount: -45.00, merchant_raw: 'SHELL GAS', merchant_clean: 'Shell', category: 'Transportation', source: 'amex', account_last4: '8832', is_recurring: false, tags: [] },
-    { id: '3', date: '2026-02-05', amount: -15.99, merchant_raw: 'NETFLIX', merchant_clean: 'Netflix', category: 'Subscriptions', source: 'chase', account_last4: '4521', is_recurring: true, tags: [] },
-    { id: '4', date: '2026-02-04', amount: -124.50, merchant_raw: 'AMAZON', merchant_clean: 'Amazon', category: 'Shopping', source: 'discover', account_last4: '3345', is_recurring: false, tags: [] },
-    { id: '5', date: '2026-02-03', amount: 2600.00, merchant_raw: 'PAYROLL', merchant_clean: 'Payroll', category: 'Salary/Paycheck', source: 'bofa', account_last4: '9901', is_recurring: true, tags: [] },
+    { id: '1', date: '2026-02-06', amount: -87.32, merchant_raw: 'EXAMPLE GROCER', merchant_clean: 'Example Grocer', category: 'Groceries', source: 'example_card', account_last4: '4521', is_recurring: false, tags: [] },
+    { id: '2', date: '2026-02-05', amount: -45.00, merchant_raw: 'EXAMPLE FUEL', merchant_clean: 'Example Fuel', category: 'Transportation', source: 'example_charge_card', account_last4: '8832', is_recurring: false, tags: [] },
+    { id: '3', date: '2026-02-05', amount: -15.99, merchant_raw: 'EXAMPLE STREAM', merchant_clean: 'Example Stream', category: 'Subscriptions', source: 'example_card', account_last4: '4521', is_recurring: true, tags: [] },
+    { id: '4', date: '2026-02-04', amount: -124.50, merchant_raw: 'EXAMPLE SHOP', merchant_clean: 'Example Shop', category: 'Shopping', source: 'example_credit_card', account_last4: '3345', is_recurring: false, tags: [] },
+    { id: '5', date: '2026-02-03', amount: 2600.00, merchant_raw: 'PAYROLL', merchant_clean: 'Payroll', category: 'Salary/Paycheck', source: 'example_bank', account_last4: '9901', is_recurring: true, tags: [] },
   ],
   total: 5,
   offset: 0,
@@ -141,8 +141,8 @@ test.describe('Top Merchants', () => {
   })
 
   test('displays merchant list', async ({ page }) => {
-    await expect(page.getByText('1. Amazon')).toBeVisible()
-    await expect(page.getByText('2. Whole Foods')).toBeVisible()
+    await expect(page.getByText('1. Example Shop')).toBeVisible()
+    await expect(page.getByText('2. Example Grocer')).toBeVisible()
   })
 
   test('displays merchant amounts', async ({ page }) => {
@@ -152,7 +152,7 @@ test.describe('Top Merchants', () => {
 
   test('shows top 5 merchants', async ({ page }) => {
     const merchantSection = page.locator('text=Top Merchants').locator('..')
-    await expect(merchantSection.getByText('5. Starbucks')).toBeVisible()
+    await expect(merchantSection.getByText('5. Example Coffee')).toBeVisible()
   })
 })
 
@@ -163,9 +163,9 @@ test.describe('Subscriptions Section', () => {
   })
 
   test('displays subscription list', async ({ page }) => {
-    await expect(page.getByText('Netflix')).toBeVisible()
-    await expect(page.getByText('Spotify')).toBeVisible()
-    await expect(page.getByText('iCloud')).toBeVisible()
+    await expect(page.getByText('Example Stream')).toBeVisible()
+    await expect(page.getByText('Example Music')).toBeVisible()
+    await expect(page.getByText('Example Cloud')).toBeVisible()
   })
 
   test('displays subscription amounts with frequency', async ({ page }) => {
@@ -181,9 +181,9 @@ test.describe('Transactions Table', () => {
   })
 
   test('displays transaction rows', async ({ page }) => {
-    await expect(page.getByText('Whole Foods')).toBeVisible()
-    await expect(page.getByText('Shell')).toBeVisible()
-    await expect(page.getByText('Netflix')).toBeVisible()
+    await expect(page.getByText('Example Grocer')).toBeVisible()
+    await expect(page.getByText('Example Fuel')).toBeVisible()
+    await expect(page.getByText('Example Stream')).toBeVisible()
   })
 
   test('displays transaction dates', async ({ page }) => {
@@ -208,8 +208,8 @@ test.describe('Transactions Table', () => {
   })
 
   test('displays transaction sources', async ({ page }) => {
-    await expect(page.getByRole('cell', { name: 'chase' })).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'amex' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'example_card' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'example_charge_card' })).toBeVisible()
   })
 })
 

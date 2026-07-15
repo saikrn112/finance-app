@@ -30,6 +30,7 @@ from src.models import (
 from src.config import settings
 from src.models.database import engine, pause_dirty_tracking, resume_dirty_tracking
 from src.ingestion.plaid_usage import plaid_usage_summary
+from src.ingestion.plaid_client import remove_item
 from pathlib import Path
 import tempfile
 
@@ -350,9 +351,20 @@ def disconnect_account(account_id: str, db: Session = Depends(get_db)):
                 SyncLog.source == "plaid",
                 SyncLog.status == "connected",
             ).all()
-            delete_ids = [
-                item.id for item in linked_logs
+            matching_logs = [
+                item for item in linked_logs
                 if _plaid_institution_key(item) == institution_key
+            ]
+            for item in matching_logs:
+                access_token = (item.extra_data or {}).get("access_token")
+                if not access_token:
+                    continue
+                try:
+                    remove_item(access_token)
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"Plaid disconnect failed: {exc}") from exc
+            delete_ids = [
+                item.id for item in matching_logs
             ]
             if delete_ids:
                 db.query(SyncLog).filter(SyncLog.id.in_(delete_ids)).delete(synchronize_session=False)

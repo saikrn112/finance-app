@@ -123,7 +123,7 @@ class Balance(Base):
     __tablename__ = "balances"
 
     id = Column(String, primary_key=True, default=generate_uuid)
-    source = Column(String, nullable=False)  # "Bank of America", "Chase", etc.
+    source = Column(String, nullable=False)  # Institution or imported-source label.
     date = Column(Date, nullable=False)
     balance = Column(Numeric(10, 2), nullable=False)
     balance_type = Column(String)  # "opening", "closing", "statement"
@@ -231,6 +231,45 @@ class SourceBalanceHistory(Base):
     __table_args__ = (
         Index("ix_source_balance_history_source_date", "source", "date"),
         Index("ix_source_balance_history_group_date", "account_group", "date"),
+    )
+
+
+class AccountActivity(Base):
+    """Provider activity that belongs to an account detail view, not the household ledger."""
+
+    __tablename__ = "account_activity"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    source_id = Column(String, nullable=False)
+    source_key = Column(String)
+    source = Column(String, nullable=False)
+    account_id = Column(String)
+    account_last4 = Column(String(4))
+    date = Column(Date, nullable=False)
+    authorized_date = Column(Date)
+    _amount = Column("amount", Numeric(12, 2), nullable=False)
+    description = Column(String, nullable=False)
+    merchant = Column(String)
+    activity_type = Column(String, nullable=False, default="other")
+    currency = Column(String(3), default="USD", nullable=False)
+    pending = Column(Boolean, default=False, nullable=False)
+    pending_activity_id = Column(String)
+    raw_data = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    @property
+    def amount(self):
+        raise AttributeError("Direct access to AccountActivity.amount is forbidden. Use _amount with a rate JOIN.")
+
+    @amount.setter
+    def amount(self, value):
+        self._amount = value
+
+    __table_args__ = (
+        Index("ix_account_activity_source_id", "source", "source_id", unique=True),
+        Index("ix_account_activity_source_date", "source", "date"),
+        Index("ix_account_activity_source_key_date", "source_key", "date"),
     )
 
 

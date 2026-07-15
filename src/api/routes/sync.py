@@ -7,18 +7,20 @@ import json
 
 from sqlalchemy import and_, func, literal
 
-from src.models import get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot, ExchangeRate
+from src.models import get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot, ExchangeRate, SourceBalanceHistory, AccountActivity
 from src.config import settings
 from src.demo import get_demo_investments, get_demo_plaid_balances, get_demo_sidebar_accounts
-from src.ingestion.plaid_client import create_link_token, exchange_public_token, sync_transactions, get_investment_holdings, get_account_balances
+from src.ingestion.plaid_client import create_link_token, exchange_public_token, remove_item, sync_transactions, get_investment_holdings, get_account_balances
 from src.ingestion.csv_importer import import_csv_file
 from src.ingestion.import_service import commit_import, preview_import
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
+from src.ingestion.plaid_activity import apply_account_activity_batch
 from src.ingestion.plaid_usage import plaid_usage_summary, record_plaid_usage
 from src.processing.categorizer import RuleMatcher
 from src.processing.parse_retirement import summarize_retirement_transactions
 from src.plugins.registry import get_all_sources, get_credit_card_sources, classify_source
 from src.services.exchange_rates import latest_rate_subquery, ensure_rates_fresh
+from src.services.account_values import latest_account_values, record_account_value
 from src.api.schemas import (
     SidebarResponse,
     InvestmentHoldingsResponse,
@@ -72,6 +74,44 @@ def _connected_plaid_logs(db: Session) -> list[SyncLog]:
         key = _plaid_institution_key(log)
         grouped.setdefault(key, log)
     return list(grouped.values())
+
+
+def _account_fingerprints(accounts: list[dict]) -> list[dict[str, str]]:
+    """Keep only stable, non-secret fields needed to detect duplicate Items."""
+    fingerprints = []
+    for account in accounts:
+        fingerprint = {
+            key: str(account.get(key) or "").strip()
+            for key in ("mask", "name", "type", "subtype")
+        }
+        if fingerprint["mask"] or fingerprint["name"]:
+            fingerprints.append(fingerprint)
+    return fingerprints
+
+
+def _has_duplicate_connection(
+    db: Session,
+    institution_name: str,
+    institution_id: str | None,
+    fingerprints: list[dict[str, str]],
+) -> bool:
+    institution_key = institution_name.strip().casefold()
+    for log in _connected_plaid_logs(db):
+        extra = log.extra_data or {}
+        same_institution = bool(
+            institution_id
+            and extra.get("institution_id")
+            and institution_id == extra.get("institution_id")
+        ) or bool(
+            institution_key
+            and institution_key == str(extra.get("institution_name") or "").strip().casefold()
+        )
+        if not same_institution:
+            continue
+        # One Plaid Item per institution. Update mode is the supported way to
+        # repair consent or add accounts without duplicating transaction IDs.
+        return True
+    return False
 
 
 def _plaid_sync_error_payload(exc: Exception) -> dict:
@@ -166,6 +206,14 @@ def _signed_snapshot_value(group: str, value: float) -> float:
     return round(value, 2)
 
 
+def _normalize_sidebar_group(group: str | None) -> str:
+    return {
+        "bank_accounts": "bank_account",
+        "credit_cards": "credit_card",
+        "brokerage": "investment",
+    }.get(group or "", group or "bank_account")
+
+
 def _persist_account_snapshot(
     db: Session,
     *,
@@ -175,44 +223,31 @@ def _persist_account_snapshot(
     current_value: float,
     synced_at: datetime,
 ) -> None:
+    snapshot_value = round(current_value, 2)
     db.add(
         AccountSnapshot(
             source=source,
             account_group=account_group,
             connection_state=connection_state,
-            current_value=round(current_value, 2),
+            current_value=snapshot_value,
             synced_at=synced_at,
             created_at=synced_at,
         )
     )
+    record_account_value(
+        db,
+        source=source,
+        account_group=account_group,
+        value=snapshot_value,
+        observed_at=synced_at,
+        provenance="account_snapshot",
+    )
 
 
-def _latest_sidebar_snapshots(db: Session) -> dict[str, AccountSnapshot]:
-    # Subquery to find the max synced_at per source
-    latest_times = (
-        db.query(
-            AccountSnapshot.source,
-            func.max(AccountSnapshot.synced_at).label("max_synced_at"),
-        )
-        .group_by(AccountSnapshot.source)
-        .subquery()
-    )
-    rows = (
-        db.query(AccountSnapshot)
-        .join(
-            latest_times,
-            (AccountSnapshot.source == latest_times.c.source)
-            & (AccountSnapshot.synced_at == latest_times.c.max_synced_at),
-        )
-        .all()
-    )
-    # If multiple snapshots share the same max synced_at for a source, pick by highest value
-    latest: dict[str, AccountSnapshot] = {}
-    for row in rows:
-        existing = latest.get(row.source)
-        if existing is None or (row._current_value or 0) > (existing._current_value or 0):
-            latest[row.source] = row
-    return latest
+def _plaid_activity_destination(log: SyncLog) -> str:
+    institution = (log.extra_data or {}).get("institution_name", "Unknown")
+    plugin = get_all_sources().get(classify_source(institution))
+    return "account_activity" if plugin and plugin.domain in {"investments", "retirement"} else "transactions"
 
 
 def _persist_investment_holdings_snapshot(
@@ -324,7 +359,6 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
     lr = latest_rate_subquery(db)
 
     manual_history: list[dict] = []
-    manual_sources: set[tuple[str, str]] = set()
     logs = (
         db.query(SyncLog)
         .filter(SyncLog.sync_type == "import_investment_csv", SyncLog.status == "success")
@@ -367,28 +401,24 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
                 "ending_value": ending_value,
             }
         )
-        manual_sources.add((source, synced_at))
-
-    # Aggregate holdings values per (source, synced_at) with rate JOIN
-    agg_rows = (
-        db.query(
-            InvestmentHoldingSnapshot.source,
-            InvestmentHoldingSnapshot.synced_at,
-            func.sum(InvestmentHoldingSnapshot._value * lr.c.rate).label("total_value"),
-        )
-        .join(lr, and_(
-            lr.c.from_currency == InvestmentHoldingSnapshot.currency,
-            lr.c.to_currency == literal(currency),
-        ))
-        .group_by(InvestmentHoldingSnapshot.source, InvestmentHoldingSnapshot.synced_at)
-        .order_by(InvestmentHoldingSnapshot.synced_at.asc(), InvestmentHoldingSnapshot.source.asc())
+    manual_by_day = {(item["source"], item["synced_at"][:10]): item for item in manual_history}
+    value_rows = (
+        db.query(SourceBalanceHistory)
+        .filter(SourceBalanceHistory.account_group.in_(["investment", "brokerage"]))
+        .order_by(SourceBalanceHistory.date.asc(), SourceBalanceHistory.created_at.asc())
         .all()
     )
-    history = manual_history + [
-        {"synced_at": row.synced_at.isoformat() if row.synced_at else "", "source": row.source, "value": round(float(row.total_value or 0), 2)}
-        for row in agg_rows
-        if (row.source, row.synced_at.isoformat() if row.synced_at else "") not in manual_sources
-    ]
+    history: list[dict] = []
+    for row in value_rows:
+        detail = manual_by_day.get((row.source, row.date.isoformat()), {})
+        history.append({
+            "synced_at": f"{row.date.isoformat()}T12:00:00",
+            "source": row.source,
+            "value": round(float(row._value or 0) * rate_map.get(row.currency, 1.0), 2),
+            **{name: detail[name] for name in ("beginning_value", "market_gain", "inflow", "ending_value") if name in detail},
+        })
+    represented = {(item["source"], item["synced_at"][:10]) for item in history}
+    history.extend(item for item in manual_history if (item["source"], item["synced_at"][:10]) not in represented)
     history.sort(key=lambda item: (item["synced_at"], item["source"]))
     return history
 
@@ -485,6 +515,9 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
         except Exception:
             accounts = []
 
+        if accounts:
+            extra_data["account_fingerprints"] = _account_fingerprints(accounts)
+
         non_investment_accounts = [
             account
             for account in accounts
@@ -502,7 +535,12 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
             ), 2)
             # Known investment sources should prefer holdings value when available
             # rather than writing an additional same-source cash snapshot that can mask brokerage value.
-            if institution not in _get_investment_sources() or investment_value <= 0:
+            plugin = get_all_sources().get(classify_source(institution))
+            is_investment_source = bool(plugin and plugin.domain == "investments")
+            # A zero cash subaccount must not erase a brokerage valuation when the
+            # holdings endpoint failed. Positive cash-management balances remain valid.
+            should_record_cash_value = not is_investment_source or current_value != 0
+            if should_record_cash_value and (institution not in _get_investment_sources() or investment_value <= 0):
                 _persist_account_snapshot(
                     db,
                     source=institution,
@@ -526,42 +564,6 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
 
         extra_data["last_snapshot_refresh_at"] = datetime.utcnow().isoformat()
         log.extra_data = extra_data
-
-    for p in get_all_sources().values():
-        if p.domain != "retirement":
-            continue
-        source_names = {p.label} | set(p.source_aliases)
-        ret_logs = (
-            db.query(SyncLog)
-            .filter(
-                SyncLog.sync_type.in_(["import_retirement_csv", "import_retirement_statement_pdf"]),
-                SyncLog.status == "success",
-                SyncLog.source.in_(source_names),
-            )
-            .order_by(SyncLog.created_at.desc())
-            .first()
-        )
-        if not ret_logs:
-            continue
-        payload = (ret_logs.extra_data or {}).get("payload") or {}
-        statements = payload.get("statements") or []
-        if statements:
-            latest = max(statements, key=lambda s: str(s.get("period_end") or ""))
-            balance = float(latest.get("ending_balance") or 0)
-        else:
-            txns = payload.get("transactions") or []
-            summary = summarize_retirement_transactions(txns) if txns else {}
-            balance = float(summary.get("balance") or 0)
-        if balance:
-            _persist_account_snapshot(
-                db,
-                source=p.label,
-                account_group="retirement",
-                connection_state="manual",
-                current_value=balance,
-                synced_at=synced_at,
-            )
-            snapshots.append({"source": p.label, "group": "retirement", "balance": round(balance, 2)})
 
     return snapshots
 
@@ -632,7 +634,7 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
     rate_map: dict[str, float] = {row[0]: float(row[1]) for row in rate_rows}
 
     ledger_balances = _transaction_balance_map(db, target_currency=target_currency)
-    latest_snapshots = _latest_sidebar_snapshots(db)
+    latest_values = latest_account_values(db)
     connected_logs = _connected_plaid_logs(db)
     connected_by_source = {
         (log.extra_data or {}).get("institution_name", "Unknown"): log
@@ -650,14 +652,14 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
     def _canonical(source_name: str) -> str:
         return alias_to_label.get(source_name, source_name)
 
-    # Merge snapshots that map to the same canonical source (keep the latest)
-    merged_snapshots: dict[str, "AccountSnapshot"] = {}
-    for source, snap in latest_snapshots.items():
+    # Merge aliases into one canonical valuation row.
+    merged_values: dict[str, "SourceBalanceHistory"] = {}
+    for source, value_row in latest_values.items():
         canon = _canonical(source)
-        existing = merged_snapshots.get(canon)
-        if existing is None or (snap.synced_at or "") > (existing.synced_at or ""):
-            merged_snapshots[canon] = snap
-    latest_snapshots = merged_snapshots
+        existing = merged_values.get(canon)
+        if existing is None or (value_row.date, value_row.created_at) > (existing.date, existing.created_at):
+            merged_values[canon] = value_row
+    latest_values = merged_values
 
     # Merge ledger balances by canonical name (sum if multiple aliases)
     merged_ledger: dict[str, float] = {}
@@ -672,13 +674,13 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
         merged_connected[_canonical(source)] = log
     connected_by_source = merged_connected
 
-    sources = set(ledger_balances) | set(latest_snapshots) | set(connected_by_source)
+    sources = set(ledger_balances) | set(latest_values) | set(connected_by_source)
     investment_sources = _get_investment_sources()
 
     group_order = {"bank_account": 0, "credit_card": 1, "investment": 2, "retirement": 3}
     rows = []
     for source in sources:
-        snapshot = latest_snapshots.get(source)
+        value_row = latest_values.get(source)
         log = connected_by_source.get(source)
         ledger_balance = ledger_balances.get(source)
         inferred_group = _classify_sidebar_group(source, ledger_balance=ledger_balance)
@@ -689,16 +691,16 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
             source in investment_sources
             or (plugin and plugin.domain in ("investments", "retirement"))
         )
-        account_group = (
+        account_group = _normalize_sidebar_group(
             inferred_group
             if force_inferred
-            else snapshot.account_group if snapshot else inferred_group
+            else value_row.account_group if value_row else inferred_group
         )
-        connection_state = snapshot.connection_state if snapshot else ("plaid" if log else "manual")
+        connection_state = "plaid" if log else "manual"
 
         # Convert snapshot balance to target currency via rate_map
-        snapshot_currency = getattr(snapshot, "currency", "USD") if snapshot else (plugin.currency if plugin else "USD")
-        raw_snapshot_balance = round(float(snapshot._current_value), 2) if snapshot and snapshot._current_value is not None else None
+        snapshot_currency = value_row.currency if value_row else (plugin.currency if plugin else "USD")
+        raw_snapshot_balance = round(float(value_row._value), 2) if value_row and value_row._value is not None else None
         if raw_snapshot_balance is not None:
             snap_rate = rate_map.get(snapshot_currency, 1.0)
             snapshot_balance = round(raw_snapshot_balance * snap_rate, 2)
@@ -720,8 +722,8 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
                 "snapshot_balance": snapshot_balance,
                 "currency": target_currency,
                 "last_synced": (
-                    snapshot.synced_at.isoformat()
-                    if snapshot and snapshot.synced_at
+                    value_row.created_at.isoformat()
+                    if value_row and value_row.created_at
                     else (log.extra_data or {}).get("last_sync_at") if log else None
                 ),
                 "filter_source": source if account_group in {"bank_account", "credit_card"} and source in ledger_balances else None,
@@ -768,6 +770,7 @@ def get_link_token(products: str = "transactions", account_id: str | None = None
         return {"link_token": f"demo-link-{products.replace(',', '-')}"}
     try:
         access_token = None
+        requested_products = products
         if account_id:
             log = db.query(SyncLog).filter(SyncLog.id == account_id, SyncLog.source == "plaid", SyncLog.status == "connected").first()
             if not log:
@@ -775,7 +778,10 @@ def get_link_token(products: str = "transactions", account_id: str | None = None
             access_token = (log.extra_data or {}).get("access_token")
             if not access_token:
                 raise HTTPException(status_code=400, detail="Plaid access token missing for reconnect")
-        token = create_link_token(products=products.split(","), access_token=access_token)
+            existing_products = (log.extra_data or {}).get("plaid_products")
+            if existing_products:
+                requested_products = ",".join(existing_products)
+        token = create_link_token(products=requested_products.split(","), access_token=access_token)
         return {"link_token": token}
     except HTTPException:
         raise
@@ -784,12 +790,39 @@ def get_link_token(products: str = "transactions", account_id: str | None = None
 
 
 @router.post("/plaid/exchange")
-def exchange_token(public_token: str, institution_name: str = "", account_id: str | None = None, db: Session = Depends(get_db)):
+def exchange_token(
+    public_token: str,
+    institution_name: str = "",
+    institution_id: str | None = None,
+    account_fingerprints: str = "[]",
+    account_id: str | None = None,
+    products: str = "transactions",
+    db: Session = Depends(get_db),
+):
     """Exchange public token and store access token."""
     if settings.is_demo:
         return {"status": "connected", "item_id": f"demo-{institution_name or 'plaid'}"}
     try:
         access_token, item_id, _ = exchange_public_token(public_token)
+
+        try:
+            fingerprints = json.loads(account_fingerprints)
+            if not isinstance(fingerprints, list):
+                fingerprints = []
+        except (TypeError, ValueError):
+            fingerprints = []
+
+        if not account_id and _has_duplicate_connection(
+            db,
+            institution_name=institution_name,
+            institution_id=institution_id,
+            fingerprints=fingerprints,
+        ):
+            remove_item(access_token)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{institution_name or 'This institution'} is already connected. Use Reconnect to update its accounts.",
+            )
 
         existing_log = None
         if account_id:
@@ -802,6 +835,13 @@ def exchange_token(public_token: str, institution_name: str = "", account_id: st
             extra["access_token"] = access_token
             if institution_name:
                 extra["institution_name"] = institution_name
+            if institution_id:
+                extra["institution_id"] = institution_id
+            if fingerprints:
+                extra["account_fingerprints"] = fingerprints
+            extra["plaid_products"] = [item for item in products.split(",") if item]
+            existing_log.extra_data = extra
+            extra.pop("last_snapshot_refresh_at", None)
             extra.pop("last_sync_error", None)
             existing_log.extra_data = extra
             existing_log.plaid_item_id = item_id
@@ -813,7 +853,13 @@ def exchange_token(public_token: str, institution_name: str = "", account_id: st
                 sync_type="plaid",
                 plaid_item_id=item_id,
                 status="connected",
-                extra_data={"access_token": access_token, "institution_name": institution_name},
+                extra_data={
+                    "access_token": access_token,
+                    "institution_name": institution_name,
+                    "institution_id": institution_id,
+                    "account_fingerprints": fingerprints,
+                    "plaid_products": [item for item in products.split(",") if item],
+                },
             )
             db.add(log)
         record_plaid_usage(
@@ -860,8 +906,6 @@ def sync_plaid(db: Session = Depends(get_db)):
             continue
         
         institution = (log.extra_data or {}).get("institution_name", "plaid")
-        cursor = log.plaid_cursor
-        has_more = True
         account_counts = {
             "added": 0,
             "updated": 0,
@@ -872,31 +916,43 @@ def sync_plaid(db: Session = Depends(get_db)):
         }
         
         try:
+          cursor = log.plaid_cursor
+          has_more = True
+          destination = _plaid_activity_destination(log)
           while has_more:
-            result = sync_transactions(access_token, cursor)
-            record_plaid_usage(
-                db,
-                endpoint="transactions_sync",
-                institution=institution,
-                plaid_item_id=log.plaid_item_id,
-            )
-            counts = apply_plaid_sync_batch(
-                db=db,
-                institution=institution,
-                added=result["added"],
-                modified=result.get("modified", []),
-                removed=result.get("removed", []),
-                matcher=matcher,
-            )
-            for key, value in counts.as_dict().items():
-                total_counts[key] = total_counts.get(key, 0) + value
-                account_counts[key] = account_counts.get(key, 0) + value
-            cursor = result["cursor"]
-            has_more = result["has_more"]
-        
+              result = sync_transactions(access_token, cursor)
+              record_plaid_usage(
+                  db,
+                  endpoint="transactions_sync",
+                  institution=institution,
+                  plaid_item_id=log.plaid_item_id,
+              )
+              if destination == "account_activity":
+                  counts = apply_account_activity_batch(
+                      db=db,
+                      institution=institution,
+                      added=result["added"],
+                      modified=result.get("modified", []),
+                      removed=result.get("removed", []),
+                  )
+              else:
+                  counts = apply_plaid_sync_batch(
+                      db=db,
+                      institution=institution,
+                      added=result["added"],
+                      modified=result.get("modified", []),
+                      removed=result.get("removed", []),
+                      matcher=matcher,
+                  )
+              for key, value in counts.as_dict().items():
+                  total_counts[key] = total_counts.get(key, 0) + value
+                  account_counts[key] = account_counts.get(key, 0) + value
+              cursor = result["cursor"]
+              has_more = result["has_more"]
           extra_data = dict(log.extra_data or {})
           extra_data["last_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_counts"] = account_counts
+          extra_data["activity_destination"] = destination
           extra_data.pop("last_sync_error", None)
           log.extra_data = extra_data
           log.plaid_cursor = cursor
@@ -969,6 +1025,40 @@ def get_investment_history(db: Session = Depends(get_db), currency: str = Query(
         return {"currency": currency, "history": []}
     history = _investment_holdings_history(db, currency=currency)
     return {"currency": currency, "history": history}
+
+
+@router.get("/plaid/investments/activity")
+def get_investment_activity(
+    source: str = Query(...),
+    db: Session = Depends(get_db),
+    currency: str = Query(...),
+):
+    ensure_rates_fresh(db)
+    lr = latest_rate_subquery(db)
+    rates = db.query(lr.c.from_currency, lr.c.rate).filter(lr.c.to_currency == currency).all()
+    rate_map = {row[0]: float(row[1]) for row in rates}
+    source_key = classify_source(source) or source
+    rows = (
+        db.query(AccountActivity)
+        .filter((AccountActivity.source_key == source_key) | (AccountActivity.source == source))
+        .order_by(AccountActivity.date.desc(), AccountActivity.created_at.desc())
+        .all()
+    )
+    return {
+        "currency": currency,
+        "activity": [
+            {
+                "id": row.id,
+                "date": row.date.isoformat(),
+                "description": row.description,
+                "merchant": row.merchant,
+                "type": row.activity_type,
+                "amount": round(float(row._amount or 0) * rate_map.get(row.currency, 1.0), 2),
+                "pending": row.pending,
+            }
+            for row in rows
+        ],
+    }
 
 
 @router.get("/connected")

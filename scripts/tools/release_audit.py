@@ -68,10 +68,18 @@ def fetch_json(url: str) -> dict:
 
 def run_parser_regression(base_url: str) -> bool:
     preview_url = f"{base_url.rstrip('/')}/api/imports/preview"
+    from src.plugins.loader import load_plugins
+    load_plugins()
     # Parser regression cases — discovered from data/raw/ directories.
     # Each source must have at least one fixture PDF in its raw directory.
     cases = []
-    statement_sources = ["bofa", "chase", "amex", "discover", "apple"]
+    from src.plugins.registry import get_import_source_defs
+    source_defs = get_import_source_defs()
+    statement_sources = [
+        source_key
+        for source_key, meta in source_defs.items()
+        if "statement_pdf" in meta.get("allowed_kinds", set()) and meta.get("record_type") == "transactions"
+    ]
     for source in statement_sources:
         source_dir = raw_source_dir(source)
         if not source_dir.exists():
@@ -88,8 +96,6 @@ def run_parser_regression(base_url: str) -> bool:
             })
 
     # Payslip sources — discover from raw directories
-    from src.plugins.registry import get_import_source_defs
-    source_defs = get_import_source_defs()
     for source_key, meta in source_defs.items():
         if "payslip_pdf" not in meta.get("allowed_kinds", set()):
             continue

@@ -15,35 +15,11 @@ LOOKBACK_DAYS = 1100
 EXCLUDED_TOP_CATEGORIES = {"Income", "Remittance", "Credit Card", "Investment", "Transfer", "Loan", "Tax"}
 ALLOWED_TOP_CATEGORIES = {"Subscriptions", "Rent", "Utilities", "Insurance", "Phone", "Health", "Internet"}
 EXCLUDED_MERCHANT_PATTERNS = [
-    r"ROBINHOOD",
-    r"MARCUS",
-    r"APPLE CARD INSTALLMENT",
     r"ANNUAL FEE",
     r"\bPAYMENT\b",
     r"\bTRANSFER\b",
 ]
-CANONICAL_NAME_PATTERNS: list[tuple[str, str]] = [
-    (r"OPENAI|CHATGPT", "OpenAI"),
-    (r"CLAUDE(\.AI)?", "Claude"),
-    (r"NETFLIX", "Netflix"),
-    (r"SPOTIFY", "Spotify"),
-    (r"AMAZON PRIME", "Amazon Prime"),
-    (r"WALMART\+|WALMART\.COM W\+", "Walmart+"),
-    (r"AUDIBLE", "Audible"),
-    (r"DISNEY ?PLUS|DISNEY PLUS", "Disney+"),
-    (r"GITHUB", "GitHub"),
-    (r"ICLOUD", "iCloud+"),
-    (r"APPLECARE", "AppleCare"),
-    (r"APPLE\.COM/BILL", "Apple Services"),
-    (r"ADOBE", "Adobe"),
-    (r"OBSIDIAN", "Obsidian"),
-    (r"LEETCODE", "LeetCode"),
-    (r"PLANET FITNESS", "Planet Fitness"),
-    (r"MINT MOBILE", "Mint Mobile"),
-    (r"HIMS", "Hims & Hers"),
-    (r"TOOMICS", "Toomics"),
-    (r"BLOOMBERG", "Bloomberg"),
-]
+CANONICAL_NAME_PATTERNS: list[tuple[str, str]] = []
 FREQUENCY_RULES: dict[str, dict[str, int | tuple[int, int]]] = {
     "weekly": {"days": 7, "min_occurrences": 4, "range": (5, 9)},
     "biweekly": {"days": 14, "min_occurrences": 3, "range": (11, 18)},

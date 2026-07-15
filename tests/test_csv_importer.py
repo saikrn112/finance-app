@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import date
 from decimal import Decimal
 
-from src.ingestion.csv_importer import parse_csv, get_file_hash, RawTransaction, PROVIDER_CONFIGS
+from src.ingestion.csv_importer import parse_csv, get_file_hash, RawTransaction
 
 
 class TestParseCSV:
@@ -13,20 +13,20 @@ class TestParseCSV:
 
     def test_parse_chase_csv(self):
         content = """Transaction Date,Amount,Description
-02/01/2026,-45.00,WHOLEFDS MKT #123
-02/02/2026,-32.50,UBER *EATS
-02/03/2026,100.00,REFUND AMAZON
+02/01/2026,-45.00,EXAMPLE GROCER #123
+02/02/2026,-32.50,EXAMPLE DELIVERY
+02/03/2026,100.00,EXAMPLE REFUND
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "chase"))
+        txns = list(parse_csv(path, "example_card"))
         assert len(txns) == 3
         
         assert txns[0].date == date(2026, 2, 1)
         assert txns[0].amount == Decimal("-45.00")
-        assert txns[0].merchant_raw == "WHOLEFDS MKT #123"
+        assert txns[0].merchant_raw == "EXAMPLE GROCER #123"
         
         assert txns[2].amount == Decimal("100.00")  # Positive for refund
         path.unlink()
@@ -39,49 +39,49 @@ class TestParseCSV:
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "amex"))
+        txns = list(parse_csv(path, "example_charge_card"))
         assert len(txns) == 1
         assert txns[0].amount == Decimal("-45.00")  # Negated
         path.unlink()
 
     def test_parse_apple_csv(self):
         content = """Transaction Date,Amount (USD),Merchant
-02/01/2026,99.99,APPLE STORE
+02/01/2026,99.99,EXAMPLE STORE
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "apple"))
+        txns = list(parse_csv(path, "example_device_card"))
         assert len(txns) == 1
         assert txns[0].amount == Decimal("-99.99")  # Negated
-        assert txns[0].merchant_raw == "APPLE STORE"
+        assert txns[0].merchant_raw == "EXAMPLE STORE"
         path.unlink()
 
     def test_parse_discover_csv(self):
         content = """Trans. Date,Amount,Description
-02/01/2026,-50.00,TARGET
+02/01/2026,-50.00,EXAMPLE STORE
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "discover"))
+        txns = list(parse_csv(path, "example_credit_card"))
         assert len(txns) == 1
-        assert txns[0].merchant_raw == "TARGET"
+        assert txns[0].merchant_raw == "EXAMPLE STORE"
         path.unlink()
 
     def test_parse_bofa_csv(self):
         content = """Date,Amount,Description
-02/01/2026,-75.00,COSTCO WHOLESALE
+02/01/2026,-75.00,EXAMPLE WHOLESALE
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "bofa"))
+        txns = list(parse_csv(path, "example_bank"))
         assert len(txns) == 1
-        assert txns[0].merchant_raw == "COSTCO WHOLESALE"
+        assert txns[0].merchant_raw == "EXAMPLE WHOLESALE"
         path.unlink()
 
     def test_unknown_source_raises_error(self, temp_csv_file):
@@ -98,7 +98,7 @@ invalid_date,-45.00,MERCHANT
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "chase"))
+        txns = list(parse_csv(path, "example_card"))
         assert len(txns) == 1
         assert txns[0].merchant_raw == "VALID MERCHANT"
         path.unlink()
@@ -112,7 +112,7 @@ invalid_date,-45.00,MERCHANT
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "chase"))
+        txns = list(parse_csv(path, "example_card"))
         assert len(txns) == 1
         path.unlink()
 
@@ -124,7 +124,7 @@ invalid_date,-45.00,MERCHANT
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "chase"))
+        txns = list(parse_csv(path, "example_card"))
         assert len(txns) == 1
         assert txns[0].amount == Decimal("1234.56")
         path.unlink()
@@ -138,7 +138,7 @@ invalid_date,-45.00,MERCHANT
             f.write(content)
             path = Path(f.name)
         
-        txns = list(parse_csv(path, "chase"))
+        txns = list(parse_csv(path, "example_card"))
         assert txns[0].source_id != txns[1].source_id
         path.unlink()
 
@@ -180,19 +180,6 @@ class TestGetFileHash:
         assert len(hash_val) == 64  # SHA256 hex length
         assert all(c in "0123456789abcdef" for c in hash_val)
         path.unlink()
-
-
-class TestProviderConfigs:
-    """Tests for provider configuration."""
-
-    def test_all_providers_have_required_fields(self):
-        required = {"date_col", "amount_col", "merchant_col", "date_fmt"}
-        for provider, config in PROVIDER_CONFIGS.items():
-            assert required.issubset(config.keys()), f"{provider} missing fields"
-
-    def test_supported_providers(self):
-        expected = {"chase", "amex", "discover", "bofa", "apple"}
-        assert set(PROVIDER_CONFIGS.keys()) == expected
 
 
 class TestRawTransaction:

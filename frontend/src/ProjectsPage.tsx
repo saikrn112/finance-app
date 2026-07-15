@@ -349,7 +349,7 @@ function ProjectDetail({
       </div>
 
       {/* Member-wise split summary */}
-      <MemberSplitSummary transactions={p.transactions} members={p.members || []} fmt={fmt} />
+      <MemberSplitSummary transactions={p.transactions} members={p.members || []} fmt={fmt} fmtSigned={fmtSigned} />
 
       {/* Stats */}
       <div className={`grid gap-3 mb-5 ${p.budget ? 'grid-cols-5' : 'grid-cols-3'}`}>
@@ -637,26 +637,35 @@ function MemberSplitSummary({
   transactions,
   members,
   fmt,
+  fmtSigned,
 }: {
   transactions: Transaction[]
   members: Contact[]
   fmt: (n: number) => string
+  fmtSigned: (n: number) => string
 }) {
   if (!members || members.length === 0) return null
 
   const totals = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const m of members) map.set(m.id, 0)
+    const map = new Map<string, { expenditure: number; income: number }>()
+    for (const m of members) map.set(m.id, { expenditure: 0, income: 0 })
     for (const txn of transactions) {
-      if (txn.amount >= 0) continue
       const splits = txn.splits || []
       if (splits.length === 0) continue
       const perPerson = Math.abs(txn.amount) / splits.length
       for (const s of splits) {
-        map.set(s.id, (map.get(s.id) || 0) + perPerson)
+        const total = map.get(s.id)
+        if (!total) continue
+        if (txn.amount < 0) total.expenditure += perPerson
+        else if (txn.amount > 0) total.income += perPerson
       }
     }
-    return members.map(m => ({ ...m, total: map.get(m.id) || 0 })).filter(m => m.total > 0)
+    return members
+      .map(m => {
+        const total = map.get(m.id) || { expenditure: 0, income: 0 }
+        return { ...m, ...total, net: total.income - total.expenditure }
+      })
+      .filter(m => m.expenditure > 0 || m.income > 0)
   }, [transactions, members])
 
   if (totals.length === 0) return null
@@ -664,16 +673,32 @@ function MemberSplitSummary({
   return (
     <div className="app-surface rounded-lg p-4 mb-5">
       <h3 className="text-sm font-semibold mb-3">Split Summary</h3>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-        {totals.map(m => (
-          <div key={m.id} className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: m.color }} />
-            <div className="min-w-0">
-              <div className="text-xs truncate">{m.name}</div>
-              <div className="text-sm font-semibold">{fmt(m.total)}</div>
-            </div>
-          </div>
-        ))}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[520px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200/20 text-xs text-slate-500">
+              <th className="py-2 text-left font-medium">Person</th>
+              <th className="py-2 text-right font-medium">Expenditure</th>
+              <th className="py-2 text-right font-medium">Income</th>
+              <th className="py-2 text-right font-medium">Net</th>
+            </tr>
+          </thead>
+          <tbody>
+            {totals.map(m => (
+              <tr key={m.id} className="border-b border-slate-200/10 last:border-0">
+                <td className="py-2.5 text-left">
+                  <span className="inline-flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: m.color }} />
+                    <span className="truncate">{m.name}</span>
+                  </span>
+                </td>
+                <td className="py-2.5 text-right">{fmt(m.expenditure)}</td>
+                <td className="py-2.5 text-right" style={m.income > 0 ? { color: 'var(--color-positive)' } : undefined}>{fmt(m.income)}</td>
+                <td className="py-2.5 text-right font-semibold" style={{ color: m.net > 0 ? 'var(--color-positive)' : m.net < 0 ? 'var(--color-negative)' : undefined }}>{fmtSigned(m.net)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )

@@ -5,7 +5,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from src.api.server import app
-from src.models import Transaction, SyncLog, AccountSnapshot, init_db
+from src.models import Transaction, SyncLog, AccountSnapshot, SourceBalanceHistory, AccountActivity, init_db
 from src.models.database import Base, engine, SessionLocal, get_db
 
 
@@ -38,17 +38,17 @@ def client_with_data(client):
     
     txns = [
         Transaction(
-            source_id="api1", source="chase", date=date(2026, 2, 1),
-            amount=Decimal("-50.00"), merchant_raw="WHOLE FOODS",
-            merchant_clean="Whole Foods", category="Groceries"
+            source_id="api1", source="example_card", date=date(2026, 2, 1),
+            amount=Decimal("-50.00"), merchant_raw="EXAMPLE GROCER",
+            merchant_clean="Example Grocer", category="Groceries"
         ),
         Transaction(
-            source_id="api2", source="chase", date=date(2026, 2, 2),
-            amount=Decimal("-25.00"), merchant_raw="UBER EATS",
-            merchant_clean="Uber Eats", category="Dining"
+            source_id="api2", source="example_card", date=date(2026, 2, 2),
+            amount=Decimal("-25.00"), merchant_raw="EXAMPLE DELIVERY",
+            merchant_clean="Example Delivery", category="Dining"
         ),
         Transaction(
-            source_id="api3", source="bofa", date=date(2026, 2, 1),
+            source_id="api3", source="example_bank", date=date(2026, 2, 1),
             amount=Decimal("5000.00"), merchant_raw="PAYROLL",
             merchant_clean="Payroll", category="Salary/Paycheck"
         ),
@@ -103,10 +103,10 @@ class TestTransactionsAPI:
         assert data["transactions"][0]["category"] == "Groceries"
 
     def test_list_transactions_filter_by_source(self, client_with_data):
-        response = client_with_data.get("/api/transactions/?source=chase&currency=USD")
+        response = client_with_data.get("/api/transactions/?source=example_card&currency=USD")
         data = response.json()
         assert len(data["transactions"]) == 2
-        assert all(t["source"] == "chase" for t in data["transactions"])
+        assert all(t["source"] == "example_card" for t in data["transactions"])
 
     def test_list_transactions_search(self, client_with_data):
         response = client_with_data.get("/api/transactions/?search=Whole&currency=USD")
@@ -130,22 +130,22 @@ class TestConnectedAccountsAPI:
                 source="plaid",
                 sync_type="plaid",
                 status="connected",
-                plaid_item_id="item-bofa",
-                extra_data={"institution_name": "Bank of America"},
+                plaid_item_id="item-example_bank",
+                extra_data={"institution_name": "Example Bank"},
             ),
             SyncLog(
                 source="plaid",
                 sync_type="plaid",
                 status="connected",
-                plaid_item_id="item-bofa",
-                extra_data={"institution_name": "Bank of America"},
+                plaid_item_id="item-example_bank",
+                extra_data={"institution_name": "Example Bank"},
             ),
             SyncLog(
                 source="plaid",
                 sync_type="plaid",
                 status="connected",
-                plaid_item_id="item-chase",
-                extra_data={"institution_name": "Chase"},
+                plaid_item_id="item-example_card",
+                extra_data={"institution_name": "Example Card"},
             ),
         ])
         db.commit()
@@ -154,8 +154,8 @@ class TestConnectedAccountsAPI:
         response = test_client.get("/api/sync/connected")
         assert response.status_code == 200
         assert response.json() == [
-            {"source": "Chase", "type": "plaid"},
-            {"source": "Bank of America", "type": "plaid"},
+            {"source": "Example Card", "type": "plaid"},
+            {"source": "Example Bank", "type": "plaid"},
         ]
 
     def test_settings_only_returns_connected_institutions_not_import_logs(self, client):
@@ -166,15 +166,15 @@ class TestConnectedAccountsAPI:
                 source="plaid",
                 sync_type="plaid",
                 status="connected",
-                plaid_item_id="item-bofa",
-                extra_data={"institution_name": "Bank of America"},
+                plaid_item_id="item-example_bank",
+                extra_data={"institution_name": "Example Bank"},
             ),
             SyncLog(
-                source="Bank of America",
+                source="Example Bank",
                 sync_type="import_statement_pdf",
                 status="success",
                 record_count=25,
-                extra_data={"source_key": "bofa"},
+                extra_data={"source_key": "example_bank"},
             ),
         ])
         db.commit()
@@ -185,15 +185,15 @@ class TestConnectedAccountsAPI:
         payload = response.json()
         assert payload["stats"]["connected_accounts"] == 1
         assert len(payload["accounts"]) == 1
-        assert payload["accounts"][0]["source"] == "Bank of America"
+        assert payload["accounts"][0]["source"] == "Example Bank"
 
     def test_sidebar_accounts_returns_grouped_cached_rows(self, client):
         test_client, Session = client
         db = Session()
         db.add_all([
             Transaction(
-                source_id="bofa-pay",
-                source="Bank of America",
+                source_id="example_bank-pay",
+                source="Example Bank",
                 date=date(2026, 2, 1),
                 amount=Decimal("2500.00"),
                 merchant_raw="PAYROLL",
@@ -201,36 +201,36 @@ class TestConnectedAccountsAPI:
                 category="Salary/Paycheck",
             ),
             Transaction(
-                source_id="discover-charge",
-                source="Discover",
+                source_id="example_credit_card-charge",
+                source="Example Credit Card",
                 date=date(2026, 2, 2),
                 amount=Decimal("-85.42"),
                 merchant_raw="DISCOVER TEST",
-                merchant_clean="Discover Test",
+                merchant_clean="Example Credit Card Test",
                 category="Dining",
             ),
             SyncLog(
                 source="plaid",
                 sync_type="plaid",
                 status="connected",
-                plaid_item_id="item-bofa",
-                extra_data={"institution_name": "Bank of America", "last_sync_at": "2026-03-14T10:00:00"},
+                plaid_item_id="item-example_bank",
+                extra_data={"institution_name": "Example Bank", "last_sync_at": "2026-03-14T10:00:00"},
             ),
             SyncLog(
                 source="plaid",
                 sync_type="plaid",
                 status="connected",
-                plaid_item_id="item-robinhood",
-                extra_data={"institution_name": "Robinhood", "last_sync_at": "2026-03-14T10:05:00"},
+                plaid_item_id="item-example-brokerage",
+                extra_data={"institution_name": "Example Brokerage", "last_sync_at": "2026-03-14T10:05:00"},
             ),
             AccountSnapshot(
-                source="Bank of America",
+                source="Example Bank",
                 account_group="bank_account",
                 connection_state="plaid",
                 current_value=Decimal("3120.55"),
             ),
             AccountSnapshot(
-                source="Robinhood",
+                source="Example Brokerage",
                 account_group="investment",
                 connection_state="plaid",
                 current_value=Decimal("8421.33"),
@@ -241,6 +241,33 @@ class TestConnectedAccountsAPI:
                 connection_state="manual",
                 current_value=Decimal("12000.00"),
             ),
+            SourceBalanceHistory(
+                source_key="example_bank",
+                source="Example Bank",
+                account_group="bank_account",
+                date=date(2026, 3, 14),
+                value=Decimal("3120.55"),
+                currency="USD",
+                provenance="account_snapshot",
+            ),
+            SourceBalanceHistory(
+                source_key="Example Brokerage",
+                source="Example Brokerage",
+                account_group="investment",
+                date=date(2026, 3, 14),
+                value=Decimal("8421.33"),
+                currency="USD",
+                provenance="account_snapshot",
+            ),
+            SourceBalanceHistory(
+                source_key="National Retirement Plan",
+                source="National Retirement Plan",
+                account_group="retirement",
+                date=date(2026, 3, 14),
+                value=Decimal("12000.00"),
+                currency="USD",
+                provenance="account_snapshot",
+            ),
         ])
         db.commit()
         db.close()
@@ -250,21 +277,21 @@ class TestConnectedAccountsAPI:
         payload = response.json()
         rows = {row["source"]: row for row in payload["accounts"]}
 
-        assert rows["Bank of America"]["group"] == "bank_account"
-        assert rows["Bank of America"]["connection_state"] == "plaid"
-        assert rows["Bank of America"]["balance"] == 3120.55
-        assert rows["Bank of America"]["ledger_balance"] == 2500.0
-        assert rows["Bank of America"]["filter_source"] == "Bank of America"
+        assert rows["Example Bank"]["group"] == "bank_account"
+        assert rows["Example Bank"]["connection_state"] == "plaid"
+        assert rows["Example Bank"]["balance"] == 3120.55
+        assert rows["Example Bank"]["ledger_balance"] == 2500.0
+        assert rows["Example Bank"]["filter_source"] == "Example Bank"
 
-        assert rows["Discover"]["group"] == "credit_card"
-        assert rows["Discover"]["connection_state"] == "manual"
-        assert rows["Discover"]["balance"] == -85.42
-        assert rows["Discover"]["snapshot_balance"] is None
+        assert rows["Example Credit Card"]["group"] == "credit_card"
+        assert rows["Example Credit Card"]["connection_state"] == "manual"
+        assert rows["Example Credit Card"]["balance"] == -85.42
+        assert rows["Example Credit Card"]["snapshot_balance"] is None
 
-        assert rows["Robinhood"]["group"] == "investment"
-        assert rows["Robinhood"]["connection_state"] == "plaid"
-        assert rows["Robinhood"]["balance"] == 8421.33
-        assert rows["Robinhood"]["filter_source"] is None
+        assert rows["Example Brokerage"]["group"] == "investment"
+        assert rows["Example Brokerage"]["connection_state"] == "plaid"
+        assert rows["Example Brokerage"]["balance"] == 8421.33
+        assert rows["Example Brokerage"]["filter_source"] is None
 
         assert rows["National Retirement Plan"]["group"] == "retirement"
         assert rows["National Retirement Plan"]["connection_state"] == "manual"
@@ -492,7 +519,7 @@ class TestAnalyticsAPI:
         db.add_all([
             Transaction(
                 source_id="nw_bofa_1",
-                source="Bank of America",
+                source="Example Bank",
                 date=date(2026, 3, 1),
                 amount=Decimal("1000.00"),
                 merchant_raw="OPENING",
@@ -501,7 +528,7 @@ class TestAnalyticsAPI:
             ),
             Transaction(
                 source_id="nw_card_1",
-                source="Chase",
+                source="Example Card",
                 date=date(2026, 3, 2),
                 amount=Decimal("-200.00"),
                 merchant_raw="CARD",
@@ -509,7 +536,7 @@ class TestAnalyticsAPI:
                 category="Dining",
             ),
             AccountSnapshot(
-                source="Bank of America",
+                source="Example Bank",
                 account_group="bank_account",
                 connection_state="plaid",
                 current_value=Decimal("1000.00"),
@@ -517,7 +544,7 @@ class TestAnalyticsAPI:
                 created_at=datetime(2026, 3, 1, 10, 0, 0),
             ),
             AccountSnapshot(
-                source="Robinhood",
+                source="Example Brokerage",
                 account_group="investment",
                 connection_state="plaid",
                 current_value=Decimal("10000.00"),
@@ -525,7 +552,7 @@ class TestAnalyticsAPI:
                 created_at=datetime(2026, 3, 1, 10, 0, 0),
             ),
             AccountSnapshot(
-                source="Robinhood",
+                source="Example Brokerage",
                 account_group="investment",
                 connection_state="plaid",
                 current_value=Decimal("12000.00"),
@@ -559,9 +586,9 @@ class TestAnalyticsAPI:
         assert points["2026-03-03"]["brokerage"] == 12000.0
         assert points["2026-03-03"]["total"] == 17800.0
 
-        assert latest_rows["Bank of America"]["group"] == "bank_accounts"
-        assert latest_rows["Robinhood"]["group"] == "brokerage"
-        assert latest_rows["Robinhood"]["history_mode"] == "historical"
+        assert latest_rows["Example Bank"]["group"] == "bank_accounts"
+        assert latest_rows["Example Brokerage"]["group"] == "brokerage"
+        assert latest_rows["Example Brokerage"]["history_mode"] == "historical"
         assert latest_rows["National Retirement Plan"]["group"] == "retirement"
         assert latest_rows["National Retirement Plan"]["history_mode"] == "latest_only"
 
@@ -578,7 +605,7 @@ class TestAnalyticsAPI:
                 created_at=datetime(2026, 3, 2, 10, 0, 0),
             ),
             AccountSnapshot(
-                source="Fidelity 401k",
+                source="Example Retirement Plan",
                 account_group="retirement",
                 connection_state="manual",
                 current_value=Decimal("1000.00"),
@@ -599,16 +626,16 @@ class TestAnalyticsAPI:
         assert points["2026-03-03"]["retirement"] == 2000.0
         assert latest_rows["National Retirement Plan"]["current"] == 1000.0
         assert latest_rows["National Retirement Plan"]["history_mode"] == "latest_only"
-        assert latest_rows["Fidelity 401k"]["current"] == 1000.0
-        assert latest_rows["Fidelity 401k"]["history_mode"] == "latest_only"
+        assert latest_rows["Example Retirement Plan"]["current"] == 1000.0
+        assert latest_rows["Example Retirement Plan"]["history_mode"] == "latest_only"
 
     def test_net_worth_history_does_not_backderive_bank_balance_before_snapshot(self, client):
         test_client, Session = client
         db = Session()
         db.add_all([
             Transaction(
-                source_id="bofa-before-1",
-                source="Bank of America",
+                source_id="example_bank-before-1",
+                source="Example Bank",
                 date=date(2026, 3, 1),
                 amount=Decimal("5000.00"),
                 merchant_raw="PAYROLL",
@@ -616,8 +643,8 @@ class TestAnalyticsAPI:
                 category="Salary/Paycheck",
             ),
             Transaction(
-                source_id="bofa-before-2",
-                source="Bank of America",
+                source_id="example_bank-before-2",
+                source="Example Bank",
                 date=date(2026, 3, 2),
                 amount=Decimal("4000.00"),
                 merchant_raw="PAYROLL",
@@ -625,7 +652,7 @@ class TestAnalyticsAPI:
                 category="Salary/Paycheck",
             ),
             AccountSnapshot(
-                source="Bank of America",
+                source="Example Bank",
                 account_group="bank_account",
                 connection_state="plaid",
                 current_value=Decimal("1000.00"),
@@ -652,7 +679,7 @@ class TestAnalyticsAPI:
             [
                 Transaction(
                     source_id="recurring_1",
-                    source="amex",
+                    source="example_charge_card",
                     date=date(2025, 12, 10),
                     amount=Decimal("-12.99"),
                     merchant_raw="DISNEYPLUS 888-905-7888 CA",
@@ -662,7 +689,7 @@ class TestAnalyticsAPI:
                 ),
                 Transaction(
                     source_id="recurring_2",
-                    source="amex",
+                    source="example_charge_card",
                     date=date(2026, 1, 10),
                     amount=Decimal("-12.99"),
                     merchant_raw="DISNEYPLUS 888-905-7888 CA",
@@ -688,7 +715,7 @@ class TestAnalyticsAPI:
             db.add(
                 Transaction(
                     source_id=f"recurring_detail_{idx}",
-                    source="amex",
+                    source="example_charge_card",
                     date=date(2026, 1 + idx, 10),
                     amount=amount,
                     merchant_raw="DISNEYPLUS 888-905-7888 CA",
@@ -730,3 +757,159 @@ class TestSyncAPI:
         response = test_client.post("/api/sync/plaid/sync")
         assert response.status_code == 200
         assert response.json()["status"] == "no_accounts"
+
+    def test_duplicate_plaid_institution_is_rejected_and_revoked(self, client, monkeypatch):
+        test_client, Session = client
+        db = Session()
+        db.add(SyncLog(
+            source="plaid",
+            sync_type="plaid",
+            plaid_item_id="existing-item",
+            status="connected",
+            extra_data={
+                "access_token": "existing-token",
+                "institution_name": "Example Bank",
+                "institution_id": "ins_example",
+                "account_fingerprints": [{"mask": "1234", "name": "Everyday Card"}],
+            },
+        ))
+        db.commit()
+        db.close()
+
+        revoked = []
+        monkeypatch.setattr(
+            "src.api.routes.sync.exchange_public_token",
+            lambda _token: ("duplicate-token", "duplicate-item", ""),
+        )
+        monkeypatch.setattr("src.api.routes.sync.remove_item", revoked.append)
+
+        response = test_client.post(
+            "/api/sync/plaid/exchange",
+            params={
+                "public_token": "public-token",
+                "institution_name": "Example Bank",
+                "institution_id": "ins_example",
+                "account_fingerprints": '[{"mask":"1234","name":"Everyday Card"}]',
+            },
+        )
+
+        assert response.status_code == 409
+        assert "already connected" in response.json()["detail"]
+        assert revoked == ["duplicate-token"]
+        db = Session()
+        assert db.query(SyncLog).filter(SyncLog.source == "plaid").count() == 1
+        db.close()
+
+    def test_disconnect_revokes_all_duplicate_items_for_institution(self, client, monkeypatch):
+        test_client, Session = client
+        db = Session()
+        logs = [
+            SyncLog(
+                source="plaid",
+                sync_type="plaid",
+                plaid_item_id=f"item-{index}",
+                status="connected",
+                extra_data={"access_token": f"token-{index}", "institution_name": "Example Bank"},
+            )
+            for index in (1, 2)
+        ]
+        db.add_all(logs)
+        db.commit()
+        account_id = logs[0].id
+        db.close()
+
+        revoked = []
+        monkeypatch.setattr("src.api.routes.settings.remove_item", revoked.append)
+        response = test_client.delete(f"/api/settings/accounts/{account_id}")
+
+        assert response.status_code == 200
+        assert sorted(revoked) == ["token-1", "token-2"]
+        db = Session()
+        assert db.query(SyncLog).filter(SyncLog.source == "plaid").count() == 0
+        db.close()
+
+    def test_canonical_investment_value_matches_sidebar_net_worth_and_history(self, client):
+        test_client, Session = client
+        db = Session()
+        db.add(SourceBalanceHistory(
+            source_key="example_brokerage",
+            source="Example Brokerage",
+            account_group="investment",
+            date=date(2026, 7, 12),
+            value=Decimal("59022.19"),
+            currency="USD",
+            provenance="account_snapshot",
+            created_at=datetime(2026, 7, 12, 12, 0, 0),
+        ))
+        db.commit()
+        db.close()
+
+        sidebar = test_client.get("/api/sync/sidebar-accounts?currency=USD").json()
+        sidebar_value = next(row["balance"] for row in sidebar["accounts"] if row["source"] == "Example Brokerage")
+        net_worth = test_client.get(
+            "/api/analytics/net-worth/tracked-history?start_date=2026-07-12&end_date=2026-07-12&currency=USD"
+        ).json()
+        net_worth_value = next(row["current"] for row in net_worth["latest_sources"] if row["label"] == "Example Brokerage")
+        history = test_client.get("/api/sync/plaid/investments/history?currency=USD").json()
+        history_value = next(row["value"] for row in history["history"] if row["source"] == "Example Brokerage")
+
+        assert sidebar_value == net_worth_value == history_value == 59022.19
+
+    def test_sidebar_normalizes_legacy_plural_credit_card_group(self, client):
+        test_client, Session = client
+        db = Session()
+        db.add_all([
+            Transaction(
+                source_id="legacy-card-transaction",
+                source="Example Legacy Card",
+                date=date(2026, 7, 1),
+                amount=Decimal("-42.23"),
+                merchant_raw="EXAMPLE PURCHASE",
+                merchant_clean="Example Purchase",
+                category="Shopping",
+            ),
+            SourceBalanceHistory(
+                source_key="example_legacy_card",
+                source="Example Legacy Card",
+                account_group="credit_cards",
+                date=date(2026, 7, 1),
+                value=Decimal("-42.23"),
+                currency="USD",
+                provenance="transaction_ledger",
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        sidebar = test_client.get("/api/sync/sidebar-accounts?currency=USD").json()
+        row = next(item for item in sidebar["accounts"] if item["source"] == "Example Legacy Card")
+        assert row["group"] == "credit_card"
+        assert row["filter_source"] == "Example Legacy Card"
+
+    def test_account_activity_is_not_returned_by_household_transactions(self, client):
+        test_client, Session = client
+        db = Session()
+        db.add(AccountActivity(
+            source_id="example-interest-1",
+            source_key="example_cash_investment",
+            source="Example Cash Investment",
+            date=date(2026, 6, 30),
+            amount=Decimal("117.36"),
+            description="Interest Paid",
+            merchant="Interest Paid",
+            activity_type="interest",
+            currency="USD",
+        ))
+        db.commit()
+        db.close()
+
+        activity = test_client.get(
+            "/api/sync/plaid/investments/activity?source=Example%20Cash%20Investment&currency=USD"
+        ).json()
+        ledger = test_client.get(
+            "/api/transactions/?source=Example%20Cash%20Investment&currency=USD"
+        ).json()
+
+        assert len(activity["activity"]) == 1
+        assert activity["activity"][0]["type"] == "interest"
+        assert ledger["total"] == 0

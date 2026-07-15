@@ -23,7 +23,7 @@ A self-hosted personal finance tracker with multi-currency support, statement im
 Requires Docker Desktop or [Finch](https://github.com/runfinch/finch).
 
 ```bash
-git clone https://github.com/saikrn112/finance-app.git
+git clone <repository-url>
 cd finance-app
 bash scripts/start.sh
 ```
@@ -58,7 +58,7 @@ bash scripts/stop.sh         # Stop
 Add support for your bank by creating a plugin file in any of these locations:
 
 ```
-plugins/                     # Repo-level (ships with app)
+plugins/                     # Public plugin contract only; provider files are ignored
 ~/.finance-app/plugins/      # User-level (personal, gitignored)
 $FINANCE_PLUGINS_DIR/        # Custom path via environment variable
 ```
@@ -70,6 +70,8 @@ Each plugin exports a `register()` function returning a `ParserPlugin`. Supports
 - **investment** — Brokerage, HSA, trading account CSVs
 
 See `plugins/HOW_TO_ADD_PLUGIN.md` for full documentation with examples.
+
+Personal provider plugins, categorization rules, and runtime data should stay outside this repository. The personal plugin repository contains the privacy audit used before publishing.
 
 ## Architecture
 
@@ -84,7 +86,7 @@ src/
 └── vault/            # Google Drive backup/restore
 
 frontend/             # React + Vite + TailwindCSS
-plugins/              # Parser plugins (auto-discovered)
+plugins/              # Plugin contract and local ignored extension point
 data/                 # Runtime data (gitignored)
 ```
 
@@ -93,7 +95,7 @@ data/                 # Runtime data (gitignored)
 | Setting | Source | Notes |
 |---------|--------|-------|
 | Plaid keys | `config.yaml` | Get from [dashboard.plaid.com](https://dashboard.plaid.com) |
-| Google Drive | `config.yaml.example` (pre-filled) | Desktop OAuth — works out of the box |
+| Google Drive | `config.yaml.example` | Uses the app-owned desktop OAuth client |
 | Display currency | In-app Settings | USD, INR, EUR supported |
 | Category rules | `rules/categories.yaml` | YAML pattern matching |
 

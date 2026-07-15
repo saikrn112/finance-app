@@ -7,6 +7,7 @@ from src.api.routes import transactions, analytics, sync, settings, reconciliati
 from src.config import settings as app_settings
 from src.ingestion.import_service import migrate_import_artifact_paths
 from src.plugins.loader import load_plugins
+from src.ingestion.plaid_activity import migrate_investment_transactions
 from src.services.auto_tasks import start_auto_tasks, stop_auto_tasks
 from src.privacy_mask import PRIVACY_MASK_ENABLED, mask_json_body
 from pathlib import Path
@@ -57,6 +58,11 @@ def startup():
     load_plugins()
     init_db()
     from src.models import SessionLocal
+    db = SessionLocal()
+    try:
+        migrate_investment_transactions(db)
+    finally:
+        db.close()
     from src.services.exchange_rates import seed_identity_rates
 
     if app_settings.is_demo:

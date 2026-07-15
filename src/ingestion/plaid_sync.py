@@ -102,6 +102,14 @@ def upsert_plaid_transaction(
         _apply_txn_data(pending_existing, txn_data, matcher)
         return "pending_promoted"
 
+    replaced_item_txn = _find_replaced_item_txn(db, institution, txn_data)
+    if replaced_item_txn:
+        # Plaid IDs change when the same account is linked through a new Item.
+        # Reuse the enriched row so user categories and projects survive.
+        replaced_item_txn.source_id = txn_data["source_id"]
+        _apply_txn_data(replaced_item_txn, txn_data, matcher)
+        return "item_replaced"
+
     txn = Transaction(
         source=institution,
         source_id=txn_data["source_id"],
@@ -128,6 +136,31 @@ def _find_plaid_txn(db: Session, institution: str, source_id: str | None) -> Tra
         Transaction.origin == "plaid",
         Transaction.source_id == source_id,
     ).first()
+
+
+def _find_replaced_item_txn(
+    db: Session,
+    institution: str,
+    txn_data: dict[str, Any],
+) -> Transaction | None:
+    account_id = txn_data.get("plaid_account_id")
+    if not account_id:
+        return None
+    merchant = (txn_data.get("merchant_clean") or txn_data.get("merchant_raw") or "").strip().casefold()
+    candidates = db.query(Transaction).filter(
+        Transaction.source == institution,
+        Transaction.origin == "plaid",
+        Transaction.plaid_account_id.isnot(None),
+        Transaction.plaid_account_id != account_id,
+        Transaction.account_last4 == txn_data.get("account_last4"),
+        Transaction.date == txn_data["date"],
+        Transaction._amount == txn_data["amount"],
+    ).order_by(Transaction.created_at.asc()).all()
+    for candidate in candidates:
+        candidate_merchant = (candidate.merchant_clean or candidate.merchant_raw or "").strip().casefold()
+        if candidate_merchant == merchant:
+            return candidate
+    return None
 
 
 def _transfer_user_attributes(db: Session, src: Transaction, dest: Transaction) -> None:

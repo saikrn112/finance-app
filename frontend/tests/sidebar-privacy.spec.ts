@@ -2,12 +2,12 @@ import { test, expect, Page } from '@playwright/test'
 
 const sidebarAccounts = [
   {
-    source: 'Bank of America',
+    source: 'Example Bank',
     group: 'bank_account',
     balance: 117798.31,
     ledger_balance: 117798.31,
     snapshot_balance: 117798.31,
-    filter_source: 'Bank of America',
+    filter_source: 'Example Bank',
     connection_state: 'plaid',
   },
 ]

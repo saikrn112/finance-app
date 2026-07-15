@@ -10,20 +10,20 @@ class TestRuleMatcher:
 
     def test_match_groceries(self, temp_rules_file):
         matcher = RuleMatcher(temp_rules_file)
-        result = matcher.match("WHOLEFDS MKT #12345")
+        result = matcher.match("EXAMPLE GROCER #12345")
         assert result is not None
         assert result.category == "Groceries"
         assert result.source == "rule"
 
     def test_match_dining(self, temp_rules_file):
         matcher = RuleMatcher(temp_rules_file)
-        result = matcher.match("UBER *EATS ORDER")
+        result = matcher.match("EXAMPLE DELIVERY ORDER")
         assert result is not None
         assert result.category == "Dining"
 
     def test_match_subscriptions(self, temp_rules_file):
         matcher = RuleMatcher(temp_rules_file)
-        result = matcher.match("NETFLIX.COM")
+        result = matcher.match("EXAMPLE STREAM.COM")
         assert result is not None
         assert result.category == "Subscriptions"
 
@@ -40,8 +40,8 @@ class TestRuleMatcher:
 
     def test_merchant_clean_extraction(self, temp_rules_file):
         matcher = RuleMatcher(temp_rules_file)
-        result = matcher.match("WHOLEFDS MKT #999")
-        assert result.merchant_clean == "Whole Foods"
+        result = matcher.match("EXAMPLE GROCER #999")
+        assert result.merchant_clean == "Example Grocer"
 
     def test_missing_rules_file(self):
         matcher = RuleMatcher(Path("/nonexistent/rules.yaml"))
@@ -56,7 +56,7 @@ class TestCategorizationEngine:
     def test_rule_match_first(self, temp_rules_file):
         engine = CategorizationEngine()
         engine.rule_matcher = RuleMatcher(temp_rules_file)
-        result = engine.categorize("WHOLEFDS MKT", use_llm=False)
+        result = engine.categorize("EXAMPLE GROCER", use_llm=False)
         assert result.category == "Groceries"
         assert result.source == "rule"
 
@@ -82,7 +82,7 @@ class TestCategorizationEngine:
         engine = CategorizationEngine()
         engine.rule_matcher = RuleMatcher(temp_rules_file)
         # Amount shouldn't affect rule matching
-        result = engine.categorize("NETFLIX", amount=-15.99, use_llm=False)
+        result = engine.categorize("EXAMPLE STREAM", amount=-15.99, use_llm=False)
         assert result.category == "Subscriptions"
 
 

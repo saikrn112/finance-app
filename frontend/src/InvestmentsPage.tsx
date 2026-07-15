@@ -23,6 +23,16 @@ interface InvestmentHistoryPoint {
   ending_value?: number
 }
 
+interface AccountActivity {
+  id: string
+  date: string
+  description: string
+  merchant?: string
+  type: 'interest' | 'transfer' | 'dividend' | 'trade' | 'other'
+  amount: number
+  pending: boolean
+}
+
 function prettyStatementDate(value: string | null | undefined) {
   if (!value) return 'Unknown'
   const parsed = new Date(value)
@@ -47,19 +57,27 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
     queryFn: () => fetchJson<{ history: InvestmentHistoryPoint[] }>(`/sync/plaid/investments/history?currency=${encodeURIComponent(displayCurrency)}`),
     staleTime: 60_000,
   })
-
   const visibleSource = source || null
+  const { data: activityData } = useQuery({
+    queryKey: ['investment-activity', visibleSource, displayCurrency],
+    queryFn: () => fetchJson<{ activity: AccountActivity[] }>(`/sync/plaid/investments/activity?source=${encodeURIComponent(visibleSource || '')}&currency=${encodeURIComponent(displayCurrency)}`),
+    enabled: Boolean(visibleSource),
+    staleTime: 60_000,
+  })
+
   const sourceHoldingsRaw = visibleSource ? (data?.holdings || []).filter((h) => h.source === visibleSource) : (data?.holdings || [])
   const holdings = sourceHoldingsRaw.filter(h => h.ticker !== 'CUR:USD').sort((a, b) => (b.value || 0) - (a.value || 0))
   const cash = sourceHoldingsRaw.find(h => h.ticker === 'CUR:USD')
-  const totalValue = holdings.reduce((s, h) => s + (h.value || 0), 0) + (cash?.value || 0)
+  const holdingsValue = holdings.reduce((s, h) => s + (h.value || 0), 0) + (cash?.value || 0)
   const totalCost = holdings.reduce((s, h) => s + (h.cost_basis || 0), 0)
-  const totalGL = totalValue - totalCost - (cash?.value || 0)
-  const totalPct = totalCost > 0 ? totalGL / totalCost : 0
   const history = (historyData?.history || []).filter((row) => !visibleSource || row.source === visibleSource)
   const latestHistory = history.length ? history[history.length - 1] : null
+  const totalValue = visibleSource && latestHistory ? latestHistory.value : holdingsValue
+  const totalGL = holdingsValue - totalCost - (cash?.value || 0)
+  const totalPct = totalCost > 0 ? totalGL / totalCost : 0
   const title = visibleSource || 'Investments'
   const monthlyHistory = [...history].sort((a, b) => a.synced_at.localeCompare(b.synced_at)).slice(-12)
+  const activity = activityData?.activity || []
 
   return (
     <div className="app-shell min-h-screen dark:bg-slate-900 text-slate-900 dark:text-slate-100 p-4">
@@ -71,30 +89,28 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
 
       {isLoading ? <p className="text-slate-500">Loading...</p> : (
         <>
-          {/* Summary cards */}
-          <div className="grid grid-cols-4 gap-3 mb-5">
+          <div className={`grid gap-3 mb-5 ${holdings.length ? 'grid-cols-4' : 'grid-cols-2'}`}>
             <div className="app-surface dark:bg-slate-800 rounded-lg p-3">
-              <div className="text-xs text-slate-500">Portfolio Value</div>
+              <div className="text-xs text-slate-500">{holdings.length ? 'Portfolio Value' : 'Current Balance'}</div>
               <div className="text-xl font-bold">{fmt(totalValue)}</div>
             </div>
-            <div className="app-surface dark:bg-slate-800 rounded-lg p-3">
+            {holdings.length ? <div className="app-surface dark:bg-slate-800 rounded-lg p-3">
               <div className="text-xs text-slate-500">Total Cost</div>
               <div className="text-lg font-bold">{fmt(totalCost)}</div>
-            </div>
-            <div className="app-surface dark:bg-slate-800 rounded-lg p-3">
+            </div> : null}
+            {holdings.length ? <div className="app-surface dark:bg-slate-800 rounded-lg p-3">
               <div className="text-xs text-slate-500">Gain/Loss</div>
               <div className={`text-lg font-bold ${totalGL >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-400'}`}>
                 {fmt(totalGL)} ({pct(totalPct)})
               </div>
-            </div>
+            </div> : null}
             <div className="app-surface dark:bg-slate-800 rounded-lg p-3">
               <div className="text-xs text-slate-500">Latest Snapshot</div>
               <div className="text-lg font-bold">{prettyStatementDate(latestHistory?.synced_at || null)}</div>
             </div>
           </div>
 
-          {/* Holdings table */}
-          <div className="app-surface dark:bg-slate-800 rounded-lg p-4">
+          {holdings.length ? <div className="app-surface dark:bg-slate-800 rounded-lg p-4">
             <h2 className="font-semibold text-sm mb-3">Holdings ({formatCount(holdings.length, privacyMode)})</h2>
             <table className="w-full text-sm">
               <thead>
@@ -113,7 +129,6 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
                 {holdings.map(h => {
                   const gl = (h.value || 0) - (h.cost_basis || 0)
                   const glPct = h.cost_basis > 0 ? gl / h.cost_basis : 0
-                  const weight = totalValue > 0 ? (h.value || 0) / totalValue * 100 : 0
                   return (
                     <tr key={h.ticker} className="border-b dark:border-slate-700/50 hover:bg-[var(--app-surface-2)] dark:hover:bg-slate-700/30">
                       <td className="py-2 font-mono font-medium">{h.ticker}</td>
@@ -142,10 +157,9 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
                 </tr>
               </tfoot>
             </table>
-          </div>
+          </div> : null}
 
-          {/* Allocation bar */}
-          <div className="app-surface dark:bg-slate-800 rounded-lg p-4 mt-4">
+          {holdings.length ? <div className="app-surface dark:bg-slate-800 rounded-lg p-4 mt-4">
             <h2 className="font-semibold text-sm mb-3">Allocation</h2>
             <div className="flex h-6 rounded-full overflow-hidden">
               {holdings.map((h, i) => {
@@ -171,12 +185,36 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
                 )
               })}
             </div>
-          </div>
+          </div> : null}
 
           {visibleSource ? (
             <div className="app-surface dark:bg-slate-800 rounded-lg p-4 mt-4">
               <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="font-semibold text-sm">Monthly History</h2>
+                <h2 className="font-semibold text-sm">Account Activity</h2>
+                <span className="text-xs text-slate-500">Interest, transfers, and investment cash events</span>
+              </div>
+              {activity.length ? (
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-xs text-slate-500 border-b dark:border-slate-700">
+                    <th className="pb-2">Date</th><th className="pb-2">Activity</th><th className="pb-2">Type</th><th className="pb-2 text-right">Amount</th>
+                  </tr></thead>
+                  <tbody>{activity.map((row) => (
+                    <tr key={row.id} className="border-b dark:border-slate-700/50">
+                      <td className="py-2">{prettyStatementDate(row.date)}</td>
+                      <td className="py-2">{row.merchant || row.description}{row.pending ? <span className="ml-2 text-xs text-slate-500">pending</span> : null}</td>
+                      <td className="py-2 capitalize text-slate-500">{row.type}</td>
+                      <td className={`py-2 text-right font-medium ${row.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-400'}`}>{fmt(row.amount)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              ) : <p className="text-sm text-slate-500">No account activity has been synced yet.</p>}
+            </div>
+          ) : null}
+
+          {visibleSource ? (
+            <div className="app-surface dark:bg-slate-800 rounded-lg p-4 mt-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="font-semibold text-sm">Balance History</h2>
                 <span className="text-xs text-slate-500">{formatCount(monthlyHistory.length, privacyMode)} snapshots</span>
               </div>
               {monthlyHistory.length ? (

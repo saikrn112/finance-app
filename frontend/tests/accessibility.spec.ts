@@ -3,10 +3,10 @@ import { test, expect, Page } from '@playwright/test'
 const mockData = {
   summary: { income: 5000, spending: 2500, transfers: 500, spend_income_ratio: 50, net_flow: 2000, subscriptions_monthly: 150, range: 'month' },
   categories: [{ category: 'Groceries', total: 800 }, { category: 'Dining', total: 600 }],
-  merchants: [{ merchant: 'Amazon', total: 450 }],
+  merchants: [{ merchant: 'Example Shop', total: 450 }],
   trends: [{ period: '2026-02-01', total: 300 }],
-  subscriptions: [{ merchant: 'Netflix', amount: 15.99, frequency: 'monthly', last_charge: '2026-02-01', occurrences: 12 }],
-  transactions: { transactions: [{ id: '1', date: '2026-02-06', amount: -87.32, merchant_raw: 'WHOLE FOODS', merchant_clean: 'Whole Foods', category: 'Groceries', source: 'chase', account_last4: '4521', is_recurring: false, tags: [] }], total: 1, offset: 0, limit: 50 },
+  subscriptions: [{ merchant: 'Example Stream', amount: 15.99, frequency: 'monthly', last_charge: '2026-02-01', occurrences: 12 }],
+  transactions: { transactions: [{ id: '1', date: '2026-02-06', amount: -87.32, merchant_raw: 'EXAMPLE GROCER', merchant_clean: 'Example Grocer', category: 'Groceries', source: 'example_card', account_last4: '4521', is_recurring: false, tags: [] }], total: 1, offset: 0, limit: 50 },
 }
 
 async function setupMocks(page: Page) {

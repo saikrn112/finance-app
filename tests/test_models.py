@@ -12,7 +12,7 @@ class TestTransaction:
     def test_create_transaction(self, db_session):
         txn = Transaction(
             source_id="test123",
-            source="chase",
+            source="example_card",
             date=date(2026, 2, 1),
             amount=Decimal("-50.00"),
             merchant_raw="TEST MERCHANT",
@@ -25,14 +25,14 @@ class TestTransaction:
 
     def test_unique_source_source_id_constraint(self, db_session):
         txn1 = Transaction(
-            source_id="dup123", source="chase", date=date(2026, 2, 1),
+            source_id="dup123", source="example_card", date=date(2026, 2, 1),
             amount=Decimal("-50.00"), merchant_raw="MERCHANT"
         )
         db_session.add(txn1)
         db_session.commit()
         
         txn2 = Transaction(
-            source_id="dup123", source="chase", date=date(2026, 2, 2),
+            source_id="dup123", source="example_card", date=date(2026, 2, 2),
             amount=Decimal("-60.00"), merchant_raw="MERCHANT 2"
         )
         db_session.add(txn2)
@@ -42,11 +42,11 @@ class TestTransaction:
 
     def test_same_source_id_different_source_allowed(self, db_session):
         txn1 = Transaction(
-            source_id="same123", source="chase", date=date(2026, 2, 1),
+            source_id="same123", source="example_card", date=date(2026, 2, 1),
             amount=Decimal("-50.00"), merchant_raw="MERCHANT"
         )
         txn2 = Transaction(
-            source_id="same123", source="amex", date=date(2026, 2, 1),
+            source_id="same123", source="example_charge_card", date=date(2026, 2, 1),
             amount=Decimal("-50.00"), merchant_raw="MERCHANT"
         )
         db_session.add(txn1)
@@ -57,7 +57,7 @@ class TestTransaction:
 
     def test_default_values(self, db_session):
         txn = Transaction(
-            source_id="def123", source="chase", date=date(2026, 2, 1),
+            source_id="def123", source="example_card", date=date(2026, 2, 1),
             amount=Decimal("-50.00"), merchant_raw="MERCHANT"
         )
         db_session.add(txn)
@@ -68,7 +68,7 @@ class TestTransaction:
 
     def test_updated_at_changes_on_update(self, db_session):
         txn = Transaction(
-            source_id="upd123", source="chase", date=date(2026, 2, 1),
+            source_id="upd123", source="example_card", date=date(2026, 2, 1),
             amount=Decimal("-50.00"), merchant_raw="MERCHANT"
         )
         db_session.add(txn)
@@ -87,10 +87,10 @@ class TestSubscription:
 
     def test_create_subscription(self, db_session):
         sub = Subscription(
-            merchant="Netflix",
+            merchant="Example Stream",
             amount=Decimal("15.99"),
             frequency="monthly",
-            source="chase",
+            source="example_card",
             status="active"
         )
         db_session.add(sub)
@@ -125,7 +125,7 @@ class TestRule:
 
     def test_create_rule(self, db_session):
         rule = Rule(
-            pattern="NETFLIX",
+            pattern="EXAMPLE STREAM",
             category="Subscriptions",
             source="user"
         )
@@ -149,7 +149,7 @@ class TestSyncLog:
 
     def test_create_sync_log(self, db_session):
         log = SyncLog(
-            source="chase",
+            source="example_card",
             sync_type="csv",
             file_hash="abc123",
             record_count=100,

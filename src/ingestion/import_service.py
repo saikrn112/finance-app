@@ -16,6 +16,7 @@ from src.config import settings
 from src.data_paths import import_manifest_path, import_preview_dir, raw_source_dir
 from src.ingestion.csv_importer import parse_csv
 from src.models import SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot
+from src.services.account_values import record_account_value
 from src.models import Payslip, PayslipLineItem, RetirementTransaction, RetirementStatement
 from src.processing.categorizer import RuleMatcher
 from src.processing.overlap_diagnostics import _merchant_matches
@@ -199,6 +200,15 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
                     synced_at=snapshot_date,
                 )
             )
+            record_account_value(
+                db,
+                source=manifest["source"],
+                account_group=account_group,
+                value=float(ending_balance),
+                observed_at=snapshot_date,
+                currency=currency,
+                provenance="statement",
+            )
     elif manifest["record_type"] == "payslip":
         if duplicate_summary["importable_count"] == 0 and duplicate_summary["duplicate_count"] > 0:
             return {
@@ -340,6 +350,15 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
                     created_at=synced_at,
                 )
             )
+            record_account_value(
+                db,
+                source=manifest["source"],
+                account_group="retirement",
+                value=float(latest.get("ending_balance") or 0),
+                observed_at=synced_at,
+                currency=retirement_currency,
+                provenance="statement",
+            )
         if imported == 0 and duplicate_summary["duplicate_count"] > 0:
             return {
                 "status": "already_imported",
@@ -364,6 +383,7 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
         summary = payload.get("summary") or {}
         holdings = list(payload.get("holdings") or [])
         source_name = manifest["source"]
+        investment_plugin = get_all_sources().get(manifest.get("source_key", ""))
         db.add(
             AccountSnapshot(
                 source=source_name,
@@ -373,6 +393,15 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
                 synced_at=synced_at,
                 created_at=synced_at,
             )
+        )
+        record_account_value(
+            db,
+            source=source_name,
+            account_group="investment",
+            value=float(summary.get("ending_value") or 0),
+            observed_at=synced_at,
+            currency=investment_plugin.currency if investment_plugin else "USD",
+            provenance="statement",
         )
         for holding in holdings:
             db.add(

@@ -210,7 +210,8 @@ export function Ledger({
   const { data: categoryOptionsData } = useQuery({
     queryKey: ['transaction-category-options'],
     queryFn: () => api.getTransactionCategoryOptions(),
-    staleTime: 300_000,
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 
   const categoryOptions = categoryOptionsData?.categories?.length ? categoryOptionsData.categories : fallbackCategoryOptions

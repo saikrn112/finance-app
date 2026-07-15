@@ -11,19 +11,19 @@ def test_repeated_statement_transactions_both_import(db_session):
     Plaid row present — they are distinct transactions, not duplicates."""
     content = (
         b"Transaction Date,Amount,Description\n"
-        b"02/10/2026,-5.25,STARBUCKS STORE 12345\n"
-        b"02/12/2026,-5.25,STARBUCKS STORE 12345\n"
+        b"02/10/2026,-5.25,EXAMPLE COFFEE 12345\n"
+        b"02/12/2026,-5.25,EXAMPLE COFFEE 12345\n"
     )
     preview = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
     result = commit_import(db_session, preview["import_id"])
 
-    rows = db_session.query(Transaction).filter(Transaction.source == "Chase").all()
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
     assert result["imported"] == 2
     assert result["skipped"] == 0
     assert len(rows) == 2
@@ -36,8 +36,8 @@ def test_reimport_same_file_is_idempotent(db_session):
     preview1 = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
     commit_import(db_session, preview1["import_id"])
@@ -45,13 +45,13 @@ def test_reimport_same_file_is_idempotent(db_session):
     preview2 = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
     result2 = commit_import(db_session, preview2["import_id"])
 
-    rows = db_session.query(Transaction).filter(Transaction.source == "Chase").all()
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
     assert result2["status"] == "already_imported"
     assert result2["imported"] == 0
     assert len(rows) == 1
@@ -62,8 +62,8 @@ def test_statement_vs_plaid_heuristic_dedup_still_works(db_session):
     nearby date, same absolute amount, similar merchant) must still be suppressed."""
     db_session.add(
         Transaction(
-            source="Chase",
-            source_id="plaid-chase-1",
+            source="Example Card",
+            source_id="plaid-example_card-1",
             origin="plaid",
             date=date(2026, 2, 16),
             amount=Decimal("-23.47"),
@@ -79,8 +79,8 @@ def test_statement_vs_plaid_heuristic_dedup_still_works(db_session):
     preview = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
     result = commit_import(db_session, preview["import_id"])
@@ -92,13 +92,13 @@ def test_statement_vs_plaid_heuristic_dedup_still_works(db_session):
 def test_preview_import_marks_cross_source_duplicates(db_session):
     db_session.add(
         Transaction(
-            source="American Express",
+            source="Example Charge Card",
             source_id="plaid-1",
             origin="plaid",
             date=date(2026, 2, 8),
             amount=Decimal("-132.65"),
-            merchant_raw="Walmart",
-            merchant_clean="Walmart",
+            merchant_raw="Example Store",
+            merchant_clean="Example Store",
             category="Groceries",
             category_source="rule",
         )
@@ -109,8 +109,8 @@ def test_preview_import_marks_cross_source_duplicates(db_session):
     preview = preview_import(
         db_session,
         file_bytes=content,
-        filename="amex.csv",
-        source="amex",
+        filename="example_charge_card.csv",
+        source="example_charge_card",
         kind="csv",
     )
 
@@ -121,8 +121,8 @@ def test_preview_import_marks_cross_source_duplicates(db_session):
 def test_preview_import_marks_legacy_statement_duplicates(db_session):
     db_session.add(
         Transaction(
-            source="Chase",
-            source_id="Chase_2024-08-20_16.0_0",
+            source="Example Card",
+            source_id="Example Card_2024-08-20_16.0_0",
             origin="statements",
             date=date(2024, 8, 20),
             amount=Decimal("-16.00"),
@@ -138,8 +138,8 @@ def test_preview_import_marks_legacy_statement_duplicates(db_session):
     preview = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
 
@@ -150,7 +150,7 @@ def test_preview_import_marks_legacy_statement_duplicates(db_session):
 def test_commit_import_skips_duplicates_and_inserts_new_rows(db_session):
     db_session.add(
         Transaction(
-            source="Chase",
+            source="Example Card",
             source_id="existing",
             origin="plaid",
             date=date(2026, 2, 16),
@@ -167,13 +167,13 @@ def test_commit_import_skips_duplicates_and_inserts_new_rows(db_session):
     preview = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
     result = commit_import(db_session, preview["import_id"])
 
-    rows = db_session.query(Transaction).filter(Transaction.source == "Chase").all()
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
     assert result["imported"] == 1
     assert result["skipped"] == 1
     assert len(rows) == 2
@@ -184,8 +184,8 @@ def test_preview_marks_reimported_file_as_duplicate(db_session):
     first = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
     commit_import(db_session, first["import_id"])
@@ -193,8 +193,8 @@ def test_preview_marks_reimported_file_as_duplicate(db_session):
     second = preview_import(
         db_session,
         file_bytes=content,
-        filename="chase.csv",
-        source="chase",
+        filename="example_card.csv",
+        source="example_card",
         kind="csv",
     )
 
@@ -327,15 +327,15 @@ def test_payslip_preview_marks_legacy_payslip_duplicates(db_session, monkeypatch
 def test_commit_retirement_import_persists_payload(db_session):
     content = (
         b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-        b"02/14/26,Employee Pre-Tax,Employee,Vanguard 2060,7.8142,138.22,1080.54\n"
-        b"02/14/26,Employer Match,Employer Match,Vanguard 2060,3.9071,138.22,540.27\n"
+        b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
+        b"02/14/26,Employer Match,Employer Match,Example Target Fund,3.9071,138.22,540.27\n"
     )
 
     preview = preview_import(
         db_session,
         file_bytes=content,
-        filename="transamerica.csv",
-        source="transamerica",
+        filename="example_retirement.csv",
+        source="example_retirement",
         kind="retirement_csv",
     )
     result = commit_import(db_session, preview["import_id"])
@@ -351,29 +351,29 @@ def test_commit_retirement_import_persists_payload(db_session):
 def test_retirement_preview_and_commit_skip_existing_rows(db_session):
     first_content = (
         b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-        b"02/14/26,Employee Pre-Tax,Employee,Vanguard 2060,7.8142,138.22,1080.54\n"
-        b"02/14/26,Employer Match,Employer Match,Vanguard 2060,3.9071,138.22,540.27\n"
+        b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
+        b"02/14/26,Employer Match,Employer Match,Example Target Fund,3.9071,138.22,540.27\n"
     )
     first = preview_import(
         db_session,
         file_bytes=first_content,
-        filename="transamerica-1.csv",
-        source="transamerica",
+        filename="example_retirement-1.csv",
+        source="example_retirement",
         kind="retirement_csv",
     )
     commit_import(db_session, first["import_id"])
 
     second_content = (
         b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-        b"02/14/26,Employee Pre-Tax,Employee,Vanguard 2060,7.8142,138.22,1080.54\n"
-        b"02/14/26,Employer Match,Employer Match,Vanguard 2060,3.9071,138.22,540.27\n"
-        b"02/28/26,Employee Pre-Tax,Employee,Vanguard 2060,8.0000,140.00,1120.00\n"
+        b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
+        b"02/14/26,Employer Match,Employer Match,Example Target Fund,3.9071,138.22,540.27\n"
+        b"02/28/26,Employee Pre-Tax,Employee,Example Target Fund,8.0000,140.00,1120.00\n"
     )
     second = preview_import(
         db_session,
         file_bytes=second_content,
-        filename="transamerica-2.csv",
-        source="transamerica",
+        filename="example_retirement-2.csv",
+        source="example_retirement",
         kind="retirement_csv",
     )
     result = commit_import(db_session, second["import_id"])
@@ -395,10 +395,10 @@ def test_retirement_preview_marks_legacy_csv_duplicates(db_session, monkeypatch)
         db_session,
         file_bytes=(
             b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-            b"02/14/26,Employee Pre-Tax,Employee,Vanguard 2060,7.8142,138.22,1080.54\n"
+            b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
         ),
-        filename="transamerica.csv",
-        source="transamerica",
+        filename="example_retirement.csv",
+        source="example_retirement",
         kind="retirement_csv",
     )
     legacy_source_id = first_preview["payload"]["transactions"][0]["source_id"]
@@ -416,10 +416,10 @@ def test_retirement_preview_marks_legacy_csv_duplicates(db_session, monkeypatch)
         db_session,
         file_bytes=(
             b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-            b"02/14/26,Employee Pre-Tax,Employee,Vanguard 2060,7.8142,138.22,1080.54\n"
+            b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
         ),
-        filename="transamerica.csv",
-        source="transamerica",
+        filename="example_retirement.csv",
+        source="example_retirement",
         kind="retirement_csv",
     )
 

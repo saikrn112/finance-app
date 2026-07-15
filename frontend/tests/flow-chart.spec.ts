@@ -29,7 +29,7 @@ async function setupFlowMocks(page: Page) {
     const url = route.request().url()
     if (url.includes('/api/analytics/summary')) return route.fulfill({ json: summary })
     if (url.includes('/api/analytics/by-category')) return route.fulfill({ json: [{ category: 'Groceries', total: -50 }, { category: 'Dining', total: -25 }] })
-    if (url.includes('/api/analytics/by-merchant')) return route.fulfill({ json: [{ merchant: 'Whole Foods', total: 50 }] })
+    if (url.includes('/api/analytics/by-merchant')) return route.fulfill({ json: [{ merchant: 'Example Grocer', total: 50 }] })
     if (url.includes('/api/analytics/trends')) {
       const useCore = url.includes('core_expenses_only=1')
       return route.fulfill({ json: useCore ? coreTrends : standardTrends })

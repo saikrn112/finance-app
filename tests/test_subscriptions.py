@@ -15,17 +15,17 @@ class TestDetectSubscriptions:
     """Tests for subscription detection logic."""
 
     def test_detects_monthly_subscription(self, db_session, sample_transactions):
-        # Netflix appears on Dec 1, Jan 1, Feb 3 - monthly pattern
+        # Example Stream appears on Dec 1, Jan 1, Feb 3 - monthly pattern
         subs = detect_subscriptions(db_session)
-        netflix = next((s for s in subs if "Netflix" in s["merchant"]), None)
-        assert netflix is not None
-        assert netflix["frequency"] == "monthly"
-        assert netflix["amount"] == 15.99
+        example_stream = next((s for s in subs if "Example Stream" in s["merchant"]), None)
+        assert example_stream is not None
+        assert example_stream["frequency"] == "monthly"
+        assert example_stream["amount"] == 15.99
 
     def test_requires_minimum_occurrences(self, db_session):
         # Single transaction shouldn't be detected as subscription
         txn = Transaction(
-            source_id="single", source="chase", date=date.today(),
+            source_id="single", source="example_card", date=date.today(),
             amount=Decimal("-9.99"), merchant_raw="ONE TIME",
             merchant_clean="One Time", category="Shopping"
         )
@@ -44,7 +44,7 @@ class TestDetectSubscriptions:
         for i, amount in enumerate([9.99, 19.99]):
             for month in range(3):
                 txn = Transaction(
-                    source_id=f"sub_{i}_{month}", source="chase",
+                    source_id=f"sub_{i}_{month}", source="example_card",
                     date=date.today() - timedelta(days=30 * month),
                     amount=Decimal(f"-{amount}"), merchant_raw=f"SERVICE_{i}",
                     merchant_clean=f"Service {i}", category="Subscriptions"
@@ -59,7 +59,7 @@ class TestDetectSubscriptions:
     def test_detects_biweekly_frequency(self, db_session):
         for i in range(4):
             txn = Transaction(
-                source_id=f"biweekly_{i}", source="chase",
+                source_id=f"biweekly_{i}", source="example_card",
                 date=date.today() - timedelta(days=14 * i),
                 amount=Decimal("-50.00"), merchant_raw="BIWEEKLY SVC",
                 merchant_clean="Biweekly Service", category="Subscriptions"
@@ -75,7 +75,7 @@ class TestDetectSubscriptions:
     def test_detects_quarterly_frequency(self, db_session):
         for i in range(3):
             txn = Transaction(
-                source_id=f"quarterly_{i}", source="chase",
+                source_id=f"quarterly_{i}", source="example_card",
                 date=date.today() - timedelta(days=90 * i),
                 amount=Decimal("-99.00"), merchant_raw="QUARTERLY SVC",
                 merchant_clean="Quarterly Service", category="Subscriptions"
@@ -94,7 +94,7 @@ class TestDetectSubscriptions:
                  date.today() - timedelta(days=60)]
         for i, d in enumerate(dates):
             txn = Transaction(
-                source_id=f"irregular_{i}", source="chase", date=d,
+                source_id=f"irregular_{i}", source="example_card", date=d,
                 amount=Decimal("-25.00"), merchant_raw="IRREGULAR",
                 merchant_clean="Irregular", category="Shopping"
             )
@@ -108,7 +108,7 @@ class TestDetectSubscriptions:
         for i, amount in enumerate([5.00, 50.00, 25.00]):
             for month in range(3):
                 txn = Transaction(
-                    source_id=f"sort_{i}_{month}", source="chase",
+                    source_id=f"sort_{i}_{month}", source="example_card",
                     date=date.today() - timedelta(days=30 * month),
                     amount=Decimal(f"-{amount}"), merchant_raw=f"SORT_{i}",
                     merchant_clean=f"Sort {i}", category="Subscriptions"
@@ -127,13 +127,13 @@ class TestGetMonthlySubscriptionTotal:
 
     def test_sums_monthly_subscriptions(self, db_session, sample_transactions):
         total = get_monthly_subscription_total(db_session)
-        # Netflix at $15.99/month
+        # Example Stream at $15.99/month
         assert total >= 15.99
 
     def test_normalizes_biweekly_to_monthly(self, db_session):
         for i in range(4):
             txn = Transaction(
-                source_id=f"bw_{i}", source="chase",
+                source_id=f"bw_{i}", source="example_card",
                 date=date.today() - timedelta(days=14 * i),
                 amount=Decimal("-25.00"), merchant_raw="BIWEEKLY",
                 merchant_clean="Biweekly", category="Subscriptions"
@@ -148,7 +148,7 @@ class TestGetMonthlySubscriptionTotal:
     def test_normalizes_quarterly_to_monthly(self, db_session):
         for i in range(3):
             txn = Transaction(
-                source_id=f"q_{i}", source="chase",
+                source_id=f"q_{i}", source="example_card",
                 date=date.today() - timedelta(days=90 * i),
                 amount=Decimal("-90.00"), merchant_raw="QUARTERLY",
                 merchant_clean="Quarterly", category="Subscriptions"
@@ -163,7 +163,7 @@ class TestGetMonthlySubscriptionTotal:
     def test_normalizes_yearly_to_monthly(self, db_session):
         for i in range(2):
             txn = Transaction(
-                source_id=f"y_{i}", source="chase",
+                source_id=f"y_{i}", source="example_card",
                 date=date.today() - timedelta(days=365 * i),
                 amount=Decimal("-120.00"), merchant_raw="YEARLY",
                 merchant_clean="Yearly", category="Subscriptions"
@@ -190,12 +190,12 @@ class TestRecurringWorkspace:
         for i, when in enumerate([date(2025, 12, 12), date(2026, 1, 12)]):
             db_session.add(
                 Transaction(
-                    source_id=f"openai_{i}",
-                    source="chase",
+                    source_id=f"example_service_{i}",
+                    source="example_card",
                     date=when,
                     amount=Decimal("-20.00"),
-                    merchant_raw="OPENAI *CHATGPT SUBSCR",
-                    merchant_clean="OpenAI",
+                    merchant_raw="EXAMPLE SOFTWARE SUBSCRIPTION",
+                    merchant_clean="Example Software",
                     category="Subscriptions/Tech",
                     account_last4="9001",
                 )
@@ -203,10 +203,10 @@ class TestRecurringWorkspace:
         db_session.commit()
 
         catalog = get_recurring_catalog(db_session, start_date=date(2026, 1, 1), end_date=date(2026, 3, 31))
-        openai = next(item for item in catalog["items"] if item["display_name"] == "OpenAI")
+        example_service = next(item for item in catalog["items"] if item["display_name"] == "Example Software")
 
-        assert openai["status"] == "ended"
-        assert openai["ended_at"] == "2026-02-11"
+        assert example_service["status"] == "ended"
+        assert example_service["ended_at"] == "2026-02-11"
 
     def test_detail_surfaces_price_change_event(self, db_session):
         charges = [
@@ -219,7 +219,7 @@ class TestRecurringWorkspace:
             db_session.add(
                 Transaction(
                     source_id=f"disney_{i}",
-                    source="amex",
+                    source="example_charge_card",
                     date=when,
                     amount=amount,
                     merchant_raw="DISNEYPLUS 888-905-7888 CA",

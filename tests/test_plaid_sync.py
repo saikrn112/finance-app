@@ -9,7 +9,7 @@ from src.processing.overlap_diagnostics import audit_source_overlaps
 def test_apply_plaid_sync_batch_updates_modified_transactions(db_session):
     db_session.add(
         Transaction(
-            source="Chase",
+            source="Example Card",
             source_id="txn-1",
             origin="plaid",
             date=date(2026, 2, 27),
@@ -24,7 +24,7 @@ def test_apply_plaid_sync_batch_updates_modified_transactions(db_session):
 
     counts = apply_plaid_sync_batch(
         db_session,
-        institution="Chase",
+        institution="Example Card",
         added=[],
         modified=[
             {
@@ -41,7 +41,7 @@ def test_apply_plaid_sync_batch_updates_modified_transactions(db_session):
     )
     db_session.commit()
 
-    txn = db_session.query(Transaction).filter(Transaction.source == "Chase", Transaction.source_id == "txn-1").one()
+    txn = db_session.query(Transaction).filter(Transaction.source == "Example Card", Transaction.source_id == "txn-1").one()
     assert counts.updated == 1
     assert txn.date == date(2026, 3, 1)
     assert float(txn._amount) == -23.99
@@ -51,13 +51,13 @@ def test_apply_plaid_sync_batch_updates_modified_transactions(db_session):
 def test_apply_plaid_sync_batch_promotes_pending_transaction(db_session):
     db_session.add(
         Transaction(
-            source="American Express",
+            source="Example Charge Card",
             source_id="pending-1",
             origin="plaid",
             date=date(2026, 2, 8),
             amount=Decimal("-132.65"),
-            merchant_raw="Walmart",
-            merchant_clean="Walmart",
+            merchant_raw="Example Store",
+            merchant_clean="Example Store",
             category="Groceries",
             category_source="rule",
         )
@@ -66,15 +66,15 @@ def test_apply_plaid_sync_batch_promotes_pending_transaction(db_session):
 
     counts = apply_plaid_sync_batch(
         db_session,
-        institution="American Express",
+        institution="Example Charge Card",
         added=[
             {
                 "source_id": "posted-1",
                 "pending_transaction_id": "pending-1",
                 "date": date(2026, 2, 9),
                 "amount": -132.65,
-                "merchant_raw": "Walmart",
-                "merchant_clean": "Walmart",
+                "merchant_raw": "Example Store",
+                "merchant_clean": "Example Store",
                 "account_last4": "2100",
             }
         ],
@@ -83,7 +83,7 @@ def test_apply_plaid_sync_batch_promotes_pending_transaction(db_session):
     )
     db_session.commit()
 
-    txns = db_session.query(Transaction).filter(Transaction.source == "American Express", Transaction.origin == "plaid").all()
+    txns = db_session.query(Transaction).filter(Transaction.source == "Example Charge Card", Transaction.origin == "plaid").all()
     assert counts.pending_promotions == 1
     assert len(txns) == 1
     assert txns[0].source_id == "posted-1"
@@ -94,24 +94,24 @@ def test_overlap_audit_finds_statement_vs_plaid_duplicate(db_session):
     db_session.add_all(
         [
             Transaction(
-                source="American Express",
+                source="Example Charge Card",
                 source_id="stmt-1",
                 origin="statements",
                 date=date(2026, 2, 7),
                 amount=Decimal("-132.65"),
                 merchant_raw="WAL-MART NEIGHBORHOOD MARKET 1234 ANYTOWN CA",
-                merchant_clean="Walmart",
+                merchant_clean="Example Store",
                 category="Groceries",
                 category_source="rule",
             ),
             Transaction(
-                source="American Express",
+                source="Example Charge Card",
                 source_id="plaid-1",
                 origin="plaid",
                 date=date(2026, 2, 8),
                 amount=Decimal("-132.65"),
-                merchant_raw="Walmart",
-                merchant_clean="Walmart",
+                merchant_raw="Example Store",
+                merchant_clean="Example Store",
                 category="Groceries",
                 category_source="rule",
             ),
@@ -119,7 +119,7 @@ def test_overlap_audit_finds_statement_vs_plaid_duplicate(db_session):
     )
     db_session.commit()
 
-    audit = audit_source_overlaps(db_session, "American Express")
+    audit = audit_source_overlaps(db_session, "Example Charge Card")
     assert audit["cross_source_overlap_total"] == 132.65
     assert len(audit["cross_source_overlaps"]) == 1
     assert audit["cross_source_overlaps"][0]["date_diff_days"] == 1
@@ -129,7 +129,7 @@ def test_overlap_audit_finds_plaid_pending_duplicates(db_session):
     db_session.add_all(
         [
             Transaction(
-                source="Chase",
+                source="Example Card",
                 source_id="plaid-a",
                 origin="plaid",
                 date=date(2026, 3, 2),
@@ -140,7 +140,7 @@ def test_overlap_audit_finds_plaid_pending_duplicates(db_session):
                 category_source="rule",
             ),
             Transaction(
-                source="Chase",
+                source="Example Card",
                 source_id="plaid-b",
                 origin="plaid",
                 date=date(2026, 3, 3),
@@ -154,7 +154,7 @@ def test_overlap_audit_finds_plaid_pending_duplicates(db_session):
     )
     db_session.commit()
 
-    audit = audit_source_overlaps(db_session, "Chase")
+    audit = audit_source_overlaps(db_session, "Example Card")
     assert audit["plaid_duplicate_total"] == 156.34
     assert len(audit["plaid_duplicates"]) == 1
 
@@ -162,7 +162,7 @@ def test_overlap_audit_finds_plaid_pending_duplicates(db_session):
 def test_apply_plaid_sync_batch_skips_pending_rows(db_session):
     counts = apply_plaid_sync_batch(
         db_session,
-        institution="Chase",
+        institution="Example Card",
         added=[
             {
                 "source_id": "pending-lyft",
@@ -180,7 +180,7 @@ def test_apply_plaid_sync_batch_skips_pending_rows(db_session):
     )
     db_session.commit()
 
-    rows = db_session.query(Transaction).filter(Transaction.source == "Chase").all()
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
     assert counts.skipped_pending == 1
     assert rows == []
 
@@ -188,13 +188,13 @@ def test_apply_plaid_sync_batch_skips_pending_rows(db_session):
 def test_apply_plaid_sync_batch_skips_statement_boundary_overlap(db_session):
     db_session.add(
         Transaction(
-            source="American Express",
+            source="Example Charge Card",
             source_id="stmt-1",
             origin="statements",
             date=date(2026, 2, 7),
             amount=Decimal("-132.65"),
             merchant_raw="WAL-MART NEIGHBORHOOD MARKET 1234 ANYTOWN CA",
-            merchant_clean="Walmart",
+            merchant_clean="Example Store",
             category="Groceries",
             category_source="rule",
         )
@@ -203,7 +203,7 @@ def test_apply_plaid_sync_batch_skips_statement_boundary_overlap(db_session):
 
     counts = apply_plaid_sync_batch(
         db_session,
-        institution="American Express",
+        institution="Example Charge Card",
         added=[
             {
                 "source_id": "plaid-dup",
@@ -211,8 +211,8 @@ def test_apply_plaid_sync_batch_skips_statement_boundary_overlap(db_session):
                 "pending": False,
                 "date": date(2026, 2, 8),
                 "amount": -132.65,
-                "merchant_raw": "Walmart",
-                "merchant_clean": "Walmart",
+                "merchant_raw": "Example Store",
+                "merchant_clean": "Example Store",
                 "account_last4": "2100",
             }
         ],
@@ -221,6 +221,93 @@ def test_apply_plaid_sync_batch_skips_statement_boundary_overlap(db_session):
     )
     db_session.commit()
 
-    rows = db_session.query(Transaction).filter(Transaction.source == "American Express", Transaction.origin == "plaid").all()
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Charge Card", Transaction.origin == "plaid").all()
     assert counts.skipped_statement_overlap == 1
     assert rows == []
+
+
+def test_replaced_plaid_item_reuses_enriched_transaction(db_session):
+    original = Transaction(
+        source="Example Card",
+        source_id="retired-item-txn",
+        origin="plaid",
+        plaid_account_id="retired-account-id",
+        account_last4="1234",
+        date=date(2026, 7, 12),
+        amount=Decimal("-17.39"),
+        merchant_raw="Example Store",
+        merchant_clean="Example Store",
+        category="Groceries/Specialty",
+        category_source="user",
+        notes="keep this",
+    )
+    db_session.add(original)
+    db_session.commit()
+    original_id = original.id
+
+    counts = apply_plaid_sync_batch(
+        db_session,
+        institution="Example Card",
+        added=[{
+            "source_id": "surviving-item-txn",
+            "pending_transaction_id": None,
+            "pending": False,
+            "plaid_account_id": "surviving-account-id",
+            "account_last4": "1234",
+            "date": date(2026, 7, 12),
+            "amount": -17.39,
+            "merchant_raw": "Example Store",
+            "merchant_clean": "Example Store",
+        }],
+        modified=[],
+        removed=[],
+    )
+    db_session.commit()
+
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
+    assert counts.updated == 1
+    assert len(rows) == 1
+    assert rows[0].id == original_id
+    assert rows[0].source_id == "surviving-item-txn"
+    assert rows[0].plaid_account_id == "surviving-account-id"
+    assert rows[0].category == "Groceries/Specialty"
+    assert rows[0].category_source == "user"
+    assert rows[0].notes == "keep this"
+
+
+def test_same_item_equal_transactions_remain_distinct(db_session):
+    db_session.add(Transaction(
+        source="Example Card",
+        source_id="first-fare",
+        origin="plaid",
+        plaid_account_id="same-account-id",
+        account_last4="1234",
+        date=date(2026, 7, 6),
+        amount=Decimal("-20.00"),
+        merchant_raw="Transit Fare",
+        merchant_clean="Transit Fare",
+        category="Transportation/Transit",
+        category_source="user",
+    ))
+    db_session.commit()
+
+    apply_plaid_sync_batch(
+        db_session,
+        institution="Example Card",
+        added=[{
+            "source_id": "second-fare",
+            "pending_transaction_id": None,
+            "pending": False,
+            "plaid_account_id": "same-account-id",
+            "account_last4": "1234",
+            "date": date(2026, 7, 6),
+            "amount": -20.00,
+            "merchant_raw": "Transit Fare",
+            "merchant_clean": "Transit Fare",
+        }],
+        modified=[],
+        removed=[],
+    )
+    db_session.commit()
+
+    assert db_session.query(Transaction).filter(Transaction.source == "Example Card").count() == 2

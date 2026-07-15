@@ -3,6 +3,7 @@ from plaid.api import plaid_api
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
+from plaid.model.item_remove_request import ItemRemoveRequest
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from plaid.model.products import Products
 from plaid.model.country_code import CountryCode
@@ -67,6 +68,12 @@ def exchange_public_token(public_token: str, metadata: dict = None) -> tuple[str
         institution_name = metadata["institution"].get("name", "")
     
     return response.access_token, response.item_id, institution_name
+
+
+def remove_item(access_token: str) -> None:
+    """Revoke a Plaid Item so a local disconnect also stops remote access."""
+    client = get_plaid_client()
+    client.item_remove(ItemRemoveRequest(access_token=access_token))
 
 
 def sync_transactions(access_token: str, cursor: str | None = None) -> dict:
@@ -164,6 +171,8 @@ def get_account_balances(access_token: str) -> list[dict]:
     request = AccountsBalanceGetRequest(access_token=access_token)
     response = client.accounts_balance_get(request)
     return [{"account_id": a.account_id, "name": a.name,
+             "mask": getattr(a, "mask", None),
              "type": a.type.value if a.type else None,
+             "subtype": a.subtype.value if a.subtype else None,
              "current": float(a.balances.current) if a.balances.current is not None else None}
             for a in response.accounts]

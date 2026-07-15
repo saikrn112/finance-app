@@ -586,8 +586,8 @@ export const api = {
     request<Transaction>(`/transactions/${id}?currency=${encodeURIComponent(currency)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   // Plaid
   getLinkToken: (products?: string, accountId?: string) => request<{ link_token?: string }>(`/sync/plaid/link-token?${new URLSearchParams({ ...(products ? { products } : {}), ...(accountId ? { account_id: accountId } : {}) }).toString()}`, { method: 'POST' }),
-  exchangeToken: (public_token: string, institution_name: string = "", accountId?: string) =>
-    request(`/sync/plaid/exchange?${new URLSearchParams({ public_token, institution_name, ...(accountId ? { account_id: accountId } : {}) }).toString()}`, { method: 'POST' }),
+  exchangeToken: (public_token: string, institution_name = "", institutionId?: string, accountFingerprints?: Array<Record<string, string>>, accountId?: string, products?: string) =>
+    request(`/sync/plaid/exchange?${new URLSearchParams({ public_token, institution_name, ...(institutionId ? { institution_id: institutionId } : {}), ...(accountFingerprints?.length ? { account_fingerprints: JSON.stringify(accountFingerprints) } : {}), ...(accountId ? { account_id: accountId } : {}), ...(products ? { products } : {}) }).toString()}`, { method: 'POST' }),
   syncPlaid: () => request(`/sync/plaid/sync`, { method: 'POST' }),
   getSyncStatus: () => fetchJson<{ accounts: Array<{ source: string; status: string; last_sync: string | null }> }>(`/sync/status`),
   // Imports

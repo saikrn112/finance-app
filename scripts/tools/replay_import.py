@@ -17,14 +17,16 @@ from src.data_paths import raw_source_dir
 
 BASE_URL = "http://localhost:8002"
 
-# Default statement sources to replay. Override with --sources flag.
-DEFAULT_SOURCES = [
-    ("bofa", "bofa"),
-    ("chase", "chase"),
-    ("amex", "amex"),
-    ("discover", "discover"),
-    ("apple", "apple"),
-]
+def default_sources() -> list[tuple[str, str]]:
+    from src.plugins.loader import load_plugins
+    from src.plugins.registry import get_import_source_defs
+
+    load_plugins()
+    return [
+        (source_key, source_key)
+        for source_key, meta in get_import_source_defs().items()
+        if "statement_pdf" in meta.get("allowed_kinds", set()) and meta.get("record_type") == "transactions"
+    ]
 
 
 def multipart_post(url: str, fields: dict[str, str], file_field: str, file_path: Path) -> dict:
@@ -94,7 +96,7 @@ def main():
     if args.sources:
         sources = [(s, s) for s in args.sources]
     else:
-        sources = DEFAULT_SOURCES
+        sources = default_sources()
 
     totals = {"imported": 0, "skipped": 0, "already_imported": 0, "errors": 0}
 

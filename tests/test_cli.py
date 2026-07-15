@@ -13,7 +13,7 @@ class TestCleanMerchant:
     """Tests for merchant name cleanup."""
 
     def test_removes_asterisk_suffix(self):
-        assert _clean_merchant("UBER *EATS ORDER") == "UBER"
+        assert _clean_merchant("EXAMPLE DELIVERY ORDER") == "UBER"
 
     def test_removes_hash_numbers(self):
         assert _clean_merchant("WHOLEFDS #12345") == "WHOLEFDS"
@@ -46,7 +46,7 @@ class TestImportCommand:
 
     def test_import_requires_file(self):
         runner = CliRunner()
-        result = runner.invoke(cli, ["import", "--source", "chase"])
+        result = runner.invoke(cli, ["import", "--source", "example_card"])
         assert result.exit_code != 0
 
     def test_import_requires_source(self):
@@ -84,7 +84,7 @@ class TestImportCommand:
             mock_db.query.return_value.filter.return_value.first.return_value = None
             mock_session.return_value = mock_db
             
-            result = runner.invoke(cli, ["import", "--file", path, "--source", "chase", "--dry-run"])
+            result = runner.invoke(cli, ["import", "--file", path, "--source", "example_card", "--dry-run"])
             assert "[DRY RUN]" in result.output
         
         os.unlink(path)

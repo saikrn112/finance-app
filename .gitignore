@@ -6,6 +6,21 @@ data/
 config.yaml
 .env
 
+# Private provider plugins belong in $FINANCE_PLUGINS_DIR.
+plugins/*.py
+plugins/icons/*
+!plugins/.gitkeep
+!plugins/HOW_TO_ADD_PLUGIN.md
+!plugins/icons/.gitkeep
+!plugins/statement_bofa.py
+!plugins/statement_chase.py
+!plugins/statement_amex.py
+!plugins/hdfc.py
+!plugins/icons/bofa.png
+!plugins/icons/chase.png
+!plugins/icons/amex.png
+!plugins/icons/hdfc.png
+
 # Python
 __pycache__/
 *.py[cod]
