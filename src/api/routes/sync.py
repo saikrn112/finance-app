@@ -949,6 +949,8 @@ def sync_plaid(db: Session = Depends(get_db)):
                   account_counts[key] = account_counts.get(key, 0) + value
               cursor = result["cursor"]
               has_more = result["has_more"]
+              log.plaid_cursor = cursor
+              db.commit()
           extra_data = dict(log.extra_data or {})
           extra_data["last_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_counts"] = account_counts
@@ -958,8 +960,10 @@ def sync_plaid(db: Session = Depends(get_db)):
           log.plaid_cursor = cursor
           log.record_count = (log.record_count or 0) + account_counts["added"]
           log.status = "connected"
+          db.commit()
           account_results.append({"source": institution, **account_counts})
         except Exception as exc:
+          db.rollback()
           extra_data = dict(log.extra_data or {})
           extra_data["last_sync_error"] = _plaid_sync_error_payload(exc)
           log.extra_data = extra_data

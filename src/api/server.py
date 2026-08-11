@@ -10,6 +10,7 @@ from src.plugins.loader import load_plugins
 from src.ingestion.plaid_activity import migrate_investment_transactions
 from src.services.auto_tasks import start_auto_tasks, stop_auto_tasks
 from src.privacy_mask import PRIVACY_MASK_ENABLED, mask_json_body
+import os
 from pathlib import Path
 
 app = FastAPI(title="Finance App API")
@@ -27,10 +28,25 @@ if PRIVACY_MASK_ENABLED:
         masked_body = mask_json_body(body, seed=request.url.path)
         return Response(content=masked_body, status_code=response.status_code, headers=dict(response.headers), media_type="application/json")
 
-_PLUGIN_ICONS_DIR = Path(__file__).resolve().parents[2] / "plugins" / "icons"
-if _PLUGIN_ICONS_DIR.is_dir():
-    from fastapi.staticfiles import StaticFiles
-    app.mount("/api/plugin-icons", StaticFiles(directory=str(_PLUGIN_ICONS_DIR)), name="plugin-icons")
+def _plugin_icon_dirs() -> list[Path]:
+    dirs = [Path(__file__).resolve().parents[2] / "plugins" / "icons"]
+    if external_dir := os.environ.get("FINANCE_PLUGINS_DIR"):
+        dirs.append(Path(external_dir) / "icons")
+    return [path for path in dirs if path.is_dir()]
+
+
+@app.get("/api/plugin-icons/{filename}")
+def plugin_icon(filename: str):
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    if Path(filename).name != filename:
+        raise HTTPException(status_code=404)
+    for directory in _plugin_icon_dirs():
+        path = directory / filename
+        if path.is_file():
+            return FileResponse(path)
+    raise HTTPException(status_code=404)
 
 app.add_middleware(
     CORSMiddleware,

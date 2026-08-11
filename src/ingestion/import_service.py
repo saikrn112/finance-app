@@ -237,15 +237,21 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
             if not pay_date_str:
                 continue
             pay_date_val = date.fromisoformat(pay_date_str)
+            period_start_str = _normalize_date_string(p_payload.get("pay_period_start") or p_payload.get("period_start"))
+            period_end_str = _normalize_date_string(p_payload.get("pay_period_end") or p_payload.get("period_end"))
             payslip_row = Payslip(
                 source=manifest["source"],
                 employer=str(p_payload.get("employer") or "").strip(),
                 pay_date=pay_date_val,
+                pay_period_start=date.fromisoformat(period_start_str) if period_start_str else None,
+                pay_period_end=date.fromisoformat(period_end_str) if period_end_str else None,
                 gross=round(float(p_payload.get("gross") or 0), 2),
                 net=round(float(p_payload.get("net") or 0), 2),
                 total_taxes=round(float(p_payload.get("total_taxes") or 0), 2),
                 total_deductions=round(float(p_payload.get("total_deductions") or 0), 2),
                 currency=payslip_currency,
+                signature=_payslip_signature(p_payload),
+                filename=p_payload.get("filename") or manifest.get("filename"),
             )
             db.add(payslip_row)
             db.flush()  # Get payslip_row.id

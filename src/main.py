@@ -167,6 +167,8 @@ def categorize(use_llm: bool):
     
     for txn in uncategorized:
         result = categorizer.categorize(txn.merchant_raw, float(txn._amount), use_llm=use_llm)
+        if result.category == "Uncategorized" and txn.merchant_clean:
+            result = categorizer.categorize(txn.merchant_clean, float(txn._amount), use_llm=use_llm)
         if result.category != "Uncategorized":
             txn.category = result.category
             txn.category_source = result.source

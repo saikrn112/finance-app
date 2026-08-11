@@ -186,6 +186,8 @@ def _transfer_user_attributes(db: Session, src: Transaction, dest: Transaction) 
 
 def _apply_txn_data(txn: Transaction, txn_data: dict[str, Any], matcher: RuleMatcher) -> None:
     category = matcher.match(txn_data["merchant_raw"])
+    if not category and txn_data.get("merchant_clean"):
+        category = matcher.match(txn_data["merchant_clean"])
 
     txn.date = txn_data["date"]
     txn.authorized_date = txn_data.get("authorized_date")
@@ -201,9 +203,12 @@ def _apply_txn_data(txn: Transaction, txn_data: dict[str, Any], matcher: RuleMat
     txn.origin = "plaid"
     txn.pending = bool(txn_data.get("pending"))
     txn.pending_transaction_id = txn_data.get("pending_transaction_id")
-    if txn.category_source != "user":
-        txn.category = category.category if category else "Uncategorized"
-        txn.category_source = "rule" if category else "default"
+    if txn.category_source != "user" and category:
+        txn.category = category.category
+        txn.category_source = "rule"
+    elif not txn.category or txn.category == "Uncategorized":
+        txn.category = "Uncategorized"
+        txn.category_source = "default"
 
 
 def _find_statement_boundary_overlap(db: Session, institution: str, txn_data: dict[str, Any]) -> Transaction | None:

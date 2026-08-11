@@ -1,4 +1,5 @@
 import { RefreshCw, Settings, Moon, Sun, Eye, EyeOff, ChevronLeft, ChevronRight, FolderKanban, TrendingUp, Receipt, BookOpen, Upload, Landmark, CreditCard, PiggyBank, Tags, House } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import type { SidebarAccount } from './api'
 import { useFilterStore } from './store'
 import { formatCurrency } from './privacy'
@@ -46,6 +47,28 @@ const GROUP_ORDER: Array<keyof typeof GROUP_META> = ['bank_account', 'credit_car
 
 function connectionLight(state: SidebarAccount['connection_state']) {
   return state === 'plaid' ? 'bg-emerald-500' : 'bg-amber-400'
+}
+
+function AccountIcon({ account }: { account: SidebarAccount }) {
+  const [retry, setRetry] = useState(0)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    setRetry(0)
+    setFailed(false)
+  }, [account.icon_url])
+
+  if (!account.icon_url || failed) {
+    return (
+      <span className="w-4 h-4 rounded-full shrink-0 flex items-center justify-center text-[8px] font-bold" style={{ background: 'var(--surface-secondary)', color: 'var(--text-muted)' }}>
+        {account.source.charAt(0)}
+      </span>
+    )
+  }
+
+  const separator = account.icon_url.includes('?') ? '&' : '?'
+  const src = retry ? `${account.icon_url}${separator}retry=${retry}` : account.icon_url
+  return <img src={src} alt="" className="w-4 h-4 rounded-full shrink-0 object-contain" onError={() => retry === 0 ? setRetry(Date.now()) : setFailed(true)} />
 }
 
 
@@ -208,13 +231,7 @@ export function Sidebar({
                       } ${collapsedItemClass} ${account.filter_source && !isSelected(account.filter_source) ? 'opacity-40' : ''}`}
                     >
                       <span className={`w-2 h-2 rounded-full ${connectionLight(account.connection_state)}`} />
-                      {account.icon_url ? (
-                        <img src={account.icon_url} alt="" className="w-4 h-4 rounded-full shrink-0 object-contain" />
-                      ) : (
-                        <span className="w-4 h-4 rounded-full shrink-0 flex items-center justify-center text-[8px] font-bold" style={{ background: 'var(--surface-secondary)', color: 'var(--text-muted)' }}>
-                          {account.source.charAt(0)}
-                        </span>
-                      )}
+                      <AccountIcon account={account} />
                       {expanded ? (
                         <span className="min-w-0 flex-1 text-left">
                           <span className="block truncate">{account.source}</span>

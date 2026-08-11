@@ -142,12 +142,12 @@ function AmountCell(props: ICellRendererParams) {
 }
 
 function MerchantCell(props: ICellRendererParams) {
-  const txn = props.data as Transaction
-  const label = txn.merchant_clean || txn.merchant_raw
+  const txn = props.data as Transaction | undefined
+  const label = props.value || txn?.merchant_clean || txn?.merchant_raw || 'Unknown merchant'
   return (
     <div className="flex min-w-0 items-center gap-2">
       <span className="truncate">{label}</span>
-      {txn.pending ? (
+      {txn?.pending ? (
         <span className="shrink-0 text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>(pending)</span>
       ) : null}
     </div>
