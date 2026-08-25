@@ -5,7 +5,10 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from src.api.server import app
-from src.models import Transaction, SyncLog, AccountSnapshot, SourceBalanceHistory, AccountActivity, init_db
+from src.models import (
+    Transaction, SyncLog, AccountSnapshot, SourceBalanceHistory,
+    InvestmentPeriodFact, AccountActivity, PlaidApiUsage, PlaidProductEnrollment, init_db,
+)
 from src.models.database import Base, engine, SessionLocal, get_db
 
 
@@ -938,6 +941,13 @@ class TestSyncAPI:
                 source="Example Cash Investment", date=date(2026, 7, 31), amount=Decimal("250.00"),
                 description="Interest Paid", activity_type="interest", currency="USD",
             ),
+            InvestmentPeriodFact(
+                source_key="example_cash_investment", source="Example Cash Investment",
+                period_start=date(2026, 7, 27), period_end=date(2026, 8, 25),
+                _beginning_value=Decimal("10000.00"), _ending_value=Decimal("11250.00"),
+                _inflow=Decimal("1000.00"), _market_gain=Decimal("250.00"),
+                currency="USD", provenance="test_fixture",
+            ),
         ])
         db.commit()
         db.close()
@@ -948,6 +958,64 @@ class TestSyncAPI:
         assert latest["inflow"] == 1000
         assert latest["market_gain"] == 250
         assert latest["ending_value"] == 11250
+
+    def test_snapshot_dedupe_does_not_treat_derived_history_as_observed(self, client):
+        _, Session = client
+        from src.api.routes.sync import _persist_account_snapshot
+
+        db = Session()
+        db.add(SourceBalanceHistory(
+            source_key="example_brokerage", source="Example Brokerage",
+            account_group="investment", date=date(2026, 8, 1), value=Decimal("5000.00"),
+            currency="USD", provenance="transaction_backfill",
+        ))
+        db.commit()
+
+        assert _persist_account_snapshot(
+            db, source="Example Brokerage", account_group="investment",
+            connection_state="plaid", current_value=5000, synced_at=datetime(2026, 8, 25),
+        ) is True
+        db.commit()
+        observed = db.query(SourceBalanceHistory).filter(
+            SourceBalanceHistory.provenance == "account_snapshot"
+        ).one()
+        assert observed.date == date(2026, 8, 25)
+        db.close()
+
+    def test_plaid_billing_uses_persisted_product_enrollment(self, client):
+        test_client, Session = client
+        db = Session()
+        db.add(PlaidProductEnrollment(
+            plaid_item_id="item-example", product="transactions",
+            active_from=datetime.utcnow(),
+        ))
+        db.commit()
+        db.close()
+
+        payload = test_client.get("/api/settings/").json()["plaid_usage"]
+        transactions = next(row for row in payload["billing_lines"] if row["label"] == "Transactions usage")
+        assert transactions["quantity"] == 1
+
+    def test_plaid_usage_survives_caller_rollback_and_keeps_database_identity(self, client, monkeypatch):
+        _, Session = client
+        from src.ingestion.plaid_usage import record_plaid_usage, finish_plaid_usage
+
+        monkeypatch.setattr(
+            "src.ingestion.plaid_usage.ensure_vault_metadata",
+            lambda: {"device_id": "synthetic-device", "device_label": "Test"},
+        )
+        db = Session()
+        first = record_plaid_usage(db, endpoint="accounts_balance_get", metadata={"status": "attempted"})
+        finish_plaid_usage(db, first, success=False, error_code="SyntheticError")
+        db.rollback()
+        second = record_plaid_usage(db, endpoint="accounts_balance_get")
+        db.rollback()
+
+        rows = db.query(PlaidApiUsage).order_by(PlaidApiUsage.created_at).all()
+        assert [row.status for row in rows] == ["failed", "success"]
+        assert rows[0].metadata_json["database_id"] == rows[1].metadata_json["database_id"]
+        assert "device_id" not in rows[0].metadata_json
+        db.close()
 
 
 class TestProjectsAndSplits:

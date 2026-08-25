@@ -31,6 +31,7 @@ from src.config import settings
 from src.models.database import engine, pause_dirty_tracking, resume_dirty_tracking
 from src.ingestion.plaid_usage import plaid_usage_summary
 from src.ingestion.plaid_client import remove_item
+from src.ingestion.plaid_usage import deactivate_product_enrollments
 from pathlib import Path
 import tempfile
 
@@ -366,6 +367,10 @@ def disconnect_account(account_id: str, db: Session = Depends(get_db)):
             delete_ids = [
                 item.id for item in matching_logs
             ]
+            deactivate_product_enrollments(
+                db,
+                [item.plaid_item_id for item in matching_logs if item.plaid_item_id],
+            )
             if delete_ids:
                 db.query(SyncLog).filter(SyncLog.id.in_(delete_ids)).delete(synchronize_session=False)
             else:

@@ -8,7 +8,10 @@ import logging
 
 from sqlalchemy import and_, func, literal
 
-from src.models import get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot, ExchangeRate, SourceBalanceHistory, AccountActivity
+from src.models import (
+    get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot,
+    ExchangeRate, SourceBalanceHistory, InvestmentPeriodFact, AccountActivity,
+)
 from src.config import settings
 from src.demo import get_demo_investments, get_demo_plaid_balances, get_demo_sidebar_accounts
 from src.ingestion.plaid_client import create_link_token, exchange_public_token, remove_item, sync_transactions, get_investment_holdings, get_investment_transactions, get_account_balances
@@ -16,7 +19,9 @@ from src.ingestion.csv_importer import import_csv_file
 from src.ingestion.import_service import commit_import, preview_import
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
 from src.ingestion.plaid_activity import apply_account_activity_batch
-from src.ingestion.plaid_usage import plaid_usage_summary, record_plaid_usage
+from src.ingestion.plaid_usage import (
+    plaid_usage_summary, record_plaid_usage, finish_plaid_usage, upsert_product_enrollments,
+)
 from src.processing.categorizer import RuleMatcher
 from src.processing.parse_retirement import summarize_retirement_transactions
 from src.plugins.registry import get_all_sources, get_credit_card_sources, classify_source
@@ -226,12 +231,14 @@ def _persist_account_snapshot(
     synced_at: datetime,
 ) -> bool:
     snapshot_value = round(current_value, 2)
+    source_key = classify_source(source) or source
     latest = (
         db.query(SourceBalanceHistory)
         .filter(
-            SourceBalanceHistory.source == source,
+            SourceBalanceHistory.source_key == source_key,
             SourceBalanceHistory.account_group == account_group,
             SourceBalanceHistory.currency == "USD",
+            SourceBalanceHistory.provenance == "account_snapshot",
         )
         .order_by(SourceBalanceHistory.date.desc(), SourceBalanceHistory.created_at.desc())
         .first()
@@ -249,6 +256,15 @@ def _persist_account_snapshot(
             created_at=synced_at,
         )
     )
+    if account_group == "investment":
+        _persist_investment_period_fact(
+            db,
+            source=source,
+            source_key=source_key,
+            previous=latest,
+            ending_value=snapshot_value,
+            period_end=synced_at.date(),
+        )
     record_account_value(
         db,
         source=source,
@@ -258,6 +274,46 @@ def _persist_account_snapshot(
         provenance="account_snapshot",
     )
     return True
+
+
+def _persist_investment_period_fact(
+    db: Session,
+    *,
+    source: str,
+    source_key: str,
+    previous: SourceBalanceHistory | None,
+    ending_value: float,
+    period_end: date,
+) -> None:
+    query = db.query(AccountActivity).filter(
+        (AccountActivity.source_key == source_key) | (AccountActivity.source == source),
+        AccountActivity.date <= period_end,
+        AccountActivity.pending.is_(False),
+        AccountActivity.currency == "USD",
+        AccountActivity.activity_type == "transfer",
+    )
+    if previous is not None:
+        query = query.filter(AccountActivity.date > previous.date)
+    inflow = round(sum(float(row._amount or 0) for row in query.all()), 2)
+    beginning_value = round(float(previous._value), 2) if previous is not None else None
+    market_gain = round(ending_value - beginning_value - inflow, 2) if beginning_value is not None else 0.0
+    fact = (
+        db.query(InvestmentPeriodFact)
+        .filter(InvestmentPeriodFact.source == source, InvestmentPeriodFact.period_end == period_end)
+        .first()
+    )
+    if fact is None:
+        fact = InvestmentPeriodFact(source=source, period_end=period_end)
+        db.add(fact)
+    fact.source_key = source_key
+    fact.period_start = previous.date if previous is not None else None
+    fact._beginning_value = beginning_value
+    fact._ending_value = ending_value
+    fact._inflow = inflow
+    fact._market_gain = market_gain
+    fact.currency = "USD"
+    fact.provenance = "plaid_snapshot_activity"
+    fact.created_at = datetime.utcnow()
 
 
 def _plaid_activity_destination(log: SyncLog) -> str:
@@ -370,111 +426,42 @@ def _latest_investment_holdings(db: Session, currency: str = "USD") -> dict:
 
 
 def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dict]:
-    """Return investment holdings history with rate-converted values."""
+    """Read persisted investment balances and period facts without reconstruction."""
     ensure_rates_fresh(db)
     lr = latest_rate_subquery(db)
-
-    manual_history: list[dict] = []
-    logs = (
-        db.query(SyncLog)
-        .filter(SyncLog.sync_type == "import_investment_csv", SyncLog.status == "success")
-        .order_by(SyncLog.created_at.asc())
-        .all()
-    )
-
-    # Build rate map for manual (SyncLog) history entries
-    rate_rows = db.query(lr.c.from_currency, lr.c.rate).filter(lr.c.to_currency == currency).all()
-    rate_map: dict[str, float] = {row[0]: float(row[1]) for row in rate_rows}
-
-    for log in logs:
-        payload = (log.extra_data or {}).get("payload") or {}
-        account = payload.get("account") or {}
-        summary = payload.get("summary") or {}
-        statement_date = str(account.get("statement_date") or "")
-        source = str(log.source or "")
-        if not statement_date or not source:
-            continue
-        synced_at = f"{statement_date}T12:00:00"
-        # Determine source currency from plugin
-        from src.plugins.registry import get_all_sources, classify_source
-        source_key = classify_source(source)
-        plugin = get_all_sources().get(source_key)
-        src_currency = plugin.currency if plugin else "USD"
-        rate = rate_map.get(src_currency, 1.0)
-
-        ending_value = round(float(summary.get("ending_value") or summary.get("ending_net_value") or 0) * rate, 2)
-        beginning_value = round(float(summary.get("beginning_value") or 0) * rate, 2)
-        market_gain = round(float(summary.get("change_in_investment") or 0) * rate, 2)
-        inflow = round(ending_value - beginning_value - market_gain, 2)
-        manual_history.append(
-            {
-                "synced_at": synced_at,
-                "source": source,
-                "value": ending_value,
-                "beginning_value": beginning_value,
-                "market_gain": market_gain,
-                "inflow": inflow,
-                "ending_value": ending_value,
-            }
+    rows = (
+        db.query(
+            SourceBalanceHistory,
+            (SourceBalanceHistory._value * lr.c.rate).label("value"),
+            InvestmentPeriodFact,
+            (InvestmentPeriodFact._beginning_value * lr.c.rate).label("beginning_value"),
+            (InvestmentPeriodFact._ending_value * lr.c.rate).label("ending_value"),
+            (InvestmentPeriodFact._inflow * lr.c.rate).label("inflow"),
+            (InvestmentPeriodFact._market_gain * lr.c.rate).label("market_gain"),
         )
-    manual_by_day = {(item["source"], item["synced_at"][:10]): item for item in manual_history}
-    value_rows = (
-        db.query(SourceBalanceHistory)
+        .join(lr, and_(lr.c.from_currency == SourceBalanceHistory.currency, lr.c.to_currency == literal(currency)))
+        .outerjoin(InvestmentPeriodFact, and_(
+            InvestmentPeriodFact.source == SourceBalanceHistory.source,
+            InvestmentPeriodFact.period_end == SourceBalanceHistory.date,
+            InvestmentPeriodFact.currency == SourceBalanceHistory.currency,
+        ))
         .filter(SourceBalanceHistory.account_group.in_(["investment", "brokerage"]))
-        .order_by(SourceBalanceHistory.date.asc(), SourceBalanceHistory.created_at.asc())
+        .order_by(SourceBalanceHistory.date.asc(), SourceBalanceHistory.source.asc())
         .all()
     )
-    history: list[dict] = []
-    previous_date_by_source: dict[str, date] = {}
-    previous_value_by_source: dict[str, float] = {}
-    for row in value_rows:
-        detail = manual_by_day.get((row.source, row.date.isoformat()), {})
-        if not detail:
-            source_key = classify_source(row.source) or row.source
-            activity_query = db.query(AccountActivity).filter(
-                (AccountActivity.source_key == source_key) | (AccountActivity.source == row.source),
-                AccountActivity.date <= row.date,
-                AccountActivity.pending.is_(False),
-            )
-            previous_date = previous_date_by_source.get(row.source)
-            if previous_date is not None:
-                activity_query = activity_query.filter(AccountActivity.date > previous_date)
-            period_activity = activity_query.all()
-            inflow = sum(
-                float(item._amount or 0) * rate_map.get(item.currency, 1.0)
-                for item in period_activity
-                if item.activity_type == "transfer"
-            )
-            activity_gain = sum(
-                float(item._amount or 0) * rate_map.get(item.currency, 1.0)
-                for item in period_activity
-                if item.activity_type in {"interest", "dividend"}
-            )
-            ending_value = round(float(row._value or 0) * rate_map.get(row.currency, 1.0), 2)
-            previous_value = previous_value_by_source.get(row.source)
-            market_gain = (
-                ending_value - previous_value - inflow
-                if previous_value is not None
-                else activity_gain
-            )
-            detail = {
-                "inflow": round(inflow, 2),
-                "market_gain": round(market_gain, 2),
-                "ending_value": ending_value,
-            }
-            if previous_value is not None:
-                detail["beginning_value"] = previous_value
-        history.append({
-            "synced_at": f"{row.date.isoformat()}T12:00:00",
-            "source": row.source,
-            "value": round(float(row._value or 0) * rate_map.get(row.currency, 1.0), 2),
-            **{name: detail[name] for name in ("beginning_value", "market_gain", "inflow", "ending_value") if name in detail},
-        })
-        previous_date_by_source[row.source] = row.date
-        previous_value_by_source[row.source] = history[-1]["value"]
-    represented = {(item["source"], item["synced_at"][:10]) for item in history}
-    history.extend(item for item in manual_history if (item["source"], item["synced_at"][:10]) not in represented)
-    history.sort(key=lambda item: (item["synced_at"], item["source"]))
+    history = []
+    for row in rows:
+        item = {
+            "synced_at": f"{row.SourceBalanceHistory.date.isoformat()}T12:00:00",
+            "source": row.SourceBalanceHistory.source,
+            "value": round(float(row.value or 0), 2),
+        }
+        if row.InvestmentPeriodFact is not None:
+            for name in ("beginning_value", "ending_value", "inflow", "market_gain"):
+                value = getattr(row, name)
+                if value is not None:
+                    item[name] = round(float(value), 2)
+        history.append(item)
     return history
 
 
@@ -541,8 +528,9 @@ def _refresh_sidebar_snapshots(
             continue
 
         holdings_succeeded = False
+        usage_id = None
         try:
-            record_plaid_usage(
+            usage_id = record_plaid_usage(
                 db,
                 endpoint="investments_holdings_get",
                 institution=institution,
@@ -550,8 +538,11 @@ def _refresh_sidebar_snapshots(
                 metadata={"status": "attempted"},
             )
             holdings = get_investment_holdings(access_token)
+            finish_plaid_usage(db, usage_id, success=True)
             holdings_succeeded = True
         except Exception as exc:
+            if usage_id:
+                finish_plaid_usage(db, usage_id, success=False, error_code=type(exc).__name__)
             logger.exception("Plaid holdings refresh failed for %s", institution)
             error = {"source": institution, "stage": "holdings", **_plaid_sync_error_payload(exc)}
             if errors is not None:
@@ -572,8 +563,9 @@ def _refresh_sidebar_snapshots(
             2,
         )
 
+        usage_id = None
         try:
-            record_plaid_usage(
+            usage_id = record_plaid_usage(
                 db,
                 endpoint="accounts_balance_get",
                 institution=institution,
@@ -581,7 +573,10 @@ def _refresh_sidebar_snapshots(
                 metadata={"status": "attempted"},
             )
             accounts = get_account_balances(access_token)
+            finish_plaid_usage(db, usage_id, success=True)
         except Exception as exc:
+            if usage_id:
+                finish_plaid_usage(db, usage_id, success=False, error_code=type(exc).__name__)
             logger.exception("Plaid balance refresh failed for %s", institution)
             error = {"source": institution, "stage": "balances", **_plaid_sync_error_payload(exc)}
             if errors is not None:
@@ -946,6 +941,11 @@ def exchange_token(
             endpoint="item_public_token_exchange",
             institution=institution_name or None,
             plaid_item_id=item_id,
+        )
+        upsert_product_enrollments(
+            db,
+            item_id,
+            [item for item in products.split(",") if item],
         )
         db.commit()
         

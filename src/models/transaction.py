@@ -234,6 +234,30 @@ class SourceBalanceHistory(Base):
     )
 
 
+class InvestmentPeriodFact(Base):
+    """Persisted investment movement between two observed balance snapshots."""
+
+    __tablename__ = "investment_period_facts"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    source_key = Column(String)
+    source = Column(String, nullable=False)
+    period_start = Column(Date)
+    period_end = Column(Date, nullable=False)
+    _beginning_value = Column("beginning_value", Numeric(12, 2))
+    _ending_value = Column("ending_value", Numeric(12, 2), nullable=False)
+    _inflow = Column("inflow", Numeric(12, 2), nullable=False, default=0)
+    _market_gain = Column("market_gain", Numeric(12, 2), nullable=False, default=0)
+    currency = Column(String(3), nullable=False, default="USD")
+    provenance = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_investment_period_source_end", "source", "period_end", unique=True),
+        Index("ix_investment_period_source_key_end", "source_key", "period_end"),
+    )
+
+
 class AccountActivity(Base):
     """Provider activity that belongs to an account detail view, not the household ledger."""
 
@@ -282,6 +306,7 @@ class PlaidApiUsage(Base):
     plaid_item_id = Column(String)
     units = Column(Numeric(10, 2), nullable=False, default=1)
     estimated_cost = Column(Numeric(10, 4), nullable=False, default=0)
+    status = Column(String, nullable=False, default="attempted")
     metadata_json = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -290,6 +315,30 @@ class PlaidApiUsage(Base):
         Index("ix_plaid_api_usage_endpoint_created_at", "endpoint", "created_at"),
         Index("ix_plaid_api_usage_item_created_at", "plaid_item_id", "created_at"),
     )
+
+
+class PlaidProductEnrollment(Base):
+    __tablename__ = "plaid_product_enrollments"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plaid_item_id = Column(String, nullable=False)
+    product = Column(String, nullable=False)
+    active_from = Column(DateTime, nullable=False, default=datetime.utcnow)
+    active_until = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_plaid_product_item_product", "plaid_item_id", "product", unique=True),
+        Index("ix_plaid_product_active", "product", "active_from", "active_until"),
+    )
+
+
+class AppMetadata(Base):
+    __tablename__ = "app_metadata"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class Project(Base):

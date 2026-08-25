@@ -33,7 +33,7 @@ frontend/src/
   api.ts             All API calls + TS types
 scripts/             start/stop for both container and local modes
 plugins/             In-repo plugins (bundled examples)
-tests/               pytest, 23 test functions
+tests/               pytest regression and integration coverage
 ```
 
 ---
@@ -169,9 +169,10 @@ and source normalization belong in the gitignored plugin repository, not `src/` 
 fixtures. Before implementing such behavior, check the plugin registry and configured
 private plugin directory. If placement is uncertain, warn the user and default to a
 generic, provider-neutral core behavior; do not add a convenient provider check to core.
-Existing real-provider files under the bundled `plugins/` directory are legacy migration
-debt, not an architectural precedent. New work must not expand them; move affected logic
-to the private plugin repository when that area is touched.
+Basic provider parsers under the bundled `plugins/` directory are intentional public
+templates so a new user can get started. Keep them generic and free of personal data.
+Provider-specific extensions, aliases, institution quirks, and owner-specific rules still
+belong in the private plugin repository; do not expand a template to absorb those details.
 
 ### Persist financial history; do not fabricate it in analytics
 
@@ -196,10 +197,9 @@ Reject surface-level UI fallbacks and analytics-layer reconstructions that merel
 data defect. If a temporary fallback is unavoidable, warn the user, label it explicitly,
 and add a tracked removal condition. Do not quietly turn it into permanent behavior.
 
-Known debt: `_investment_holdings_history` in `src/api/routes/sync.py` currently derives
-period inflow/gain at request time. Do not extend that reconstruction. Replace it with
-persisted, provenance-bearing period facts populated by ingestion/backfill before treating
-that implementation as complete.
+Investment period inflow/gain is stored in `investment_period_facts`. Read routes must not
+reconstruct it from account activity. Missing facts require an explicit ingestion/backfill
+job with provenance, not an API fallback.
 
 ### Confirm before destructive DB work
 

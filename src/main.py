@@ -249,5 +249,24 @@ def backfill_payslips_command():
         db.close()
 
 
+@cli.command("backfill-audit-facts")
+@click.option("--apply", "apply_changes", is_flag=True, help="Persist the previewed rows")
+def backfill_audit_facts_command(apply_changes: bool):
+    """Backfill persisted investment periods and Plaid product enrollment."""
+    from src.models import SessionLocal, init_db
+    from src.ingestion.backfill_audit_facts import preview_backfill, run_backfill
+
+    init_db()
+    db = SessionLocal()
+    try:
+        click.echo(f"Preview: {preview_backfill(db)}")
+        if not apply_changes:
+            click.echo("Dry run only. Re-run with --apply to persist changes.")
+            return
+        click.echo(f"Applied: {run_backfill(db)}")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     cli()

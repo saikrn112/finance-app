@@ -82,6 +82,11 @@ def _ensure_transaction_columns() -> None:
         if "currency" not in inv_columns:
             statements.append("ALTER TABLE investment_holding_snapshots ADD COLUMN currency VARCHAR(3) NOT NULL DEFAULT 'USD'")
 
+    if inspector.has_table("plaid_api_usage"):
+        usage_columns = {column["name"] for column in inspector.get_columns("plaid_api_usage")}
+        if "status" not in usage_columns:
+            statements.append("ALTER TABLE plaid_api_usage ADD COLUMN status VARCHAR NOT NULL DEFAULT 'attempted'")
+
     # Create exchange_rates table if it doesn't exist
     if not inspector.has_table("exchange_rates"):
         statements.append(
