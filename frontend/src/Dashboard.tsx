@@ -83,6 +83,7 @@ export function Dashboard() {
   const [showImports, setShowImports] = useState(false)
   const [showGettingStarted, setShowGettingStarted] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
   const [sidebarExpanded, setSidebarExpanded] = useState(false)
   const [selectedInvestmentSource, setSelectedInvestmentSource] = useState<string | null>(() => investmentSourceFromUrl())
   const [selectedRetirementSource, setSelectedRetirementSource] = useState<string | null>(() => retirementSourceFromUrl())
@@ -199,9 +200,17 @@ export function Dashboard() {
 
   const handleRefresh = async () => {
     setSyncing(true)
+    setSyncError(null)
     try {
-      await api.syncPlaid()
+      const result = await api.syncPlaid()
+      if (result.status === 'partial_error') {
+        setSyncError((result.errors || []).map((error) =>
+          `${error.source} ${error.stage}: ${error.display_message || error.message || 'sync failed'}`
+        ).join(' | '))
+      }
       queryClient.invalidateQueries()
+    } catch (error) {
+      setSyncError(error instanceof Error ? error.message : 'Sync failed')
     } finally {
       setSyncing(false)
     }
@@ -485,6 +494,11 @@ export function Dashboard() {
         className="p-4 transition-all duration-200"
         style={{ marginRight: (sidebarExpanded ? SIDEBAR_EXPANDED_WIDTH : SIDEBAR_COLLAPSED_WIDTH) + 12 }}
       >
+        {syncError ? (
+          <div className="mb-3 rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-600 dark:text-rose-300" role="alert">
+            <strong>Sync incomplete:</strong> {syncError}
+          </div>
+        ) : null}
         {content}
       </div>
     </div>

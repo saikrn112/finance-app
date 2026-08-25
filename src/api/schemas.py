@@ -172,6 +172,7 @@ class TransactionItem(BaseModel):
     pending: bool = False
     is_recurring: Optional[bool] = None
     tags: list[str] = []
+    notes: Optional[str] = None
     projects: list[TransactionProjectItem] = []
     description: Optional[str] = None
     splits: list[ContactItem] = []

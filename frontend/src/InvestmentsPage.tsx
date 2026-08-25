@@ -191,22 +191,26 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
             <div className="app-surface dark:bg-slate-800 rounded-lg p-4 mt-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="font-semibold text-sm">Account Activity</h2>
-                <span className="text-xs text-slate-500">Interest, transfers, and investment cash events</span>
+                <span className="text-xs text-slate-500">{formatCount(activity.length, privacyMode)} trades and cash events</span>
               </div>
               {activity.length ? (
-                <table className="w-full text-sm">
-                  <thead><tr className="text-left text-xs text-slate-500 border-b dark:border-slate-700">
-                    <th className="pb-2">Date</th><th className="pb-2">Activity</th><th className="pb-2">Type</th><th className="pb-2 text-right">Amount</th>
-                  </tr></thead>
-                  <tbody>{activity.map((row) => (
-                    <tr key={row.id} className="border-b dark:border-slate-700/50">
-                      <td className="py-2">{prettyStatementDate(row.date)}</td>
-                      <td className="py-2">{row.merchant || row.description}{row.pending ? <span className="ml-2 text-xs text-slate-500">pending</span> : null}</td>
-                      <td className="py-2 capitalize text-slate-500">{row.type}</td>
-                      <td className={`py-2 text-right font-medium ${row.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-400'}`}>{fmt(row.amount)}</td>
-                    </tr>
-                  ))}</tbody>
-                </table>
+                <div className="max-h-[28rem] overflow-auto rounded-md border border-slate-200 dark:border-slate-700">
+                  <table className="w-full min-w-[42rem] text-sm">
+                    <thead className="sticky top-0 z-10 bg-[var(--app-surface)] dark:bg-slate-800">
+                      <tr className="text-left text-xs text-slate-500 border-b dark:border-slate-700">
+                        <th className="p-2">Date</th><th className="p-2">Activity</th><th className="p-2">Type</th><th className="p-2 text-right">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>{activity.map((row) => (
+                      <tr key={row.id} className="border-b last:border-b-0 dark:border-slate-700/50">
+                        <td className="p-2 whitespace-nowrap">{prettyStatementDate(row.date)}</td>
+                        <td className="p-2">{row.merchant || row.description}{row.pending ? <span className="ml-2 text-xs text-slate-500">pending</span> : null}</td>
+                        <td className="p-2 capitalize text-slate-500">{row.type}</td>
+                        <td className={`p-2 text-right font-medium whitespace-nowrap ${row.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-400'}`}>{fmt(row.amount)}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
               ) : <p className="text-sm text-slate-500">No account activity has been synced yet.</p>}
             </div>
           ) : null}

@@ -877,16 +877,16 @@ function PayCycleCompositionPanel({
         <span className="text-xs font-medium text-slate-500 dark:text-slate-400">{formatAmount(composition?.gross || 0)} gross pay</span>
       </div>
       {composition && composition.slices.length > 0 ? (
-        <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="h-[300px]">
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+          <div className="h-[300px] min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
                   data={composition.slices}
                   dataKey="amount"
                   nameKey="label"
-                  innerRadius={72}
-                  outerRadius={118}
+                  innerRadius="55%"
+                  outerRadius="85%"
                   stroke="none"
                 >
                   {composition.slices.map((entry, index) => (
@@ -971,11 +971,13 @@ function EmployerSummaryCard({
           <div className="font-semibold text-blue-500">{formatAmount(item.gross)}</div>
         </div>
       </div>
-      <div className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
-        <div className="h-[180px]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        {/* Radii are percentages so the donut scales with the column instead of being
+            clipped when the window narrows (fixed px radii need >=140px to draw). */}
+        <div className="h-[180px] min-w-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
-              <Pie data={chartData} dataKey="amount" nameKey="label" innerRadius={44} outerRadius={70} stroke="none">
+              <Pie data={chartData} dataKey="amount" nameKey="label" innerRadius="55%" outerRadius="85%" stroke="none">
                 {chartData.map((entry) => (
                   <Cell key={entry.label} fill={entry.color} />
                 ))}

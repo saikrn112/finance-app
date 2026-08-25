@@ -7,12 +7,15 @@ import { formatCount, formatCurrency } from './privacy'
 import { Ledger } from './Ledger'
 import { getCategoryColor } from './colors'
 
-const COLORS = ['#22c55e', '#3b82f6', '#eab308', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4']
+const COLORS = [
+  '#22c55e', '#3b82f6', '#eab308', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4',
+  '#14b8a6', '#a855f7', '#84cc16', '#0ea5e9', '#f43f5e', '#d946ef', '#10b981', '#6366f1',
+]
 const MEMBER_COLORS = ['#22c55e', '#3b82f6', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f43f5e', '#a855f7', '#84cc16', '#0ea5e9']
 
-function pickRandomColor(usedColors: string[]): string {
-  const available = MEMBER_COLORS.filter(c => !usedColors.includes(c))
-  const pool = available.length > 0 ? available : MEMBER_COLORS
+function pickRandomColor(usedColors: string[], palette: string[] = MEMBER_COLORS): string {
+  const available = palette.filter(c => !usedColors.includes(c))
+  const pool = available.length > 0 ? available : palette
   return pool[Math.floor(Math.random() * pool.length)]
 }
 
@@ -117,21 +120,28 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
         <h1 className="text-lg font-bold">Projects</h1>
       </div>
 
-      <div className="flex gap-4" style={{ height: 'calc(100vh - 100px)' }}>
+      {/* Page scrolls naturally; the sidebar sticks. A fixed-height row with its own
+          scrollbar used to clip the footer buttons and leave dead space below. */}
+      <div className="flex gap-4 items-start">
         {/* Left: project list */}
-        <div className="w-64 shrink-0 space-y-4 overflow-y-auto">
+        <div className="w-64 shrink-0 space-y-4 sticky top-4 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 2rem)' }}>
           <Section label="Active" items={active} selectedId={selectedId} onSelect={setSelectedId} fmt={fmt} privacyMode={privacyMode} />
           {completed.length > 0 && <Section label="Completed" items={completed} selectedId={selectedId} onSelect={setSelectedId} fmt={fmt} privacyMode={privacyMode} />}
           {error && <div className="app-badge-negative text-xs rounded-lg px-3 py-2">{error}</div>}
           {creating ? (
-            <CreateForm onSubmit={handleCreate} onCancel={() => { setCreating(false); setError(null) }} saving={busy === 'create'} />
+            <CreateForm
+              onSubmit={handleCreate}
+              onCancel={() => { setCreating(false); setError(null) }}
+              saving={busy === 'create'}
+              usedColors={(projects || []).map(p => p.color)}
+            />
           ) : (
             <button onClick={() => setCreating(true)} className="text-sm text-blue-500 hover:underline">+ New Project</button>
           )}
         </div>
 
         {/* Right: detail */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 min-w-0">
           {detail ? (
             <ProjectDetail
               project={detail}
@@ -448,13 +458,15 @@ function CreateForm({
   onSubmit,
   onCancel,
   saving,
+  usedColors = [],
 }: {
   onSubmit: (data: Partial<ProjectSummary>, memberIds: string[]) => void
   onCancel: () => void
   saving: boolean
+  usedColors?: string[]
 }) {
   const [name, setName] = useState('')
-  const [color, setColor] = useState(COLORS[0])
+  const [color, setColor] = useState(() => pickRandomColor(usedColors, COLORS))
   const [budget, setBudget] = useState('')
   const [contacts, setContacts] = useState<Contact[]>([])
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set())

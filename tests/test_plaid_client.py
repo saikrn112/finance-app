@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import MagicMock
 from datetime import date
 
-from src.ingestion.plaid_client import _transform_txn
+from src.ingestion.plaid_client import _transform_txn, get_investment_holdings
 
 
 class TestTransformTxn:
@@ -157,3 +157,28 @@ class TestTransformTxn:
                           "merchant_clean", "account_last4", "plaid_category"]
         for field in required_fields:
             assert field in result
+
+
+def test_investment_holdings_uses_serialized_composed_account(monkeypatch):
+    account = MagicMock()
+    account.to_dict.return_value = {
+        "account_id": "brokerage-1",
+        "name": "Brokerage",
+        "type": "investment",
+        "subtype": "brokerage",
+        "balances": {"current": 50.0},
+    }
+    response = MagicMock(securities=[], holdings=[], accounts=[account])
+    client = MagicMock()
+    client.investments_holdings_get.return_value = response
+    monkeypatch.setattr("src.ingestion.plaid_client.get_plaid_client", lambda: client)
+
+    result = get_investment_holdings("token")
+
+    assert result["accounts"] == [{
+        "account_id": "brokerage-1",
+        "name": "Brokerage",
+        "type": "investment",
+        "subtype": "brokerage",
+        "balance": 50.0,
+    }]

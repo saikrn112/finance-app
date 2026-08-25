@@ -153,15 +153,87 @@ def get_investment_holdings(access_token: str) -> dict:
     
     accounts = []
     for a in response.accounts:
+        # InvestmentAccount is a composed Plaid model. In some SDK versions,
+        # direct access to ``balances`` raises ApiValueError even though the
+        # response is valid; its serialized representation remains reliable.
+        account = a.to_dict()
+        balances = account.get("balances") or {}
         accounts.append({
-            "account_id": a.account_id,
-            "name": a.name,
-            "type": a.type.value if a.type else None,
-            "subtype": a.subtype.value if a.subtype else None,
-            "balance": float(a.balances.current) if a.balances.current else None,
+            "account_id": account.get("account_id"),
+            "name": account.get("name"),
+            "type": account.get("type"),
+            "subtype": account.get("subtype"),
+            "balance": float(balances["current"]) if balances.get("current") is not None else None,
         })
     
     return {"holdings": holdings, "accounts": accounts}
+
+
+def get_investment_transactions(
+    access_token: str,
+    *,
+    start_date: date,
+    end_date: date,
+) -> list[dict]:
+    """Fetch all investment transactions in a date range."""
+    from plaid.model.investments_transactions_get_request import InvestmentsTransactionsGetRequest
+    from plaid.model.investments_transactions_get_request_options import InvestmentsTransactionsGetRequestOptions
+
+    client = get_plaid_client()
+    offset = 0
+    page_size = 500
+    transactions: list[dict] = []
+    while True:
+        response = client.investments_transactions_get(
+            InvestmentsTransactionsGetRequest(
+                access_token=access_token,
+                start_date=start_date,
+                end_date=end_date,
+                options=InvestmentsTransactionsGetRequestOptions(count=page_size, offset=offset),
+            )
+        )
+        accounts = {item["account_id"]: item for item in (account.to_dict() for account in response.accounts)}
+        securities = {item.security_id: item for item in response.securities}
+        for transaction in response.investment_transactions:
+            account = accounts.get(transaction.account_id, {})
+            security = securities.get(transaction.security_id)
+            activity_type = str(transaction.type.value if hasattr(transaction.type, "value") else transaction.type)
+            subtype = str(transaction.subtype.value if hasattr(transaction.subtype, "value") else transaction.subtype)
+            normalized_type = (
+                "interest" if subtype == "interest"
+                else "dividend" if subtype == "dividend"
+                else "trade" if activity_type in {"buy", "sell"}
+                else activity_type
+            )
+            transactions.append({
+                "source_id": transaction.investment_transaction_id,
+                "date": transaction.date,
+                # Plaid investment amounts are positive for cash outflow.
+                "amount": -float(transaction.amount),
+                "merchant_raw": transaction.name,
+                "merchant_clean": security.name if security else transaction.name,
+                "account_last4": account.get("mask"),
+                "plaid_account_id": transaction.account_id,
+                "original_description": transaction.name,
+                "currency": transaction.iso_currency_code or "USD",
+                "pending": False,
+                "activity_type": normalized_type,
+                "raw_data": {
+                    "investment_type": activity_type,
+                    "investment_subtype": subtype,
+                    "security_id": transaction.security_id,
+                    "ticker": security.ticker_symbol if security else None,
+                    "quantity": float(transaction.quantity),
+                    "price": float(transaction.price),
+                    "fees": float(transaction.fees or 0),
+                    "transaction_datetime": transaction.transaction_datetime.isoformat() if transaction.transaction_datetime else None,
+                    "cancel_transaction_id": transaction.cancel_transaction_id,
+                },
+            })
+        offset += len(response.investment_transactions)
+        if offset >= int(response.total_investment_transactions or 0) or not response.investment_transactions:
+            break
+    return transactions
 
 
 def get_account_balances(access_token: str) -> list[dict]:

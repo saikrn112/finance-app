@@ -181,9 +181,12 @@ export function UncategorizedPage({ onBack }: { onBack: () => void }) {
     })
   }
 
+  // Shell is exactly one viewport tall with the panes scrolling internally. A
+  // magic-number calc(100vh - Npx) row used to leave dead space below the content
+  // whenever the real header height drifted from the guess.
   return (
-    <div className="app-shell min-h-screen p-4" style={{ color: 'var(--text-primary)' }}>
-      <div className="mb-5 flex items-center gap-3">
+    <div className="app-shell flex h-screen flex-col overflow-hidden p-4" style={{ color: 'var(--text-primary)' }}>
+      <div className="mb-5 flex shrink-0 items-center gap-3">
         <button onClick={onBack} className="text-sm text-blue-500 hover:underline">← Back</button>
         <h1 className="text-lg font-bold">Uncategorized</h1>
         <div className="ml-auto text-xs text-slate-500">
@@ -191,7 +194,7 @@ export function UncategorizedPage({ onBack }: { onBack: () => void }) {
         </div>
       </div>
 
-      <div className="flex gap-4" style={{ height: 'calc(100vh - 100px)' }}>
+      <div className="flex min-h-0 flex-1 gap-4">
         <div className="w-80 shrink-0 overflow-y-auto">
           <div className="sticky top-0 z-10 pb-3" style={{ background: 'var(--surface-page)' }}>
           <div className="mb-3">
@@ -361,8 +364,10 @@ export function UncategorizedPage({ onBack }: { onBack: () => void }) {
             )}
           </div>
 
-          <div className="app-surface flex min-h-0 flex-col rounded-lg p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
+          {/* Capped so a long queue scrolls inside this panel instead of growing and
+              squeezing the mapping form above it. */}
+          <div className="app-surface flex min-h-0 shrink-0 flex-col rounded-lg p-4" style={{ maxHeight: '45%' }}>
+            <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
               <div>
                 <h3 className="text-sm font-semibold">Staged Changes</h3>
                 <div className="text-xs text-slate-500">

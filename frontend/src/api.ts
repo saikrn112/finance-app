@@ -88,6 +88,7 @@ export interface Transaction {
   pending: boolean
   is_recurring: boolean
   tags: string[]
+  notes?: string | null
   projects: { id: string; name: string; color: string }[]
   description?: string
   splits?: { id: string; name: string; color: string }[]
@@ -445,6 +446,25 @@ export interface SettingsResponse {
     month_start: string
     month_end_exclusive: string
     total_estimated_cost: number
+    billing_lines: Array<{
+      label: string
+      quantity: number
+      unit: string
+      unit_price: number
+      estimated_cost: number
+    }>
+    scope: string
+    scope_note: string
+    devices: Array<{
+      device_key: string
+      device_label: string
+      environment?: string | null
+      database_id?: string | null
+      database_name?: string | null
+      call_count: number
+      balance_calls: number
+      endpoints: Record<string, number>
+    }>
     endpoints: Array<{
       endpoint: string
       call_count: number
@@ -582,13 +602,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ previous_values: previousValues }),
     }),
-  updateTransaction: (id: string, data: Partial<Pick<Transaction, 'category' | 'merchant_clean' | 'is_recurring' | 'tags'>>, currency = 'USD') =>
+  updateTransaction: (id: string, data: Partial<Pick<Transaction, 'category' | 'merchant_clean' | 'is_recurring' | 'tags' | 'notes'>>, currency = 'USD') =>
     request<Transaction>(`/transactions/${id}?currency=${encodeURIComponent(currency)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   // Plaid
   getLinkToken: (products?: string, accountId?: string) => request<{ link_token?: string }>(`/sync/plaid/link-token?${new URLSearchParams({ ...(products ? { products } : {}), ...(accountId ? { account_id: accountId } : {}) }).toString()}`, { method: 'POST' }),
   exchangeToken: (public_token: string, institution_name = "", institutionId?: string, accountFingerprints?: Array<Record<string, string>>, accountId?: string, products?: string) =>
     request(`/sync/plaid/exchange?${new URLSearchParams({ public_token, institution_name, ...(institutionId ? { institution_id: institutionId } : {}), ...(accountFingerprints?.length ? { account_fingerprints: JSON.stringify(accountFingerprints) } : {}), ...(accountId ? { account_id: accountId } : {}), ...(products ? { products } : {}) }).toString()}`, { method: 'POST' }),
-  syncPlaid: () => request(`/sync/plaid/sync`, { method: 'POST' }),
+  syncPlaid: () => request<{ status: string; errors?: Array<{ source: string; stage: string; display_message?: string; message?: string }> }>(`/sync/plaid/sync`, { method: 'POST' }),
   getSyncStatus: () => fetchJson<{ accounts: Array<{ source: string; status: string; last_sync: string | null }> }>(`/sync/status`),
   // Imports
   previewImport: (file: File, source: string, kind: 'csv' | 'statement_pdf') => {

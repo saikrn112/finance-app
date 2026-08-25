@@ -12,6 +12,10 @@ interface SettingsData {
     month_start: string
     month_end_exclusive: string
     total_estimated_cost: number
+    billing_lines: Array<{ label: string; quantity: number; unit: string; unit_price: number; estimated_cost: number }>
+    scope: string
+    scope_note: string
+    devices: Array<{ device_key: string; device_label: string; environment?: string | null; database_id?: string | null; database_name?: string | null; call_count: number; balance_calls: number; endpoints: Record<string, number> }>
     endpoints: Array<{ endpoint: string; call_count: number; units: number; estimated_cost: number }>
   }
   vault: {
@@ -213,7 +217,17 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           handleConnectGoogleDrive()
         }
       } else {
-        setBackupJob({ job_id: '', status: 'error', error: err?.message || 'Backup failed', stage: '', progress: 0, message: '' })
+        const now = new Date().toISOString()
+        setBackupJob({
+          job_id: '',
+          status: 'error',
+          stage: 'error',
+          progress: 0,
+          message: '',
+          error: err?.message || 'Backup failed',
+          created_at: now,
+          updated_at: now,
+        })
       }
     } finally {
       if (!backupRunning) {
@@ -493,13 +507,13 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
             <p className="text-xs text-gray-500 dark:text-gray-400">
               {data?.plaid_usage.month_start ?? '—'} to {(data?.plaid_usage.month_end_exclusive ?? '—')} (month-end exclusive)
             </p>
-            {data?.plaid_usage.endpoints?.length ? (
+            {data?.plaid_usage.billing_lines?.length ? (
               <ul className="space-y-1 pt-1">
-                {data.plaid_usage.endpoints.map((row) => (
-                  <li key={row.endpoint} className="flex justify-between gap-3 text-xs">
-                    <span className="truncate">{row.endpoint}</span>
+                {data.plaid_usage.billing_lines.map((row) => (
+                  <li key={row.label} className="flex justify-between gap-3 text-xs">
+                    <span className="truncate">{row.label}</span>
                     <span className="text-right tabular-nums">
-                      {row.call_count} calls · ${row.estimated_cost.toFixed(2)}
+                      {row.quantity} {row.unit} × ${row.unit_price.toFixed(2)} · ${row.estimated_cost.toFixed(2)}
                     </span>
                   </li>
                 ))}
@@ -507,6 +521,30 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
             ) : (
               <p className="text-xs text-gray-500 dark:text-gray-400">No tracked Plaid usage yet this month.</p>
             )}
+            <p className="text-xs text-amber-600 dark:text-amber-300">
+              {data?.plaid_usage.scope_note}
+            </p>
+            {data?.plaid_usage.endpoints?.length ? (
+              <details className="pt-1 text-xs text-gray-500 dark:text-gray-400">
+                <summary className="cursor-pointer">Local API call audit</summary>
+                <div className="mt-2 space-y-2">
+                  {data.plaid_usage.devices.map((device) => (
+                    <div key={device.device_key} className="rounded border border-slate-300/50 p-2 dark:border-slate-500/50">
+                      <div className="flex justify-between gap-3 text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                        <span>{device.device_label === 'app' ? 'This device' : device.device_label} · {device.environment || 'unknown'} · {device.device_key}</span>
+                        <span>{device.call_count} calls</span>
+                      </div>
+                      <div className="mt-0.5 truncate text-[10px]">{device.database_name || 'Database unknown'} · {device.database_id || 'legacy'}</div>
+                      <ul className="mt-1 space-y-0.5">
+                        {Object.entries(device.endpoints).sort(([a], [b]) => a.localeCompare(b)).map(([endpoint, calls]) => (
+                          <li key={endpoint} className="flex justify-between gap-3"><span>{endpoint}</span><span>{calls}</span></li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ) : null}
           </div>
         </div>
 

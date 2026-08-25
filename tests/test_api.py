@@ -836,7 +836,7 @@ class TestSyncAPI:
             source="Example Brokerage",
             account_group="investment",
             date=date(2026, 7, 12),
-            value=Decimal("59022.19"),
+            value=Decimal("12345.67"),
             currency="USD",
             provenance="account_snapshot",
             created_at=datetime(2026, 7, 12, 12, 0, 0),
@@ -853,7 +853,7 @@ class TestSyncAPI:
         history = test_client.get("/api/sync/plaid/investments/history?currency=USD").json()
         history_value = next(row["value"] for row in history["history"] if row["source"] == "Example Brokerage")
 
-        assert sidebar_value == net_worth_value == history_value == 59022.19
+        assert sidebar_value == net_worth_value == history_value == 12345.67
 
     def test_sidebar_normalizes_legacy_plural_credit_card_group(self, client):
         test_client, Session = client
@@ -913,3 +913,208 @@ class TestSyncAPI:
         assert len(activity["activity"]) == 1
         assert activity["activity"][0]["type"] == "interest"
         assert ledger["total"] == 0
+
+    def test_investment_history_attributes_stored_transfer_and_interest(self, client):
+        test_client, Session = client
+        db = Session()
+        db.add_all([
+            SourceBalanceHistory(
+                source_key="example_cash_investment", source="Example Cash Investment",
+                account_group="investment", date=date(2026, 7, 27), value=Decimal("10000.00"),
+                currency="USD", provenance="account_snapshot",
+            ),
+            SourceBalanceHistory(
+                source_key="example_cash_investment", source="Example Cash Investment",
+                account_group="investment", date=date(2026, 8, 25), value=Decimal("11250.00"),
+                currency="USD", provenance="account_snapshot",
+            ),
+            AccountActivity(
+                source_id="transfer-1", source_key="example_cash_investment",
+                source="Example Cash Investment", date=date(2026, 8, 3), amount=Decimal("1000"),
+                description="Transfer", activity_type="transfer", currency="USD",
+            ),
+            AccountActivity(
+                source_id="interest-1", source_key="example_cash_investment",
+                source="Example Cash Investment", date=date(2026, 7, 31), amount=Decimal("250.00"),
+                description="Interest Paid", activity_type="interest", currency="USD",
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        history = test_client.get("/api/sync/plaid/investments/history?currency=USD").json()["history"]
+        latest = next(row for row in history if row["synced_at"].startswith("2026-08-25"))
+
+        assert latest["inflow"] == 1000
+        assert latest["market_gain"] == 250
+        assert latest["ending_value"] == 11250
+
+
+class TestProjectsAndSplits:
+    """Covers project assignment, per-project notes, contacts and splits.
+
+    These back the transaction-grid affordances: assigning a transaction to a project,
+    creating a project inline, the per-project description shown under the merchant, and
+    the member split tags.
+    """
+
+    def test_create_project_and_assign_transaction(self, client_with_data):
+        test_client = client_with_data
+
+        created = test_client.post("/api/projects/", json={"name": "Trip", "color": "#3b82f6"})
+        assert created.status_code == 200
+        project_id = created.json()["id"]
+
+        txns = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"]
+        txn_id = txns[0]["id"]
+
+        added = test_client.post(
+            f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]}
+        )
+        assert added.status_code == 200
+        assert added.json()["added"] == 1
+
+        # The new project shows up in the list with the transaction attached, which is what
+        # the inline "New project" flow relies on for the list to refresh immediately.
+        listed = {p["name"]: p for p in test_client.get("/api/projects/?currency=USD").json()}
+        assert listed["Trip"]["txn_count"] == 1
+
+    def test_duplicate_project_name_rejected(self, client):
+        test_client, _ = client
+        assert test_client.post("/api/projects/", json={"name": "Dup"}).status_code == 200
+        assert test_client.post("/api/projects/", json={"name": "Dup"}).status_code == 409
+
+    def test_per_project_description_roundtrip(self, client_with_data):
+        test_client = client_with_data
+        project_id = test_client.post("/api/projects/", json={"name": "Notes"}).json()["id"]
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+
+        patched = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}",
+            json={"description": "monitor stand"},
+        )
+        assert patched.status_code == 200
+
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert detail["transactions"][0]["description"] == "monitor stand"
+
+    def test_transaction_notes_are_serialized(self, client_with_data):
+        """The main ledger's inline note writes Transaction.notes, so it must round-trip."""
+        test_client = client_with_data
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+
+        test_client.patch(f"/api/transactions/{txn_id}?currency=USD", json={"notes": "reimbursed"})
+
+        txns = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"]
+        assert next(t for t in txns if t["id"] == txn_id)["notes"] == "reimbursed"
+
+    def test_members_auto_assigned_as_splits_on_add(self, client_with_data):
+        test_client = client_with_data
+        contact_id = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+        project_id = test_client.post("/api/projects/", json={"name": "Split"}).json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [contact_id]})
+
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert [m["name"] for m in detail["members"]] == ["Ada"]
+        assert [s["name"] for s in detail["transactions"][0]["splits"]] == ["Ada"]
+
+    def test_splits_can_be_replaced(self, client_with_data):
+        test_client = client_with_data
+        a = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+        b = test_client.post("/api/contacts/", json={"name": "Grace"}).json()["id"]
+        project_id = test_client.post("/api/projects/", json={"name": "Replace"}).json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [a, b]})
+
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+
+        test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits", json={"contact_ids": [b]}
+        )
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert [s["name"] for s in detail["transactions"][0]["splits"]] == ["Grace"]
+
+    def test_contact_rename_propagates_and_usage_reported(self, client_with_data):
+        """Renaming a contact must show through everywhere, since splits reference by id."""
+        test_client = client_with_data
+        contact_id = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+        project_id = test_client.post("/api/projects/", json={"name": "Rename"}).json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [contact_id]})
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+
+        usage = test_client.get(f"/api/contacts/{contact_id}/usage").json()
+        assert usage == {"split_count": 1, "project_count": 1}
+
+        test_client.patch(f"/api/contacts/{contact_id}", json={"name": "Ada L"})
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert [s["name"] for s in detail["transactions"][0]["splits"]] == ["Ada L"]
+
+    def test_deleting_contact_clears_its_splits(self, client_with_data):
+        test_client = client_with_data
+        contact_id = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+        project_id = test_client.post("/api/projects/", json={"name": "Delete"}).json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [contact_id]})
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+
+        assert test_client.delete(f"/api/contacts/{contact_id}").status_code == 200
+
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert detail["members"] == []
+        assert detail["transactions"][0]["splits"] == []
+
+    def test_removing_transaction_from_project_clears_splits(self, client_with_data):
+        test_client = client_with_data
+        contact_id = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+        project_id = test_client.post("/api/projects/", json={"name": "Unassign"}).json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [contact_id]})
+        txn_id = test_client.get(
+            "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+        ).json()["transactions"][0]["id"]
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+
+        test_client.delete(f"/api/projects/{project_id}/transactions/{txn_id}")
+
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert detail["transactions"] == []
+
+    def test_creating_project_with_members_does_not_attach_transactions(self, client_with_data):
+        """The inline "New project" flow creates only; attaching stays a deliberate click."""
+        test_client = client_with_data
+        contact_id = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+
+        created = test_client.post(
+            "/api/projects/", json={"name": "Fresh", "color": "#6366f1", "budget": 250.0}
+        )
+        assert created.status_code == 200
+        project_id = created.json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [contact_id]})
+
+        detail = test_client.get(f"/api/projects/{project_id}?currency=USD").json()
+        assert detail["budget"] == 250.0
+        assert [m["name"] for m in detail["members"]] == ["Ada"]
+        assert detail["transactions"] == []
+
+        # And it is immediately listable, which is what the popup refresh depends on.
+        assert "Fresh" in {p["name"] for p in test_client.get("/api/projects/?currency=USD").json()}

@@ -20,6 +20,8 @@ class AccountActivitySyncCounts:
 
 
 def _activity_type(data: dict[str, Any]) -> str:
+    if data.get("activity_type"):
+        return str(data["activity_type"])
     text = " ".join(
         str(data.get(key) or "")
         for key in ("merchant_clean", "merchant_raw", "original_description", "plaid_category")
@@ -66,7 +68,11 @@ def apply_account_activity_batch(
         row.currency = data.get("currency") or "USD"
         row.pending = bool(data.get("pending"))
         row.pending_activity_id = data.get("pending_transaction_id")
-        row.raw_data = {"payment_channel": data.get("payment_channel"), "plaid_category": data.get("plaid_category")}
+        row.raw_data = {
+            "payment_channel": data.get("payment_channel"),
+            "plaid_category": data.get("plaid_category"),
+            **(data.get("raw_data") or {}),
+        }
         if is_new:
             counts.added += 1
         else:

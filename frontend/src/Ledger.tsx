@@ -9,12 +9,18 @@ import { useFilterStore } from './store'
 import { useProjects } from './hooks'
 import { getGridTheme } from './gridTheme'
 import { api } from './api'
-import type { Contact, ProjectDetail, Transaction, TransactionCategoryOption } from './api'
+import type { ProjectDetail, Transaction, TransactionCategoryOption } from './api'
 import { formatCurrency } from './privacy'
 
 ModuleRegistry.registerModules([AllCommunityModule])
 
 const DEFAULT_SORTING_ORDER: SortDirection[] = ['asc', 'desc']
+
+// Keep in sync with COLORS in ProjectsPage.tsx.
+const PROJECT_COLORS = [
+  '#22c55e', '#3b82f6', '#eab308', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4',
+  '#14b8a6', '#a855f7', '#84cc16', '#0ea5e9', '#f43f5e', '#d946ef', '#10b981', '#6366f1',
+]
 
 function splitCategory(category: string | null | undefined) {
   const normalized = category || 'Uncategorized'
@@ -107,11 +113,11 @@ function SplitFilterHeader(props: any) {
       </button>
       {open && rect && createPortal(
         <div
-          data-split-filter-popup
+          data-split-filter-popup="true"
           className="fixed z-[1300] min-w-[160px] rounded-lg p-2 shadow-lg app-elevated"
           style={{ top: rect.bottom + 4, left: rect.left - 120 }}
         >
-          <div className="space-y-0.5 max-h-48 overflow-y-auto">
+          <div className="space-y-0.5 max-h-48 overflow-y-auto overscroll-contain">
             {(members || []).map((m: any) => (
               <button
                 key={m.id}
@@ -141,18 +147,6 @@ function AmountCell(props: ICellRendererParams) {
   return <span className={v > 0 ? 'text-green-500' : ''}>{formatCurrency(v, privacyMode, { currency: displayCurrency })}</span>
 }
 
-function MerchantCell(props: ICellRendererParams) {
-  const txn = props.data as Transaction | undefined
-  const label = props.value || txn?.merchant_clean || txn?.merchant_raw || 'Unknown merchant'
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="truncate">{label}</span>
-      {txn?.pending ? (
-        <span className="shrink-0 text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>(pending)</span>
-      ) : null}
-    </div>
-  )
-}
 
 export function Ledger({
   transactions,
@@ -182,7 +176,8 @@ export function Ledger({
   const [acctFilter, setAcctFilter] = useState('')
   const { data: allProjects } = useProjects()
   const qc = useQueryClient()
-  const [projectMenu, setProjectMenu] = useState<{ txnId: string; anchor: DOMRect; mode: 'summary' | 'edit' } | null>(null)
+  const [projectMenu, setProjectMenu] = useState<{ txnId: string; anchor: DOMRect; mode: 'edit' } | null>(null)
+
   const [categoryEditor, setCategoryEditor] = useState<{
     txnId: string
     anchor: DOMRect
@@ -230,6 +225,65 @@ export function Ledger({
     qc.invalidateQueries({ queryKey: ['projects'] })
     qc.invalidateQueries({ queryKey: ['project'] })
   }, [qc])
+
+  const [creatingProject, setCreatingProject] = useState(false)
+  const [newProjectName, setNewProjectName] = useState('')
+  const [newProjectColor, setNewProjectColor] = useState(PROJECT_COLORS[0])
+  const [newProjectBudget, setNewProjectBudget] = useState('')
+  const [newProjectMemberIds, setNewProjectMemberIds] = useState<string[]>([])
+  const [contacts, setContacts] = useState<{ id: string; name: string; color: string }[]>([])
+  const [savingProject, setSavingProject] = useState(false)
+  const [projectError, setProjectError] = useState<string | null>(null)
+
+  const resetProjectForm = useCallback(() => {
+    setCreatingProject(false)
+    setNewProjectName('')
+    setNewProjectBudget('')
+    setNewProjectMemberIds([])
+    setProjectError(null)
+  }, [])
+
+  const openProjectForm = useCallback(() => {
+    // Pre-pick an unused colour so the user usually doesn't have to choose.
+    const used = (allProjects || []).map((p) => p.color)
+    const available = PROJECT_COLORS.filter((c) => !used.includes(c))
+    const pool = available.length > 0 ? available : PROJECT_COLORS
+    setNewProjectColor(pool[Math.floor(Math.random() * pool.length)])
+    setNewProjectName('')
+    setNewProjectBudget('')
+    setNewProjectMemberIds([])
+    setProjectError(null)
+    setCreatingProject(true)
+    api.getContacts().then(setContacts).catch(() => setContacts([]))
+  }, [allProjects])
+
+  // Creates the project only. The transaction is *not* attached — the user picks it from
+  // the "Add to project" list afterwards, so assignment stays a deliberate action.
+  const submitNewProject = useCallback(async () => {
+    const name = newProjectName.trim()
+    if (!name) return
+    setSavingProject(true)
+    setProjectError(null)
+    try {
+      const budget = newProjectBudget.trim() ? Number(newProjectBudget) : undefined
+      const created = await api.createProject({
+        name,
+        color: newProjectColor,
+        ...(budget !== undefined && !Number.isNaN(budget) ? { budget } : {}),
+      })
+      if (newProjectMemberIds.length > 0) {
+        await api.addProjectMembers(created.id, newProjectMemberIds)
+      }
+      // Refresh so the new project appears in "Add to project" immediately, with the
+      // popup left open for the user to click it.
+      await qc.invalidateQueries({ queryKey: ['projects'] })
+      resetProjectForm()
+    } catch (err) {
+      setProjectError(err instanceof Error ? err.message : 'Could not create project')
+    } finally {
+      setSavingProject(false)
+    }
+  }, [qc, newProjectName, newProjectColor, newProjectBudget, newProjectMemberIds, resetProjectForm])
 
   const updateTransactionCaches = useCallback((updated: Transaction) => {
     qc.setQueriesData({ queryKey: ['transactions'] }, (current: unknown) => {
@@ -294,21 +348,39 @@ export function Ledger({
   useEffect(() => {
     if (!projectMenu) return
 
-    const handlePointerDown = () => setProjectMenu(null)
+    // Only dismiss for interactions *outside* the popup. This listener used to close
+    // unconditionally, and the popup survived by calling stopPropagation on its own
+    // pointerdown — which broke the moment the popup grew a scrollable list and a form,
+    // since `scroll` is registered in the capture phase and fires for the popup's own
+    // scrolling too.
+    const isInsidePopup = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null
+      return Boolean(el?.closest?.('[data-project-menu]') || el?.closest?.('[data-project-trigger]'))
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (isInsidePopup(event.target)) return
+      setProjectMenu(null)
+    }
+    const handleScroll = (event: Event) => {
+      if (isInsidePopup(event.target)) return
+      setProjectMenu(null)
+    }
+    const handleResize = () => setProjectMenu(null)
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setProjectMenu(null)
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
     document.addEventListener('keydown', handleEscape)
-    window.addEventListener('resize', handlePointerDown)
-    window.addEventListener('scroll', handlePointerDown, true)
+    window.addEventListener('resize', handleResize)
+    window.addEventListener('scroll', handleScroll, true)
 
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown)
       document.removeEventListener('keydown', handleEscape)
-      window.removeEventListener('resize', handlePointerDown)
-      window.removeEventListener('scroll', handlePointerDown, true)
+      window.removeEventListener('resize', handleResize)
+      window.removeEventListener('scroll', handleScroll, true)
     }
   }, [projectMenu])
 
@@ -337,13 +409,12 @@ export function Ledger({
     const txn = props.data as Transaction
     const assigned = txn.projects || []
     const activeMenu = projectMenu?.txnId === txn.id ? projectMenu.mode : null
-    const menuLeft = projectMenu ? Math.max(12, Math.min(projectMenu.anchor.left, window.innerWidth - 236)) : 0
-    const menuTop = projectMenu ? Math.min(projectMenu.anchor.bottom + 8, window.innerHeight - 120) : 0
     const projectTitle = assigned.map((project) => project.name).join(', ')
-    const unassignedProjects = (allProjects || []).filter((project) => !assigned.some((current) => current.id === project.id))
-    const openMenu = (element: HTMLElement, mode: 'summary' | 'edit') => {
+    // Both the dot cluster and the + open the same editable menu — a separate read-only
+    // "summary" popup was just a dead end for anyone trying to reassign.
+    const openMenu = (element: HTMLElement) => {
       const anchor = element.getBoundingClientRect()
-      setProjectMenu(activeMenu === mode ? null : { txnId: txn.id, anchor, mode })
+      setProjectMenu(activeMenu === 'edit' ? null : { txnId: txn.id, anchor, mode: 'edit' })
     }
 
     return (
@@ -351,12 +422,13 @@ export function Ledger({
         {assigned.length > 0 ? (
           <button
             type="button"
+            data-project-trigger="true"
             title={projectTitle}
             className="min-w-0 self-center flex-1 inline-flex items-center justify-start gap-1 rounded-md border px-2 py-1"
             style={{ borderColor: 'var(--border-default)', background: 'var(--surface-secondary)' }}
             onClick={(event) => {
               event.stopPropagation()
-              openMenu(event.currentTarget as HTMLElement, 'summary')
+              openMenu(event.currentTarget as HTMLElement)
             }}
           >
             <span className="flex shrink-0 items-center gap-1">
@@ -373,89 +445,14 @@ export function Ledger({
             ) : null}
           </button>
         ) : null}
-        <span className="h-5 w-5 shrink-0 self-center flex items-center justify-center rounded-full border border-dashed cursor-pointer hover:border-blue-500 hover:text-blue-500 text-sm leading-none"
+        <span
+          data-project-trigger="true"
+          className="h-5 w-5 shrink-0 self-center flex items-center justify-center rounded-full border border-dashed cursor-pointer hover:border-blue-500 hover:text-blue-500 text-sm leading-none"
           style={{ borderColor: 'var(--border-default)', color: 'var(--text-muted)' }}
           onClick={(event) => {
             event.stopPropagation()
-            openMenu(event.currentTarget as HTMLElement, 'edit')
+            openMenu(event.currentTarget as HTMLElement)
           }}>+</span>
-        {activeMenu === 'summary' && createPortal(
-          <div
-            className="fixed z-[1200] min-w-[220px] rounded-lg p-2 shadow-lg app-elevated"
-            style={{ left: menuLeft, top: menuTop }}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Projects</div>
-            <div className="space-y-0.5">
-              {assigned.map((project) => (
-                <div
-                  key={project.id}
-                  className="flex items-center gap-2 rounded px-2 py-1.5 text-xs"
-                  style={{ color: 'var(--text-primary)' }}
-                >
-                  <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: project.color }} />
-                  <span className="truncate">{project.name}</span>
-                </div>
-              ))}
-            </div>
-          </div>,
-          document.body,
-        )}
-        {activeMenu === 'edit' && allProjects && createPortal(
-          <div
-            className="fixed z-[1200] min-w-[220px] rounded-lg p-2 shadow-lg app-elevated"
-            style={{ left: menuLeft, top: menuTop }}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            {assigned.length > 0 ? (
-              <div className="mb-2">
-                <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Assigned</div>
-                <div className="space-y-0.5">
-                  {assigned.map((project) => (
-                    <button
-                      key={project.id}
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs app-hover"
-                      style={{ color: 'var(--text-primary)' }}
-                      onClick={() => {
-                        toggleProject(txn.id, project.id, true)
-                        setProjectMenu(null)
-                      }}
-                    >
-                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: project.color }} />
-                      <span className="flex-1 truncate">{project.name}</span>
-                      <span className="text-[10px] leading-none" style={{ color: 'var(--text-muted)' }}>×</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            {unassignedProjects.length > 0 ? (
-              <div>
-                <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Add to project</div>
-                <div className="space-y-0.5">
-                  {unassignedProjects.map((project) => (
-                    <button
-                      key={project.id}
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs app-hover"
-                      onClick={() => {
-                        toggleProject(txn.id, project.id, false)
-                        setProjectMenu(null)
-                      }}
-                    >
-                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: project.color }} />
-                      <span className="flex-1 truncate" style={{ color: 'var(--text-primary)' }}>{project.name}</span>
-                      <span className="text-slate-400">+</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            {allProjects.length === 0 && <div className="px-2 py-1 text-xs text-slate-500">No projects yet. Create one in Projects.</div>}
-          </div>,
-          document.body,
-        )}
       </div>
     )
   }, [projectMenu, allProjects, toggleProject])
@@ -503,6 +500,18 @@ export function Ledger({
     )
   }, [categoryEditor?.txnId, openCategoryEditor])
 
+  // The project popup is rendered from the Ledger body, not from inside the cell. Keeping
+  // it in the cell renderer meant every keystroke in the "new project" field changed
+  // ProjectCell's identity -> colDefs changed -> ag-grid rebuilt columns -> the input
+  // remounted and lost focus. It also died whenever the row scrolled out of view.
+  const projectMenuTxn = projectMenu ? transactions.find((t) => t.id === projectMenu.txnId) ?? null : null
+  const projectMenuAssigned = projectMenuTxn?.projects ?? []
+  const projectMenuUnassigned = (allProjects || []).filter(
+    (project) => !projectMenuAssigned.some((current) => current.id === project.id),
+  )
+  const menuLeft = projectMenu ? Math.max(12, Math.min(projectMenu.anchor.left, window.innerWidth - 236)) : 0
+  const menuTop = projectMenu ? Math.min(projectMenu.anchor.bottom + 8, Math.max(16, window.innerHeight - 320)) : 0
+
   const categoryMenuLeft = categoryEditor ? Math.max(12, Math.min(categoryEditor.anchor.left, window.innerWidth - 320)) : 0
   const categoryMenuTop = categoryEditor ? Math.min(categoryEditor.anchor.bottom + 8, window.innerHeight - 220) : 0
   const availableSubcategories = categoryEditor ? (subcategoriesByCategory.get(categoryEditor.topCategory) || []) : []
@@ -523,53 +532,107 @@ export function Ledger({
   const [splitFilterIds, setSplitFilterIds] = useState<string[]>([])
   const [descDraft, setDescDraft] = useState('')
 
-  const ProjectMerchantCell = useCallback((props: ICellRendererParams) => {
-    const txn = props.data as Transaction
-    const label = txn.merchant_clean || txn.merchant_raw
+  // Merchant cell with an attached note. In a project the note is per-project
+  // (transaction_projects.description); on the main ledger it's the transaction's own
+  // notes field. Empty notes stay hidden until row hover so the table isn't noisy.
+  const NoteMerchantCell = useCallback((props: ICellRendererParams) => {
+    const txn = props.data as Transaction | undefined
+    if (!txn) return null
+    const label = props.value || txn.merchant_clean || txn.merchant_raw || 'Unknown merchant'
+    const inProject = !!projectId
+    const note = (inProject ? txn.description : txn.notes) || ''
     const isEditing = editingDesc === txn.id
-    const saveDescription = async (value: string) => {
-      if (!projectId) return
-      await api.updateTransactionProject(projectId, txn.id, { description: value || '' })
-      txn.description = value || undefined
+
+    const save = async (value: string) => {
+      const trimmed = value.trim()
+      try {
+        if (inProject) {
+          await api.updateTransactionProject(projectId!, txn.id, { description: trimmed })
+          txn.description = trimmed || undefined
+        } else {
+          await api.updateTransaction(txn.id, { notes: trimmed || null }, displayCurrency)
+          txn.notes = trimmed || null
+        }
+      } catch (err) {
+        console.error('Failed to save note:', err)
+      }
       setEditingDesc(null)
       props.api.refreshCells({ rowNodes: [props.node], force: true })
     }
+
+    const startEdit = (event: React.MouseEvent) => {
+      event.stopPropagation()
+      setEditingDesc(txn.id)
+      setDescDraft(note)
+    }
+
+    const noteInput = (
+      <input
+        autoFocus
+        className="text-[11px] bg-transparent border-b border-blue-400 outline-none w-full"
+        style={{ color: 'var(--text-muted)' }}
+        value={descDraft}
+        onChange={(e) => setDescDraft(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        onBlur={() => void save(descDraft)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void save(descDraft)
+          if (e.key === 'Escape') setEditingDesc(null)
+        }}
+      />
+    )
+
+    const addAffordance = (
+      <span
+        className="shrink-0 text-[11px] cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity hover:text-blue-400"
+        style={{ color: 'var(--text-muted)' }}
+        onClick={startEdit}
+      >
+        + note
+      </span>
+    )
+
+    // Single line in both views: merchant, then the note inline. Keeps row height
+    // uniform and the table quiet when most rows have no note.
     return (
-      <div className="flex flex-col justify-center min-w-0 py-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate">{label}</span>
-          {txn.pending ? (
-            <span className="shrink-0 text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>(pending)</span>
-          ) : null}
-        </div>
+      <div className="group flex h-full min-w-0 items-center gap-2">
+        <span className="truncate">{label}</span>
+        {txn.pending ? (
+          <span className="shrink-0 text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>(pending)</span>
+        ) : null}
         {isEditing ? (
-          <input
-            autoFocus
-            className="mt-0.5 text-[11px] bg-transparent border-b border-blue-400 outline-none w-full"
-            style={{ color: 'var(--text-muted)' }}
-            value={descDraft}
-            onChange={(e) => setDescDraft(e.target.value)}
-            onBlur={() => void saveDescription(descDraft)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void saveDescription(descDraft); if (e.key === 'Escape') setEditingDesc(null) }}
-          />
-        ) : (
+          <span className="min-w-0 flex-1">{noteInput}</span>
+        ) : note ? (
           <span
-            className="mt-0.5 text-[11px] truncate cursor-pointer hover:text-blue-400"
-            style={{ color: 'var(--text-muted)', fontStyle: txn.description ? 'normal' : 'italic' }}
-            onClick={() => { setEditingDesc(txn.id); setDescDraft(txn.description || '') }}
+            title={note}
+            className="min-w-0 flex-1 truncate text-[11px] cursor-pointer hover:text-blue-400"
+            style={{ color: 'var(--text-muted)' }}
+            onClick={startEdit}
           >
-            {txn.description || 'Add note...'}
+            — {note}
           </span>
-        )}
+        ) : addAffordance}
       </div>
     )
-  }, [projectId, editingDesc, descDraft])
+  }, [projectId, editingDesc, descDraft, displayCurrency])
 
   const SplitCell = useCallback((props: ICellRendererParams) => {
     const txn = props.data as Transaction
     const splits = txn.splits || []
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuPos, setMenuPos] = useState({ left: 0, top: 0 })
+
+    // Dismiss on any click outside the popup or its trigger.
+    useEffect(() => {
+      if (!menuOpen) return
+      const handler = (event: PointerEvent) => {
+        const target = event.target as HTMLElement | null
+        if (target?.closest('[data-split-menu]') || target?.closest('[data-split-trigger]')) return
+        setMenuOpen(false)
+      }
+      document.addEventListener('pointerdown', handler)
+      return () => document.removeEventListener('pointerdown', handler)
+    }, [menuOpen])
 
     const toggleMember = async (contactId: string) => {
       if (!projectId) return
@@ -581,11 +644,16 @@ export function Ledger({
       props.api.refreshCells({ rowNodes: [props.node], force: true })
     }
 
+    // Pull the popup up if the trigger sits low, so it always has room to show a few
+    // rows rather than collapsing to a sliver.
+    const splitMenuTop = Math.min(menuPos.top, Math.max(16, window.innerHeight - 240))
+
     return (
       <div className="flex h-full w-full items-center gap-1 overflow-hidden">
         {splits.length > 0 ? (
           <button
             type="button"
+            data-split-trigger="true"
             title={splits.map(s => s.name).join(', ')}
             className="min-w-0 self-center flex-1 inline-flex items-center justify-start gap-1 rounded-md border px-2 py-1"
             style={{ borderColor: 'var(--border-default)', background: 'var(--surface-secondary)' }}
@@ -601,6 +669,7 @@ export function Ledger({
         ) : null}
         {!splits.length && members && members.length > 0 ? (
           <span
+            data-split-trigger="true"
             className="h-5 w-5 shrink-0 self-center flex items-center justify-center rounded-full border border-dashed cursor-pointer hover:border-blue-500 hover:text-blue-500 text-sm leading-none"
             style={{ borderColor: 'var(--border-default)', color: 'var(--text-muted)' }}
             onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenuPos({ left: r.left, top: r.bottom + 8 }); setMenuOpen(true) }}
@@ -608,12 +677,16 @@ export function Ledger({
         ) : null}
         {menuOpen && members && createPortal(
           <div
-            className="fixed z-[1200] min-w-[200px] rounded-lg p-2 shadow-lg app-elevated"
-            style={{ left: Math.min(menuPos.left, window.innerWidth - 220), top: Math.min(menuPos.top, window.innerHeight - 150) }}
-            onPointerDown={(e) => e.stopPropagation()}
+            data-split-menu="true"
+            className="fixed z-[1200] flex min-w-[200px] flex-col rounded-lg p-2 shadow-lg app-elevated"
+            style={{
+              left: Math.min(menuPos.left, window.innerWidth - 220),
+              top: splitMenuTop,
+              maxHeight: `calc(100vh - ${splitMenuTop + 16}px)`,
+            }}
           >
-            <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Split with</div>
-            <div className="space-y-0.5">
+            <div className="mb-1 shrink-0 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Split with</div>
+            <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain">
               {members.map(m => {
                 const active = splits.some(s => s.id === m.id)
                 return (
@@ -629,7 +702,6 @@ export function Ledger({
                 )
               })}
             </div>
-            <button className="mt-1 w-full text-center text-[10px] text-slate-400 hover:text-slate-200" onClick={() => setMenuOpen(false)}>Close</button>
           </div>,
           document.body,
         )}
@@ -637,7 +709,7 @@ export function Ledger({
     )
   }, [projectId, members])
 
-  const colDefs = useMemo<ColDef[]>(() => [
+  const colDefs = useMemo(() => ([
     {
       field: 'effective_date',
       headerName: 'Date',
@@ -654,20 +726,19 @@ export function Ledger({
     { field: 'merchant_clean', headerName: 'Merchant', flex: 2,
       tooltipValueGetter: (p: any) => p.data.merchant_clean || p.data.merchant_raw,
       valueGetter: (p: any) => p.data.merchant_clean || p.data.merchant_raw,
-      cellRenderer: projectId ? ProjectMerchantCell : MerchantCell,
-      ...(projectId ? { cellStyle: { lineHeight: '1.2', paddingTop: '2px', paddingBottom: '2px' }, autoHeight: true } : {}) },
+      cellRenderer: NoteMerchantCell },
     { field: 'category', headerName: 'Category', flex: 1,
       cellRenderer: EditableCategoryCell,
       valueGetter: (p: any) => (p.data.category || 'Uncategorized').split('/')[0] },
     { headerName: 'Sub', flex: 1,
       cellRenderer: EditableSubcategoryCell,
       valueGetter: (p: any) => (p.data.category || '').split('/')[1] || '—' },
-    { field: 'source', headerName: 'Account', width: 150 },
+    { field: 'source', headerName: 'Account', width: projectId ? 110 : 150 },
     {
       field: 'projects',
       headerName: 'Projects',
-      width: 140,
-      maxWidth: 160,
+      width: projectId ? 90 : 140,
+      maxWidth: projectId ? 100 : 160,
       cellRenderer: ProjectCell,
       filter: false,
       sortable: false,
@@ -683,8 +754,8 @@ export function Ledger({
     ...(projectId && members && members.length > 0 ? [{
       field: 'splits',
       headerName: 'Split',
-      width: 150,
-      maxWidth: 180,
+      width: 110,
+      maxWidth: 130,
       cellRenderer: SplitCell,
       filter: false,
       sortable: false,
@@ -692,10 +763,10 @@ export function Ledger({
       headerComponentParams: { members, onFilterChange: (ids: string[]) => setSplitFilterIds(ids) },
       cellStyle: { overflow: 'visible', display: 'flex', alignItems: 'center', paddingTop: '0', paddingBottom: '0' },
       valueFormatter: () => '',
-    }] : []),
+    }] as ColDef[] : []),
     { field: 'amount', headerName: 'Amount', width: 130, type: 'rightAligned',
       cellRenderer: AmountCell, filter: false, sortingOrder: ['asc', 'desc', null] },
-  ], [EditableCategoryCell, EditableSubcategoryCell, ProjectCell, ProjectMerchantCell, SplitCell, SplitFilterHeader, projectId, members, setSplitFilterIds])
+  ] as ColDef[]), [EditableCategoryCell, EditableSubcategoryCell, ProjectCell, NoteMerchantCell, SplitCell, projectId, members])
 
   const defaultColDef = useMemo(() => ({
     sortable: true,
@@ -724,6 +795,18 @@ export function Ledger({
 
   const hasFilters = globalSearch || catFilter || acctFilter || splitFilterIds.length > 0
 
+  // Size the grid to its content (capped at 15 rows) so short lists don't leave a
+  // dead gap and long lists still scroll internally. Project rows are taller
+  // because the merchant cell carries a second description line.
+  // Project view: let ag-grid size itself to its rows (short lists, variable row height
+  // from the description line) so there's never dead space under the table.
+  // Main view: keep a fixed viewport with internal scrolling — it can hold thousands of rows.
+  const gridHeight = useMemo(() => {
+    if (projectId) return undefined
+    const visibleRows = Math.min(Math.max(filtered.length, 1), 15)
+    return visibleRows * 42 + 90 // rows + header + pagination bar
+  }, [filtered.length, projectId])
+
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
@@ -751,13 +834,14 @@ export function Ledger({
           )}
         </div>
       </div>
-      <div style={{ width: '100%', height: 15 * 42 + 90 }}>
+      <div style={{ width: '100%', height: gridHeight }}>
         <AgGridReact
           ref={gridRef}
           theme={gridTheme}
           rowData={filtered}
           columnDefs={colDefs}
           defaultColDef={defaultColDef}
+          {...(projectId ? { domLayout: 'autoHeight' as const } : {})}
           pagination={true}
           paginationPageSize={200}
           paginationPageSizeSelector={[50, 100, 200, 500]}
@@ -768,6 +852,164 @@ export function Ledger({
           ensureDomOrder={true}
         />
       </div>
+      {projectMenu && allProjects && projectMenuTxn && createPortal(
+        <div
+          data-project-menu="true"
+          className="fixed z-[1200] flex min-w-[220px] flex-col rounded-lg p-2 shadow-lg app-elevated"
+          style={{ left: menuLeft, top: menuTop, maxHeight: `calc(100vh - ${menuTop + 16}px)` }}
+        >
+          {/* Lists scroll; the New-project footer stays pinned so it can't drift
+              off-screen once there are a lot of projects. */}
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          {creatingProject ? (
+            <div className="space-y-2 px-1 py-0.5">
+              <div className="px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">New project</div>
+              <input
+                autoFocus
+                value={newProjectName}
+                placeholder="Project name"
+                className="app-input w-full rounded px-2 py-1 text-xs"
+                onChange={(event) => setNewProjectName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void submitNewProject()
+                  if (event.key === 'Escape') resetProjectForm()
+                }}
+              />
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-slate-400">Colour</span>
+                <div className="flex flex-wrap gap-1">
+                  {PROJECT_COLORS.slice(0, 8).map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-label={`Use colour ${c}`}
+                      onClick={() => setNewProjectColor(c)}
+                      className={`h-4 w-4 rounded-full ${newProjectColor === c ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <input
+                value={newProjectBudget}
+                placeholder="Budget (optional)"
+                type="number"
+                className="app-input w-full rounded px-2 py-1 text-xs"
+                onChange={(event) => setNewProjectBudget(event.target.value)}
+              />
+              <div>
+                <div className="mb-1 px-1 text-[10px] text-slate-400">Split with</div>
+                {contacts.length === 0 ? (
+                  <div className="px-1 text-[10px] text-slate-500">No people yet — add them in Settings.</div>
+                ) : (
+                  <div className="flex flex-wrap gap-1">
+                    {contacts.map((c) => {
+                      const on = newProjectMemberIds.includes(c.id)
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setNewProjectMemberIds((prev) => (
+                            prev.includes(c.id) ? prev.filter((id) => id !== c.id) : [...prev, c.id]
+                          ))}
+                          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${on ? 'border-blue-500 bg-blue-500/10' : 'border-slate-500/30 opacity-60'}`}
+                          style={{ color: c.color }}
+                        >
+                          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: c.color }} />
+                          {c.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+          <>
+          {projectMenuAssigned.length > 0 ? (
+            <div className="mb-2">
+              <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Assigned</div>
+              <div className="space-y-0.5">
+                {projectMenuAssigned.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs app-hover"
+                    style={{ color: 'var(--text-primary)' }}
+                    onClick={() => {
+                      toggleProject(projectMenuTxn.id, project.id, true)
+                      setProjectMenu(null)
+                    }}
+                  >
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: project.color }} />
+                    <span className="flex-1 truncate">{project.name}</span>
+                    <span className="text-[10px] leading-none" style={{ color: 'var(--text-muted)' }}>×</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {projectMenuUnassigned.length > 0 ? (
+            <div>
+              <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Add to project</div>
+              <div className="space-y-0.5">
+                {projectMenuUnassigned.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs app-hover"
+                    onClick={() => {
+                      toggleProject(projectMenuTxn.id, project.id, false)
+                      setProjectMenu(null)
+                    }}
+                  >
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: project.color }} />
+                    <span className="flex-1 truncate" style={{ color: 'var(--text-primary)' }}>{project.name}</span>
+                    <span className="text-slate-400">+</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          </>
+          )}
+          </div>
+          <div className="mt-1 shrink-0 border-t pt-1" style={{ borderColor: 'var(--border-default)' }}>
+            {creatingProject ? (
+              <div className="flex items-center justify-end gap-2 px-1 py-0.5">
+                <button
+                  type="button"
+                  className="text-[11px] text-slate-400 hover:underline"
+                  onClick={resetProjectForm}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!newProjectName.trim() || savingProject}
+                  className="text-[11px] text-blue-500 hover:underline disabled:opacity-50"
+                  onClick={() => void submitNewProject()}
+                >
+                  {savingProject ? 'Creating…' : 'Create'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs app-hover text-blue-500"
+                onClick={() => openProjectForm()}
+              >
+                <span className="text-sm leading-none">+</span>
+                <span>New project</span>
+              </button>
+            )}
+            {projectError ? (
+              <div className="px-2 pt-1 text-[10px]" style={{ color: 'var(--color-negative)' }}>{projectError}</div>
+            ) : null}
+          </div>
+        </div>,
+        document.body,
+      )}
       {categoryEditor && createPortal(
         <div
           className="fixed z-[1200] min-w-[280px] rounded-xl p-3 shadow-xl app-elevated"

@@ -1,16 +1,17 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import tempfile
 import os
 import json
+import logging
 
 from sqlalchemy import and_, func, literal
 
 from src.models import get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot, ExchangeRate, SourceBalanceHistory, AccountActivity
 from src.config import settings
 from src.demo import get_demo_investments, get_demo_plaid_balances, get_demo_sidebar_accounts
-from src.ingestion.plaid_client import create_link_token, exchange_public_token, remove_item, sync_transactions, get_investment_holdings, get_account_balances
+from src.ingestion.plaid_client import create_link_token, exchange_public_token, remove_item, sync_transactions, get_investment_holdings, get_investment_transactions, get_account_balances
 from src.ingestion.csv_importer import import_csv_file
 from src.ingestion.import_service import commit_import, preview_import
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
@@ -29,6 +30,7 @@ from src.api.schemas import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 SNAPSHOT_REFRESH_INTERVAL = timedelta(days=14)
 
 
@@ -222,8 +224,21 @@ def _persist_account_snapshot(
     connection_state: str,
     current_value: float,
     synced_at: datetime,
-) -> None:
+) -> bool:
     snapshot_value = round(current_value, 2)
+    latest = (
+        db.query(SourceBalanceHistory)
+        .filter(
+            SourceBalanceHistory.source == source,
+            SourceBalanceHistory.account_group == account_group,
+            SourceBalanceHistory.currency == "USD",
+        )
+        .order_by(SourceBalanceHistory.date.desc(), SourceBalanceHistory.created_at.desc())
+        .first()
+    )
+    if latest is not None and round(float(latest._value), 2) == snapshot_value:
+        return False
+
     db.add(
         AccountSnapshot(
             source=source,
@@ -242,6 +257,7 @@ def _persist_account_snapshot(
         observed_at=synced_at,
         provenance="account_snapshot",
     )
+    return True
 
 
 def _plaid_activity_destination(log: SyncLog) -> str:
@@ -409,14 +425,53 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
         .all()
     )
     history: list[dict] = []
+    previous_date_by_source: dict[str, date] = {}
+    previous_value_by_source: dict[str, float] = {}
     for row in value_rows:
         detail = manual_by_day.get((row.source, row.date.isoformat()), {})
+        if not detail:
+            source_key = classify_source(row.source) or row.source
+            activity_query = db.query(AccountActivity).filter(
+                (AccountActivity.source_key == source_key) | (AccountActivity.source == row.source),
+                AccountActivity.date <= row.date,
+                AccountActivity.pending.is_(False),
+            )
+            previous_date = previous_date_by_source.get(row.source)
+            if previous_date is not None:
+                activity_query = activity_query.filter(AccountActivity.date > previous_date)
+            period_activity = activity_query.all()
+            inflow = sum(
+                float(item._amount or 0) * rate_map.get(item.currency, 1.0)
+                for item in period_activity
+                if item.activity_type == "transfer"
+            )
+            activity_gain = sum(
+                float(item._amount or 0) * rate_map.get(item.currency, 1.0)
+                for item in period_activity
+                if item.activity_type in {"interest", "dividend"}
+            )
+            ending_value = round(float(row._value or 0) * rate_map.get(row.currency, 1.0), 2)
+            previous_value = previous_value_by_source.get(row.source)
+            market_gain = (
+                ending_value - previous_value - inflow
+                if previous_value is not None
+                else activity_gain
+            )
+            detail = {
+                "inflow": round(inflow, 2),
+                "market_gain": round(market_gain, 2),
+                "ending_value": ending_value,
+            }
+            if previous_value is not None:
+                detail["beginning_value"] = previous_value
         history.append({
             "synced_at": f"{row.date.isoformat()}T12:00:00",
             "source": row.source,
             "value": round(float(row._value or 0) * rate_map.get(row.currency, 1.0), 2),
             **{name: detail[name] for name in ("beginning_value", "market_gain", "inflow", "ending_value") if name in detail},
         })
+        previous_date_by_source[row.source] = row.date
+        previous_value_by_source[row.source] = history[-1]["value"]
     represented = {(item["source"], item["synced_at"][:10]) for item in history}
     history.extend(item for item in manual_history if (item["source"], item["synced_at"][:10]) not in represented)
     history.sort(key=lambda item: (item["synced_at"], item["source"]))
@@ -455,7 +510,11 @@ def _current_retirement_payload(db: Session) -> dict:
     return {"transactions": [], "summary": {}}
 
 
-def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -> list[dict]:
+def _refresh_sidebar_snapshots(
+    db: Session,
+    logs: list[SyncLog] | None = None,
+    errors: list[dict] | None = None,
+) -> list[dict]:
     if settings.is_demo:
         return []
 
@@ -481,15 +540,24 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
         if not should_refresh:
             continue
 
+        holdings_succeeded = False
         try:
-            holdings = get_investment_holdings(access_token)
             record_plaid_usage(
                 db,
                 endpoint="investments_holdings_get",
                 institution=institution,
                 plaid_item_id=log.plaid_item_id,
+                metadata={"status": "attempted"},
             )
-        except Exception:
+            holdings = get_investment_holdings(access_token)
+            holdings_succeeded = True
+        except Exception as exc:
+            logger.exception("Plaid holdings refresh failed for %s", institution)
+            error = {"source": institution, "stage": "holdings", **_plaid_sync_error_payload(exc)}
+            if errors is not None:
+                errors.append(error)
+            extra_data["last_sync_error"] = error
+            log.extra_data = extra_data
             holdings = None
         if holdings:
             _persist_investment_holdings_snapshot(
@@ -505,14 +573,21 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
         )
 
         try:
-            accounts = get_account_balances(access_token)
             record_plaid_usage(
                 db,
                 endpoint="accounts_balance_get",
                 institution=institution,
                 plaid_item_id=log.plaid_item_id,
+                metadata={"status": "attempted"},
             )
-        except Exception:
+            accounts = get_account_balances(access_token)
+        except Exception as exc:
+            logger.exception("Plaid balance refresh failed for %s", institution)
+            error = {"source": institution, "stage": "balances", **_plaid_sync_error_payload(exc)}
+            if errors is not None:
+                errors.append(error)
+            extra_data["last_sync_error"] = error
+            log.extra_data = extra_data
             accounts = []
 
         if accounts:
@@ -541,7 +616,7 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
             # holdings endpoint failed. Positive cash-management balances remain valid.
             should_record_cash_value = not is_investment_source or current_value != 0
             if should_record_cash_value and (institution not in _get_investment_sources() or investment_value <= 0):
-                _persist_account_snapshot(
+                persisted = _persist_account_snapshot(
                     db,
                     source=institution,
                     account_group=group,
@@ -549,10 +624,11 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
                     current_value=current_value,
                     synced_at=synced_at,
                 )
-                snapshots.append({"source": institution, "group": group, "balance": current_value})
+                if persisted:
+                    snapshots.append({"source": institution, "group": group, "balance": current_value})
 
         if investment_value:
-            _persist_account_snapshot(
+            persisted = _persist_account_snapshot(
                 db,
                 source=institution,
                 account_group="investment",
@@ -560,10 +636,13 @@ def _refresh_sidebar_snapshots(db: Session, logs: list[SyncLog] | None = None) -
                 current_value=investment_value,
                 synced_at=synced_at,
             )
-            snapshots.append({"source": institution, "group": "investment", "balance": investment_value})
+            if persisted:
+                snapshots.append({"source": institution, "group": "investment", "balance": investment_value})
 
-        extra_data["last_snapshot_refresh_at"] = datetime.utcnow().isoformat()
-        log.extra_data = extra_data
+        plugin = get_all_sources().get(classify_source(institution))
+        if holdings_succeeded or not (plugin and plugin.domain == "investments"):
+            extra_data["last_snapshot_refresh_at"] = datetime.utcnow().isoformat()
+            log.extra_data = extra_data
 
     return snapshots
 
@@ -899,6 +978,7 @@ def sync_plaid(db: Session = Depends(get_db)):
         "skipped_statement_overlap": 0,
     }
     account_results = []
+    sync_errors: list[dict] = []
     
     for log in logs:
         access_token = log.extra_data.get("access_token") if log.extra_data else None
@@ -952,6 +1032,34 @@ def sync_plaid(db: Session = Depends(get_db)):
               log.plaid_cursor = cursor
               db.commit()
           extra_data = dict(log.extra_data or {})
+          plugin = get_all_sources().get(classify_source(institution))
+          if plugin and plugin.domain == "investments":
+              previous_investment_sync = extra_data.get("last_investment_transactions_sync_at")
+              investment_start = date(2010, 1, 1)
+              if previous_investment_sync:
+                  investment_start = datetime.fromisoformat(previous_investment_sync.replace("Z", "+00:00")).date() - timedelta(days=7)
+              investment_transactions = get_investment_transactions(
+                  access_token,
+                  start_date=investment_start,
+                  end_date=date.today(),
+              )
+              record_plaid_usage(
+                  db,
+                  endpoint="investments_transactions_get",
+                  institution=institution,
+                  plaid_item_id=log.plaid_item_id,
+              )
+              investment_counts = apply_account_activity_batch(
+                  db=db,
+                  institution=institution,
+                  added=investment_transactions,
+                  modified=[],
+                  removed=[],
+              )
+              for key, value in investment_counts.as_dict().items():
+                  total_counts[key] = total_counts.get(key, 0) + value
+                  account_counts[key] = account_counts.get(key, 0) + value
+              extra_data["last_investment_transactions_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_counts"] = account_counts
           extra_data["activity_destination"] = destination
@@ -963,10 +1071,13 @@ def sync_plaid(db: Session = Depends(get_db)):
           db.commit()
           account_results.append({"source": institution, **account_counts})
         except Exception as exc:
+          logger.exception("Plaid sync failed for %s", institution)
           db.rollback()
           extra_data = dict(log.extra_data or {})
           extra_data["last_sync_error"] = _plaid_sync_error_payload(exc)
           log.extra_data = extra_data
+          db.commit()
+          sync_errors.append({"source": institution, "stage": "transactions", **extra_data["last_sync_error"]})
           account_results.append({
               "source": institution,
               "status": "error",
@@ -975,9 +1086,15 @@ def sync_plaid(db: Session = Depends(get_db)):
           })
           continue  # skip accounts that error (e.g. consent required)
     
-    snapshots = _refresh_sidebar_snapshots(db, logs=logs)
+    snapshots = _refresh_sidebar_snapshots(db, logs=logs, errors=sync_errors)
     db.commit()
-    return {"status": "synced", **total_counts, "accounts": account_results, "snapshots_refreshed": len(snapshots)}
+    return {
+        "status": "partial_error" if sync_errors else "synced",
+        **total_counts,
+        "accounts": account_results,
+        "snapshots_refreshed": len(snapshots),
+        "errors": sync_errors,
+    }
 
 
 @router.get("/status")

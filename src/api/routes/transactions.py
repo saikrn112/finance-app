@@ -566,5 +566,6 @@ def _serialize(t: Transaction, projects: list[dict] | None = None, rate_map: dic
         "pending": bool(t.pending),
         "is_recurring": t.is_recurring,
         "tags": t.tags or [],
+        "notes": t.notes,
         "projects": projects or [],
     }
