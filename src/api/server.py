@@ -10,6 +10,7 @@ from src.plugins.loader import load_plugins
 from src.ingestion.plaid_activity import migrate_investment_transactions
 from src.services.auto_tasks import start_auto_tasks, stop_auto_tasks
 from src.privacy_mask import PRIVACY_MASK_ENABLED, mask_json_body
+from src.api.local_auth import install_local_token_gate
 import os
 from pathlib import Path
 
@@ -47,6 +48,9 @@ def plugin_icon(filename: str):
         if path.is_file():
             return FileResponse(path)
     raise HTTPException(status_code=404)
+
+# No-op unless FINANCE_APP_LOCAL_TOKEN is set, which only the desktop shell does.
+install_local_token_gate(app)
 
 app.add_middleware(
     CORSMiddleware,

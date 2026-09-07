@@ -1,0 +1,6 @@
+# macOS target build artifacts only.
+# Deliberately narrow: the repo-root .gitignore already excludes config.yaml and
+# data/, and this file must never re-include them (see AGENTS.md §9 / plan §9).
+build/
+.build/
+*.xcuserstate

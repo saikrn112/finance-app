@@ -4,6 +4,9 @@ from pathlib import Path
 import os
 import yaml
 
+# src/config.py -> src/ -> project root
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 class PlaidConfig(BaseModel):
     client_id: str = ""
@@ -60,12 +63,18 @@ class Settings(BaseSettings):
     @classmethod
     def load(cls, path: str = "config.yaml") -> "Settings":
         data: dict = {}
-        config_path = Path(path)
+        # FINANCE_APP_CONFIG lets a host process (e.g. the macOS app bundle) keep
+        # config.yaml outside the working directory. Without it the config is only
+        # ever found when the process is launched from the repository root.
+        config_path = Path(os.getenv("FINANCE_APP_CONFIG") or path)
+        example_path = Path("config.yaml.example")
+        if not example_path.exists():
+            example_path = _PROJECT_ROOT / "config.yaml.example"
         if config_path.exists():
             with open(config_path) as f:
                 data = yaml.safe_load(f) or {}
-        elif Path("config.yaml.example").exists():
-            with open("config.yaml.example") as f:
+        elif example_path.exists():
+            with open(example_path) as f:
                 data = yaml.safe_load(f) or {}
 
         overrides: dict = {}

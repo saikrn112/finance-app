@@ -52,6 +52,30 @@ database:
         assert settings.plaid.client_id == ""
         assert settings.server.port == 8000
 
+    def test_finance_app_config_env_var_overrides_path(self, monkeypatch):
+        """The macOS bundle keeps config.yaml in Application Support, not the CWD."""
+        config_content = """
+server:
+  port: 9123
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(config_content)
+            path = f.name
+
+        monkeypatch.setenv("FINANCE_APP_CONFIG", path)
+        try:
+            # The default argument must lose to the env var, not the other way round.
+            settings = Settings.load()
+            assert settings.server.port == 9123
+        finally:
+            os.unlink(path)
+
+    def test_finance_app_config_pointing_nowhere_falls_back(self, monkeypatch):
+        """A first run with no config yet must not raise."""
+        monkeypatch.setenv("FINANCE_APP_CONFIG", "/nonexistent/finance/config.yaml")
+        settings = Settings.load()
+        assert settings.plaid.client_id == ""
+
     def test_partial_config(self):
         config_content = """
 plaid:
