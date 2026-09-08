@@ -52,6 +52,18 @@ public struct BackendEnvironment: Sendable {
             "FINANCE_APP_RUNTIME_DIR": layout.runtimeDirectory.path,
             "FINANCE_APP_DB_PATH": layout.databaseURL.path,
             "FINANCE_APP_LOG_LEVEL": logLevel,
+
+            // The Google OAuth redirect has to point at *this* launch's port.
+            //
+            // A config.yaml written for the container app pins this to
+            // http://localhost:8000/..., so Google would send the browser to port 8000 --
+            // either nothing, or the container app, but never this process. The symptom is
+            // a sign-in that appears to succeed and a vault that never connects.
+            //
+            // Google allows any loopback port for a "desktop" OAuth client, which is what
+            // google_drive.oauth_client_type defaults to, so a per-launch port is fine.
+            "FINANCE_APP_GOOGLE_REDIRECT_URI":
+                "http://localhost:\(port)/api/settings/vault/google/callback",
         ]
         // Only when the built frontend is actually present. Pointing the backend at a
         // missing directory would make it serve 404s for the app shell, which reads as
