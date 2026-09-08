@@ -42,6 +42,18 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BINARY" "$CONTENTS/MacOS/$APP_NAME"
 cp "$MACOS_DIR/Resources/Info.plist" "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
+
+# The app icon. Regenerated when the generator changes, so the committed .icns and the
+# code that draws it cannot drift apart.
+ICON_SOURCE="$MACOS_DIR/scripts/make_icon.swift"
+ICON_SET="$MACOS_DIR/Resources/AppIcon.iconset"
+ICON="$MACOS_DIR/Resources/AppIcon.icns"
+if [ ! -f "$ICON" ] || [ "$ICON_SOURCE" -nt "$ICON" ]; then
+  log "regenerating the app icon"
+  ( cd "$REPO_ROOT" && swift "$ICON_SOURCE" >/dev/null )
+  iconutil -c icns "$ICON_SET" -o "$ICON"
+fi
+cp "$ICON" "$CONTENTS/Resources/AppIcon.icns"
 cp -R "$BUILD_DIR/backend" "$CONTENTS/Resources/backend"
 
 # The built frontend. Absent until phase 2; the shell shows the backend status

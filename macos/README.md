@@ -392,3 +392,21 @@ cd frontend && npx tsc -p tsconfig.app.json --noEmit 2>&1 | grep -c 'error TS'
   pixels are not.
 - Sleep/wake: `NSWorkspace.didWakeNotification` is wired to `revalidate()`, but the
   machine has not actually been slept with the app running.
+
+---
+
+## App icon
+
+`swift macos/scripts/make_icon.swift` draws it and writes `Resources/AppIcon.iconset`;
+`iconutil -c icns` produces `AppIcon.icns`. `build_app.sh` regenerates both when the
+generator is newer than the `.icns`, so the committed asset and the code that draws it
+cannot drift.
+
+Two overlapping coins, `$` in front and `₹` behind. The app is genuinely multi-currency, so
+a single `$` would misrepresent it; two glyphs side by side would collapse into a smudge at
+16px, whereas two overlapping discs still read as money. Colours are the app's own — the
+income aqua from the validated categorical palette, into a deeper step of the same hue.
+
+Drawn per size rather than downsampled from one master, which is where small icons usually
+turn to mud: the coin gap is proportional, and **the glyphs are suppressed below 40px** so
+the small sizes are a deliberate silhouette instead of a blurred one.
