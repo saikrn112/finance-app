@@ -23,22 +23,38 @@ APP="${1:?usage: sign.sh <path-to-.app> [identity]}"
 IDENTITY="${2:-${MACOS_SIGN_IDENTITY:--}}"
 
 APP_ENTITLEMENTS="$MACOS_DIR/Resources/Entitlements.plist"
-if [ "$IDENTITY" = "-" ]; then
-  PY_ENTITLEMENTS="$MACOS_DIR/Resources/Entitlements-Interpreter-adhoc.plist"
-else
-  PY_ENTITLEMENTS="$MACOS_DIR/Resources/Entitlements-Interpreter.plist"
-fi
+
+# Library validation matches on Team ID, and only a Developer ID certificate has one.
+# Ad-hoc has none, and neither does a self-signed "FinanceApp Local" identity -- so both
+# need the permissive interpreter entitlements. Keyed on the identity *name* rather than
+# on `= "-"`, because a self-signed identity silently took the strict path before and
+# every bundled extension module failed to load.
+case "$IDENTITY" in
+  "Developer ID Application"*|"Apple Development"*)
+    PY_ENTITLEMENTS="$MACOS_DIR/Resources/Entitlements-Interpreter.plist"
+    HAS_TEAM_ID=1
+    ;;
+  *)
+    PY_ENTITLEMENTS="$MACOS_DIR/Resources/Entitlements-Interpreter-adhoc.plist"
+    HAS_TEAM_ID=0
+    ;;
+esac
 
 [ -d "$APP" ] || die "not a bundle: $APP"
 [ -f "$APP_ENTITLEMENTS" ] || die "missing $APP_ENTITLEMENTS"
 [ -f "$PY_ENTITLEMENTS" ] || die "missing $PY_ENTITLEMENTS"
 
-# --timestamp needs a round-trip to Apple and is refused for ad-hoc signatures.
-if [ "$IDENTITY" = "-" ]; then
-  TS_FLAG="--timestamp=none"
-  warn "ad-hoc signature: not notarizable, and TCC/Keychain grants reset every rebuild"
-else
+# --timestamp needs a round-trip to Apple's timestamp server and is only meaningful for a
+# certificate Apple issued.
+if [ "$HAS_TEAM_ID" -eq 1 ]; then
   TS_FLAG="--timestamp"
+elif [ "$IDENTITY" = "-" ]; then
+  TS_FLAG="--timestamp=none"
+  warn "ad-hoc signature: not notarizable, and TCC/Keychain grants reset on every rebuild."
+  warn "  For a stable identity that survives rebuilds, see macos/README.md (Signing)."
+else
+  TS_FLAG="--timestamp=none"
+  log "self-signed identity '$IDENTITY': stable across rebuilds, still not notarizable"
 fi
 
 sign_one() {

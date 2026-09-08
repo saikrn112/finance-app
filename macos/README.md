@@ -58,8 +58,31 @@ bash macos/scripts/verify_bundle.sh      # Playwright against the bundle
 The app itself writes only to `~/Library/Application Support/FinanceApp` and
 `~/Library/Logs/FinanceApp`.
 
-Set `MACOS_SIGN_IDENTITY` to build with a Developer ID; the default is ad-hoc.
 `FORCE_BACKEND=1` rebuilds the Python payload, which `build_app.sh` otherwise reuses.
+
+## Signing
+
+Following what Timeslice does (`~/workspace/persona/timeslice/scripts/`): **not
+sandboxed**, ad-hoc by default, with an optional stable self-signed identity for people
+who rebuild often. `Entitlements.plist` states `app-sandbox: false` explicitly rather than
+by omission, so the intent is on the record — the app spawns a child interpreter and reads
+a user-chosen plugins directory, and the sandbox forbids both as designed here. No App
+Store.
+
+```bash
+bash macos/scripts/build_app.sh                              # ad-hoc
+MACOS_SIGN_IDENTITY="FinanceApp Local" bash macos/scripts/build_app.sh
+```
+
+An ad-hoc signature changes on every build, and macOS keys TCC grants and Keychain ACLs to
+the signature — so every rebuild re-prompts. A self-signed certificate created once in
+Keychain Access (Certificate Assistant → Create a Certificate, type *Code Signing*, named
+`FinanceApp Local`) fixes that, and is the same trick Timeslice uses.
+
+It does **not** make the app notarizable, and it does not have a Team ID — so
+`sign.sh` still gives the bundled interpreter the permissive entitlements. Only a real
+`Developer ID Application` certificate takes the strict path; see
+`Resources/ENTITLEMENTS.md`.
 
 ---
 
@@ -204,8 +227,9 @@ relative `/api` base, and there is no router, so no SPA fallback was required.
 - The API is not shadowed by the static mount (which is why it is registered last).
 - The Google OAuth callback still wins at `/`, because it is identified by its query
   parameters rather than by a distinct path.
-- Page traffic carries the token; a cookie-less request to `/api/meta` gets 401 while `/`
-  still returns 200.
+- Page traffic carries the token; a request with no token gets 401 while `/` still
+  returns 200. The gate's cookie path is covered too, even though the shell no longer
+  uses it.
 - The token appears nowhere in the served HTML.
 - Home, Projects, Uncategorized, Payroll, Imports and Settings each render with no
   uncaught error, no 401 and no 5xx.
@@ -224,16 +248,46 @@ webview loaded http://127.0.0.1:62733
 The webview is rebuilt rather than reloaded on restart, because the port *and* the token
 both change; a reload would keep a cookie for a token that no longer exists.
 
-### Two blockers found, one of them not ours
+### The bug that mattered: the app looked fine and authenticated nothing
+
+The token first travelled as a cookie in the webview's data store. `HTTPCookie`
+construction succeeded, `setCookie`'s completion fired, reading the store back showed the
+cookie present — and WKWebView never attached it to a request to
+`http://127.0.0.1:<port>`. Neither `.domain` nor `.originURL` helped. Every `/api` call
+got 401.
+
+**It was invisible.** The window rendered, the layout was right, and every panel read
+`$0.00` — which on an empty database is also what success looks like. The onboarding gate
+never appeared either, because the settings request 401ed too, so the one symptom that
+would have given it away was suppressed by the same bug. `verify_bundle.sh` was green
+throughout, because Playwright has its own cookie jar and its own idea of
+domain-matching.
+
+What found it: a screenshot from the user, and then
+`checkAuthenticatedFromInsideTheWebview()` — a `callAsyncJavaScript` probe that asks the
+*page* to `fetch('/api/meta')` and logs the status on every load. That check stays, because
+this failure mode has no other outward sign. (`evaluateJavaScript` cannot await a promise;
+it returns the `Promise` object and reports "a result of an unsupported type".)
+
+The fix is a `WKUserScript` at `.atDocumentStart` that wraps `fetch` and `XMLHttpRequest`
+to add `x-finance-token` on same-origin requests. The harness now authenticates the same
+way, because **a harness that authenticates differently from the app cannot catch the app's
+auth bugs** — that mismatch is the entire reason this survived a green test suite.
+
+### Two further findings, one of them not ours
 
 1. **First run is blocked by `OnboardingGate`, and its Google flow cannot work in a
    webview.** On a live database with no vault connection the gate covers the whole app
-   until Google Drive is connected, and there is no skip. Its connect flow uses
-   `window.open` plus `window.opener.postMessage` — but the shell sends off-origin
-   navigation to the system browser, so there is no `opener` to post back to. This is
-   phase 4 work (a custom URL scheme and a real return path), and until then the bundled
-   app can only be driven in `demo` mode. Recorded here because it makes "every page
-   loads" conditional in a way the plan did not anticipate.
+   until Google Drive is connected, and there is no skip — reproduced twice against a fresh
+   live-mode database. Its connect flow uses `window.open` plus
+   `window.opener.postMessage`, but the shell sends off-origin navigation to the system
+   browser, so there is no `opener` to post back to. This is phase 4 work (a custom URL
+   scheme and a real return path); until then the bundle can only be *driven* in `demo`
+   mode, which is why `verify_bundle.sh` defaults to it.
+
+   Worth noting how close this came to hiding the token bug above: while nothing
+   authenticated, the gate did not appear either, and the app looked more usable than it
+   was.
 
 2. **A pre-existing race in `_ensure_identity_rates`** (`src/services/exchange_rates.py`)
    returns 500 to concurrent callers: each sees the identity rates missing and each
@@ -244,12 +298,16 @@ both change; a reload would keep a cookie for a token that no longer exists.
    repo's rules are strictest. `verify_bundle.sh` warms the rates with one sequential
    request first, so the suite's 5xx assertions can stay strict.
 
-### And one Swift trap worth knowing
+### And two Swift traps worth knowing
 
 `WKNavigationDelegate`'s `decidePolicyFor` takes a `@MainActor @Sendable` completion. A
 near-miss signature **compiles**, emits only a "nearly matches optional requirement"
 warning, and is never called — which would have left off-origin navigation completely
-unenforced while looking implemented. Build with zero warnings here; that one is load-bearing.
+unenforced while looking implemented. Build with zero warnings here; that one is
+load-bearing.
+
+`ShellLog.write` shadowed `Darwin.write(2)` inside its own body. The compiler catches this
+one, unlike the others.
 
 ---
 
@@ -262,7 +320,7 @@ Compare before/after rather than expecting green (`AGENTS.md` §6).
 | `pytest tests/ -q` | 61 failed, 134 passed | 61 failed, 147 passed |
 | `npx tsc -p tsconfig.app.json --noEmit` | 59 errors | 59 errors |
 | `swift test` (new) | — | 61 passed |
-| `macos/scripts/verify_bundle.sh` (new) | — | 12 passed, 2 skipped |
+| `macos/scripts/verify_bundle.sh` (new) | — | 13 passed, 2 skipped |
 
 Frontend typecheck is untouched so far; record it before the first
 `frontend/` change:

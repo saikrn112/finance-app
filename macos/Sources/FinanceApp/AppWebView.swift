@@ -4,10 +4,27 @@ import WebKit
 
 /// Hosts the existing React frontend.
 ///
-/// The token is installed as a cookie in the data store *before* the first load rather
-/// than via a `WKUserScript`: a user script at `.atDocumentStart` runs after the
-/// document request has already gone out, so the initial `GET /` and any request the
-/// bundle makes during parse would go unauthenticated.
+/// ## How the session token reaches the API
+///
+/// A `WKUserScript` at `.atDocumentStart` wraps `fetch` and `XMLHttpRequest` so every
+/// same-origin request carries `x-finance-token`.
+///
+/// The first attempt used a cookie in the webview's data store, and it did not work.
+/// `HTTPCookie` construction succeeded, `setCookie`'s completion fired, and reading the
+/// store back showed the cookie present -- but WKWebView never attached it to a request
+/// to `http://127.0.0.1:<port>`. Neither `.domain` nor `.originURL` helped.
+///
+/// What made this worth an hour: the failure is invisible. The app renders, the layout is
+/// right, and every panel shows `$0.00` -- which on an empty database is also what
+/// *success* looks like. The onboarding gate never appeared either, because the settings
+/// request 401ed too, so even the one obvious symptom was suppressed. Playwright was green
+/// throughout, because Playwright has its own cookie jar and its own idea of
+/// domain-matching. It took a screenshot from the user, then
+/// `checkAuthenticatedFromInsideTheWebview()`, to see it at all.
+///
+/// The document request itself is not covered by a user script, which is fine: `/` and the
+/// static assets are exempt from the gate by design, because nothing could present a token
+/// before the app shell has loaded.
 @MainActor
 final class AppWebViewController: NSViewController {
     private let endpoint: BackendEndpoint
@@ -30,11 +47,19 @@ final class AppWebViewController: NSViewController {
 
     override func loadView() {
         let configuration = WKWebViewConfiguration()
-        // A non-persistent store would drop the cookie on every relaunch, but a
-        // persistent one would outlive the token it holds. Non-persistent is correct:
-        // the token is per-launch, and we set it explicitly below every time.
+        // Non-persistent: the token is per-launch, and nothing else here is worth keeping
+        // between launches. localStorage is the exception the frontend does use (theme,
+        // "getting started" done), and losing it is a small cost against not persisting
+        // anything derived from a financial API.
         configuration.websiteDataStore = .nonPersistent()
         configuration.suppressesIncrementalRendering = false
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.tokenInjectionScript(token: endpoint.token),
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
 
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = navigationHandler
@@ -52,32 +77,125 @@ final class AppWebViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        installTokenCookie { [weak self] in
-            guard let self else { return }
-            self.webView.load(URLRequest(url: self.endpoint.baseURL))
+        navigationHandler.onLoadFinished = { [weak self] in
+            self?.checkAuthenticatedFromInsideTheWebview()
         }
+        webView.load(URLRequest(url: endpoint.baseURL))
     }
 
-    /// Set the session cookie, then continue. The completion is required: loading
-    /// before the store has committed the cookie is a race that shows up as an
-    /// intermittent 401 on the very first request.
-    private func installTokenCookie(then continuation: @escaping () -> Void) {
-        guard
-            let cookie = HTTPCookie(properties: [
-                .name: "finance_token",
-                .value: endpoint.token.value,
-                .domain: "127.0.0.1",
-                .path: "/",
-                .secure: false,
-                // A session cookie: it must not outlive this launch's token.
-                .discard: true,
-            ])
-        else {
-            continuation()
-            return
-        }
-        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
-            continuation()
+    /// Wraps `fetch` and `XMLHttpRequest` so same-origin requests carry the token.
+    ///
+    /// The token lives in a closure rather than on `window`, so page script cannot read it
+    /// back out. That is not a real security boundary -- any script on this origin can make
+    /// authenticated requests regardless -- but it does keep the value out of anything that
+    /// serialises `window`, and out of a stray `console.log`.
+    private static func tokenInjectionScript(token: SessionToken) -> String {
+        // JSON-encoded so the value cannot break out of the string literal. The token is
+        // URL-safe base64 today, but relying on that here would be a trap for later.
+        let encoded = String(
+            data: try! JSONEncoder().encode(token.value), encoding: .utf8
+        )!
+        return """
+            (function () {
+              'use strict';
+              const TOKEN = \(encoded);
+              const HEADER = 'x-finance-token';
+
+              function isSameOrigin(url) {
+                try {
+                  return new URL(url, location.href).origin === location.origin;
+                } catch (error) {
+                  // A relative URL that URL() cannot parse is same-origin by construction.
+                  return true;
+                }
+              }
+
+              const originalFetch = window.fetch;
+              window.fetch = function (input, init) {
+                try {
+                  const request = new Request(input, init);
+                  if (isSameOrigin(request.url)) {
+                    request.headers.set(HEADER, TOKEN);
+                    return originalFetch.call(this, request);
+                  }
+                } catch (error) {
+                  // Constructing a Request can throw for exotic bodies. Falling through
+                  // unmodified is better than failing the call: an off-origin or
+                  // unusual request losing the header is recoverable, a thrown fetch
+                  // is not.
+                }
+                return originalFetch.call(this, input, init);
+              };
+
+              // XHR too. Nothing in the app uses it today, but a library might, and a
+              // request that silently 401s is the exact failure this whole mechanism
+              // exists to stop.
+              const originalOpen = XMLHttpRequest.prototype.open;
+              XMLHttpRequest.prototype.open = function (method, url) {
+                this.__financeSameOrigin = isSameOrigin(url);
+                return originalOpen.apply(this, arguments);
+              };
+              const originalSend = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.send = function () {
+                if (this.__financeSameOrigin) {
+                  try {
+                    this.setRequestHeader(HEADER, TOKEN);
+                  } catch (error) {
+                    // Already sent, or a forbidden header name. Not worth failing over.
+                  }
+                }
+                return originalSend.apply(this, arguments);
+              };
+            })();
+            """
+    }
+
+    /// Ask the page itself whether its `fetch` calls are authenticated.
+    ///
+    /// This is the only way to answer the question that matters. Playwright can prove the
+    /// frontend/backend contract, but it has its own cookie jar; whether *WKWebView's*
+    /// store attaches our cookie to a same-origin `fetch` is a different question, and
+    /// getting it wrong is close to invisible -- the app renders, every panel shows zero,
+    /// and the onboarding gate never appears because the settings request failed too. That
+    /// is exactly what it looked like the first time.
+    private func checkAuthenticatedFromInsideTheWebview() {
+        // callAsyncJavaScript, not evaluateJavaScript: the latter cannot await a promise
+        // and hands back the Promise object itself, which arrives as "a result of an
+        // unsupported type".
+        let script = """
+            try {
+              const response = await fetch('/api/meta', { credentials: 'same-origin' });
+              return response.status;
+            } catch (error) {
+              return -1;
+            }
+            """
+        webView.callAsyncJavaScript(
+            script, arguments: [:], in: nil, in: .page
+        ) { [weak self] result in
+            guard let self else { return }
+            let status: Int
+            switch result {
+            case .success(let value):
+                status = (value as? NSNumber)?.intValue ?? -1
+            case .failure(let error):
+                self.navigationHandler.log.write(
+                    "auth self-check could not run: \(error.localizedDescription)"
+                )
+                return
+            }
+            switch status {
+            case 200:
+                self.navigationHandler.log.write("auth self-check: the webview's API calls are authenticated")
+            case 401:
+                // Loud, because the app looks *fine* in this state.
+                self.navigationHandler.log.write(
+                    "auth self-check FAILED: the session token is not reaching the API (401). "
+                        + "Every panel will read zero and onboarding will not appear."
+                )
+            default:
+                self.navigationHandler.log.write("auth self-check: unexpected status \(status)")
+            }
         }
     }
 
@@ -121,7 +239,9 @@ final class AppWebViewController: NSViewController {
 @MainActor
 final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDelegate {
     private let allowedPort: UInt16
-    private let log: ShellLog
+    let log: ShellLog
+    /// Called after each successful load, so the controller can run its self-check.
+    var onLoadFinished: (() -> Void)?
 
     init(allowedPort: UInt16, log: ShellLog) {
         self.allowedPort = allowedPort
@@ -166,6 +286,7 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         log.write("webview loaded \(ShellLog.safeOrigin(webView.url))")
+        onLoadFinished?()
     }
 
     func webView(

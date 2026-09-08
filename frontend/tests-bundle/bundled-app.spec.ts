@@ -87,17 +87,18 @@ test.describe('bundled app: same-origin serving', () => {
 })
 
 test.describe('bundled app: the loopback token', () => {
-  test('API calls from the page succeed with the shell-injected cookie', async ({ page }) => {
-    // This is the whole point of the cookie-in-the-data-store approach: the very first
-    // request has to carry the token, which a WKUserScript at .atDocumentStart cannot
-    // guarantee.
+  test('API calls from the page succeed with the shell-injected header', async ({ page }) => {
+    // Matches the shell: a WKUserScript at .atDocumentStart wraps fetch/XHR to add
+    // x-finance-token. The shell also runs its own in-webview self-check on every load,
+    // because this test passing does not prove WKWebView behaves the same way -- it
+    // once did not.
     const seen = watch(page)
     await page.goto('/')
     await page.waitForLoadState('networkidle')
     expect(seen.unauthorized, 'the session token did not reach the API').toEqual([])
   })
 
-  test('an API request without the cookie is refused', async () => {
+  test('an API request with no token at all is refused', async () => {
     // The negative half. Without it, a gate that silently allowed everything would pass
     // the test above just as happily.
     //
@@ -106,23 +107,17 @@ test.describe('bundled app: the loopback token', () => {
     //
     //  * Counting incidental 401s during a page load. What the frontend chooses to fetch
     //    after its first rejection is its own business, and the count was zero.
-    //  * Assuming `browser.newContext()` starts with no cookies. It inherits the config's
-    //    `storageState`, so the "no cookie" context had the token and answered 200.
+    //  * Assuming a context built from the top-level `request` export starts clean. It does
+    //    not: Playwright applies the config's `use` options -- `storageState` before, and
+    //    `extraHTTPHeaders` now -- so "don't pass it" means "inherit the token", and this
+    //    test answered 200 twice for two different reasons.
     //
-    // `storageState` has to be overridden explicitly. Playwright applies the config's
-    // `use.storageState` even to a context created from the top-level `request` export,
-    // so "don't pass it" means "inherit the token", not "start empty". The assertion
-    // below is what caught that, and it stays as a tripwire.
+    // Every credential-carrying option therefore has to be cleared *explicitly*.
     const context = await playwrightRequest.newContext({
       baseURL: BASE,
-      storageState: { cookies: [], origins: [] },
+      extraHTTPHeaders: {},
     })
     try {
-      expect(await context.storageState(), 'the context started with cookies').toEqual({
-        cookies: [],
-        origins: [],
-      })
-
       const refused = await context.get('/api/meta')
       expect(refused.status(), 'the API answered without a token').toBe(401)
 
@@ -134,11 +129,40 @@ test.describe('bundled app: the loopback token', () => {
     }
   })
 
-  test('an API request with the cookie is accepted', async ({ page }) => {
-    // Same request, from the configured context, so the two tests differ only in the
-    // cookie.
+  test('an API request with the header is accepted', async ({ page }) => {
+    // Same request, from the configured context, so the two tests differ only in the token.
     const accepted = await page.request.get('/api/meta')
     expect(accepted.status()).toBe(200)
+  })
+
+  test('the gate also accepts the token as a cookie', async ({ browser }) => {
+    // The shell does not use this path -- WKWebView would not attach the cookie to an
+    // IP-literal origin -- but `local_auth.py` supports it, so it needs a test. Without
+    // one it is untested code that looks like a working fallback.
+    const context = await browser.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: {},
+      storageState: {
+        cookies: [
+          {
+            name: 'finance_token',
+            value: TOKEN,
+            domain: '127.0.0.1',
+            path: '/',
+            expires: -1,
+            httpOnly: false,
+            secure: false,
+            sameSite: 'Lax',
+          },
+        ],
+        origins: [],
+      },
+    })
+    try {
+      expect((await context.request.get('/api/meta')).status()).toBe(200)
+    } finally {
+      await context.close()
+    }
   })
 
   test('the token is not exposed in the served HTML or JS', async ({ request }) => {

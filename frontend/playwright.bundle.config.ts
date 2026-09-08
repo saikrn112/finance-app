@@ -22,23 +22,15 @@ export default defineConfig({
     baseURL: process.env.BUNDLE_URL || 'http://127.0.0.1:8000',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
-    // The loopback token gate rejects any /api request without this. Set as a cookie
-    // because that is exactly how the shell hands it to WKWebView, so a mistake here
-    // is a mistake in the real path too.
-    storageState: {
-      cookies: [
-        {
-          name: 'finance_token',
-          value: process.env.BUNDLE_TOKEN || '',
-          domain: '127.0.0.1',
-          path: '/',
-          expires: -1,
-          httpOnly: false,
-          secure: false,
-          sameSite: 'Lax',
-        },
-      ],
-      origins: [],
+    // The loopback token gate rejects any /api request without this.
+    //
+    // Sent as a header, because that is what the shell's WKUserScript does. The first
+    // version of this config used a cookie instead, and the mismatch cost real time: the
+    // suite was green while the app authenticated nothing at all, because Playwright's
+    // cookie jar happily domain-matched `127.0.0.1` and WKWebView's did not. A harness
+    // that authenticates differently from the app cannot catch the app's auth bugs.
+    extraHTTPHeaders: {
+      'x-finance-token': process.env.BUNDLE_TOKEN || '',
     },
   },
   outputDir: './test-results-bundle',
