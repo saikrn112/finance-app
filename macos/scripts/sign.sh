@@ -80,7 +80,8 @@ while IFS= read -r -d '' f; do
       exe_count=$((exe_count + 1))
       ;;
   esac
-done < <(find "$APP/Contents/Resources" -type f ! -type l -perm -u+x -print0 2>/dev/null)
+done < <(find "$APP/Contents/Resources" -type f ! -type l -perm -u+x \
+             ! -name '*.so' ! -name '*.dylib' -print0 2>/dev/null)
 log "  $exe_count nested executables"
 
 # 3. The bundle itself, last.

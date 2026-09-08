@@ -14,28 +14,48 @@ Read the repo's `AGENTS.md` too; its hard rules apply here unchanged.
 
 ```
 macos/
+  Package.swift
+  Sources/
+    FinanceCore/         UI-free logic: process lifecycle, paths, policy. Testable.
+    FinanceApp/          the AppKit shell
+  Tests/FinanceCoreTests/
   scripts/
     common.sh            shared settings; the bundle's dependency set lives here
     fetch_python.sh      download + cache python-build-standalone
     build_backend.sh     assemble build/backend (interpreter + wheels + app source)
+    build_app.sh         build the shell, assemble FinanceApp.app, sign it
     sign.sh              sign innermost-first, then the bundle
     spike_phase0.sh      phase 0 go/no-go checks
   payload/
     bootstrap.py         the bundled backend's entry point
     import_smoke.py      imports every native module; the real signing test
   Resources/
+    Info.plist
     Entitlements*.plist  see ENTITLEMENTS.md — no XML comments allowed in these
   build/                 gitignored
 ```
 
-## Build the backend payload
+Everything that can be decided without a window lives in `FinanceCore`, because
+verifying macOS UI headlessly is largely impossible (plan §7). `FinanceApp` is meant to
+stay thin.
+
+## Build and run
 
 ```bash
 bash macos/scripts/build_backend.sh      # ~2 min cold, most of it wheel downloads
-bash macos/scripts/spike_phase0.sh       # end-to-end checks, throwaway data dir
+bash macos/scripts/spike_phase0.sh       # phase 0 checks, throwaway data dir
+bash macos/scripts/build_app.sh          # -> macos/build/FinanceApp.app
+open macos/build/FinanceApp.app
+
+cd macos && swift test                   # 61 tests
 ```
 
 `spike_phase0.sh` never touches `data/` — it runs against `macos/build/spike/data`.
+The app itself writes only to `~/Library/Application Support/FinanceApp` and
+`~/Library/Logs/FinanceApp`.
+
+Set `MACOS_SIGN_IDENTITY` to build with a Developer ID; the default is ad-hoc.
+`FORCE_BACKEND=1` rebuilds the Python payload, which `build_app.sh` otherwise reuses.
 
 ---
 
@@ -109,13 +129,65 @@ infrastructure and no-ops for the container and local dev flows.
 
 ---
 
+## Phase 1 result: shell + backend lifecycle works
+
+A window showing backend state, with the port allocator, per-launch token, process
+group, crash restart with backoff, log rotation, single-instance guard and clean
+shutdown behind it. No webview yet.
+
+Verified by driving the built bundle, not by reading the code:
+
+| Behaviour | How it was checked | Result |
+| --- | --- | --- |
+| Backend starts and serves | launch, read the port from the log | ready in <10 s |
+| Token gate is live | `curl` each endpoint with no token | `/api/health` 200; `/api/meta`, `/api/transactions`, `/api/settings/plaid/accounts` all 401 |
+| Own process group | `ps -o pgid=` on child vs shell | child pgid == its own pid, ≠ shell's |
+| Crash restart | `kill -9` the backend | new pid ~4 s later, on a freshly allocated port |
+| Clean quit | AppleScript `quit` | shell and backend both gone, `runtime-state.json` cleared |
+| SIGTERM to the shell | `pkill` the shell | backend also gone (see below) |
+| Crash recovery | `kill -9` the *shell*, then relaunch | orphan swept, one fresh backend, no duplicate |
+| Single-instance guard | `open -n` a second copy | second refuses with an alert and starts no backend |
+
+**Not verified:** the window's appearance and layout. There is no reliable way to
+screenshot the Mac UI headlessly (plan §11.8, and `screencapture` needs a TCC grant), so
+`BackendStatusView` has been compiled and driven but not *seen*. The states it renders
+are all covered by `swift test`; the pixels are not.
+
+### Two bugs found by running it, both invisible in review
+
+1. **AppKit does not turn a signal into `applicationWillTerminate`.** `pkill` on the
+   shell left a live uvicorn holding the SQLite file. Fixed with
+   `TerminationSignalHandler` (SIGTERM/SIGINT/SIGHUP → stop the backend, then exit).
+   `StaleBackendSweeper` remains the backstop, since `SIGKILL` cannot be caught.
+
+2. **The backend inherited the single-instance `flock` descriptor**, which made the app
+   *permanently unlaunchable after one crash*. `SIGKILL` of the shell meant `release()`
+   never ran, and the inherited descriptor kept the open file description — and so the
+   lock — alive. Because the guard runs before the stale-backend sweep, every later
+   launch was refused with "already running" before it could clean up. Fixed at the
+   descriptor level, in both places that could leak one: `O_CLOEXEC` on the lock and
+   `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn.
+
+   Both fixes have tests that were confirmed to **fail when the fix is reverted**. The
+   first attempt at the second test did not: it called `release()` explicitly, and
+   `flock` is keyed to the shared open file description, so the release dropped the lock
+   for the child too and the test passed either way. A test that passes without the fix
+   is worse than no test.
+
+Also worth recording: an AppKit app with no main menu has no ⌘Q, so the only way to quit
+is to kill the process — which is exactly the path that orphans the backend. A minimal
+menu bar is therefore part of phase 1, not phase 3.
+
+---
+
 ## Test baselines
 
 Compare before/after rather than expecting green (`AGENTS.md` §6).
 
-| | Baseline at `4b847fd` | After phase 0 |
+| | Baseline at `4b847fd` | Now |
 | --- | --- | --- |
 | `pytest tests/ -q` | 61 failed, 134 passed | 61 failed, 136 passed |
+| `swift test` (new) | — | 61 passed |
 
 Frontend typecheck is untouched so far; record it before the first
 `frontend/` change:
@@ -130,4 +202,7 @@ cd frontend && npx tsc -p tsconfig.app.json --noEmit 2>&1 | grep -c 'error TS'
   release entitlements (empty) suffice. This machine reports 0 codesigning
   identities.
 - The **release** interpreter entitlements path in `sign.sh`.
-- Launching the app bundle as a real GUI app — phase 0 has no shell yet.
+- **How the window looks.** See the phase 1 note above — the states are tested, the
+  pixels are not.
+- Sleep/wake: `NSWorkspace.didWakeNotification` is wired to `revalidate()`, but the
+  machine has not actually been slept with the app running.
