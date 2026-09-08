@@ -28,7 +28,17 @@ if PRIVACY_MASK_ENABLED:
         async for chunk in response.body_iterator:
             body += chunk
         masked_body = mask_json_body(body, seed=request.url.path)
-        return Response(content=masked_body, status_code=response.status_code, headers=dict(response.headers), media_type="application/json")
+        # Drop Content-Length before copying the headers through. Masking changes the body's
+        # length (fake amounts are not the same width as real ones), and forwarding the
+        # original value made h11 abort with "Too much data for declared Content-Length" --
+        # which killed the response and, in the desktop app, the whole startup. Response()
+        # recomputes it from the body it is given.
+        headers = {
+            key: value
+            for key, value in response.headers.items()
+            if key.lower() != "content-length"
+        }
+        return Response(content=masked_body, status_code=response.status_code, headers=headers, media_type="application/json")
 
 def _plugin_icon_dirs() -> list[Path]:
     dirs = [Path(__file__).resolve().parents[2] / "plugins" / "icons"]

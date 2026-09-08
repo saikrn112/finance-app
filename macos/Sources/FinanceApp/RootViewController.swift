@@ -56,6 +56,18 @@ final class RootViewController: NSViewController {
             let controller = AppWebViewController(endpoint: endpoint, log: log)
             webController = controller
             show(controller)
+            // Debug-only; see runDispatchTour.
+            if let list = ProcessInfo.processInfo.environment["FINANCE_APP_DISPATCH"] {
+                let interval = Double(
+                    ProcessInfo.processInfo.environment["FINANCE_APP_DISPATCH_INTERVAL"] ?? ""
+                ) ?? 3
+                controller.runDispatchTour(
+                    commands: list.split(separator: ",").map {
+                        $0.trimmingCharacters(in: .whitespaces)
+                    },
+                    interval: interval
+                )
+            }
         } else {
             guard shownEndpoint != nil || currentChild == nil else { return }
             if shownEndpoint != nil {

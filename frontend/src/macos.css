@@ -1,38 +1,36 @@
 /*
  * macOS-only presentation overrides.
  *
- * Scoped entirely to `html.platform-macos`, which only the desktop shell's user script
- * adds. In a browser this file changes nothing, so the web app keeps its own look and
- * this cannot become an accidental redesign for everyone.
+ * Scoped entirely to `html.platform-macos`, which only the desktop shell's user script adds.
+ * In a browser this file changes nothing, so the web app keeps its own look and this cannot
+ * become an accidental redesign for everyone.
  *
- * The goal is that the web-rendered parts read as the same application as the native
- * shell around them. Three things do most of that work, in order of how much they give:
- * system typography, the window's own material showing through, and controls that follow
- * the user's accent colour.
+ * Selectors are written `html.platform-macos .foo` rather than with `!important`. That is
+ * specificity (0,2,1) against a Tailwind utility's (0,1,0), so the override wins on the
+ * cascade instead of by force.
+ *
+ * ## What was tried and removed
+ *
+ * An earlier version made the page transparent so an `NSVisualEffectView` behind the webview
+ * showed through, giving the window a real macOS material. It looked right in a screenshot
+ * and wrong in use: a dense page composited over an arbitrary wallpaper turns muddy, the
+ * wallpaper's colour bleeds into every panel, and panel-to-panel contrast stops being
+ * predictable. macOS uses vibrancy for chrome — sidebars, toolbars, popovers — not for a full
+ * content area.
+ *
+ * It shipped because it was verified with Playwright, which renders the page on a plain
+ * background and cannot show a window material at all. The defect was invisible to the only
+ * check that was run.
  */
 
 html.platform-macos {
-  /* Follow System Settings for scrollbars, form controls and the default canvas. This is
-     what makes a scrollbar look like a Mac scrollbar rather than a WebKit one. */
+  /* Follow System Settings for scrollbars, form controls and the default canvas. */
   color-scheme: light dark;
-  /* Native controls -- checkboxes, radios, selects, progress -- pick up the user's accent
-     colour from System Settings instead of a hardcoded blue. */
+  /* Native controls pick up the user's accent colour rather than a hardcoded blue. */
   accent-color: AccentColor;
 }
 
-html.platform-macos body,
-html.platform-macos .dark body,
-html.platform-macos .app-shell,
-html.platform-macos .dark .app-shell {
-  /*
-   * Transparent, so the NSVisualEffectView behind the webview shows through and the
-   * window gets a real macOS material. A painted background here would hide it and the
-   * window would look like a flat rectangle again.
-   *
-   * The app's own panels stay opaque; only the page backdrop is given up.
-   */
-  background: transparent;
-}
+/* ─── Typography ─────────────────────────────────────────────────────────────── */
 
 html.platform-macos,
 html.platform-macos body,
@@ -40,61 +38,122 @@ html.platform-macos button,
 html.platform-macos input,
 html.platform-macos select,
 html.platform-macos textarea {
-  /*
-   * -apple-system resolves to the real system UI font, which on macOS means SF Pro with
-   * the correct optical size for the text size -- not merely "a font that looks like SF".
-   * Naming SF Pro directly would lose that.
-   */
+  /* -apple-system resolves to the real system UI font, which on macOS means SF Pro at the
+     correct optical size for the text size. Naming SF Pro directly would lose that. */
   font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue",
-    sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 html.platform-macos {
-  /* Tabular figures for money. Without this, columns of amounts do not line up, because
-     SF's default digits are proportional -- a small thing that reads as "not a real
-     finance app". */
+  /* Tabular figures, so columns of amounts line up. SF's default digits are proportional. */
   font-variant-numeric: tabular-nums;
 }
 
-/*
- * The title bar.
- *
- * The shell runs with .fullSizeContentView, so web content occupies the whole window
- * frame and the traffic lights float over the top-left. --titlebar-height is set by the
- * shell rather than hardcoded, because it differs between a standard and a large title
- * bar and would be wrong on exactly the machines nobody tests on.
- */
-/*
- * Nothing gets a blanket top inset.
- *
- * The first version padded both `.app-shell` and `#root > div` -- which are parent and
- * child, so the inset applied twice and left a 56px empty band. More importantly, padding
- * the whole shell down is the *web* answer: it leaves an empty strip and the window still
- * reads as "a page below a bar".
- *
- * Instead the app's own filter row moves up *into* the title bar band and is indented
- * clear of the traffic lights, which is where a Mac app puts its toolbar.
- */
-html.platform-macos [data-app-toolbar] {
-  /* Room for the three window buttons. They are a fixed size, and macOS offers no metric
-     for it that is reachable from CSS. */
-  padding-left: 72px;
-  min-height: var(--titlebar-height, 28px);
-  margin-bottom: 1rem;
+html.platform-macos body {
+  /* 806 rendered elements were computing to 16px: not a chosen size, just the browser default
+     inherited by everything without an explicit `text-*` class. Tailwind's text utilities are
+     stated in rem and are unaffected, so this moves only the ones nobody picked — from a web
+     default to the macOS UI size. */
+  font-size: 13px;
 }
 
-/* Views without a toolbar row still need to clear the buttons. */
+/* ─── Density ────────────────────────────────────────────────────────────────── */
+
+/*
+ * NOT done by tightening `--spacing`.
+ *
+ * That is the obvious lever and it is a trap: Tailwind derives *widths* from the same
+ * variable, so 0.25rem -> 0.1875rem took `w-40` from 160px to 120px, truncated labels
+ * ("Transportati...") and pushed the date range out of the toolbar. Icon sizes (`w-4 h-4`)
+ * come from it too.
+ *
+ * Instead: an explicit list of the padding, margin and gap steps the pages use for layout
+ * rhythm. Nothing here can change a width or an icon size, which is the point. Steps below 3
+ * are left alone — already tight, and shrinking them costs legibility without buying room.
+ */
+
+html.platform-macos .p-3 { padding: 0.5rem; }
+html.platform-macos .p-4 { padding: 0.625rem; }
+html.platform-macos .p-5 { padding: 0.75rem; }
+html.platform-macos .p-6 { padding: 0.875rem; }
+html.platform-macos .px-3 { padding-inline: 0.5rem; }
+html.platform-macos .py-3 { padding-block: 0.5rem; }
+html.platform-macos .px-4 { padding-inline: 0.625rem; }
+html.platform-macos .py-4 { padding-block: 0.625rem; }
+html.platform-macos .px-5 { padding-inline: 0.75rem; }
+html.platform-macos .py-5 { padding-block: 0.75rem; }
+html.platform-macos .px-6 { padding-inline: 0.875rem; }
+html.platform-macos .py-6 { padding-block: 0.875rem; }
+
+html.platform-macos .gap-3 { gap: 0.5rem; }
+html.platform-macos .gap-4 { gap: 0.625rem; }
+html.platform-macos .gap-5 { gap: 0.75rem; }
+html.platform-macos .gap-6 { gap: 0.875rem; }
+
+html.platform-macos .mb-4 { margin-bottom: 0.625rem; }
+html.platform-macos .mb-5 { margin-bottom: 0.75rem; }
+html.platform-macos .mb-6 { margin-bottom: 0.875rem; }
+html.platform-macos .mt-4 { margin-top: 0.625rem; }
+html.platform-macos .mt-5 { margin-top: 0.75rem; }
+html.platform-macos .mt-6 { margin-top: 0.875rem; }
+
+/* `space-y-*` is a top margin on every child but the first. */
+html.platform-macos .space-y-3 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem; }
+html.platform-macos .space-y-4 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.625rem; }
+
+/* ─── Surfaces ───────────────────────────────────────────────────────────────── */
+
+/*
+ * A visible edge on every panel, and no drop shadow.
+ *
+ * The dark theme stacks four near-identical darks (#020617, #0f172a, #1e293b, #334155). The
+ * web app separates them with heavy drop shadows, which reads as floating cards on a page;
+ * dropping the shadows for a flatter, more native look left a set of black rectangles with no
+ * boundaries — which is what "the left panel is a stack of mismatched blocks" was.
+ *
+ * A hairline is how macOS separates surfaces, and it works at any lightness distance.
+ */
+html.platform-macos .app-surface,
+html.platform-macos .app-card,
+html.platform-macos .app-surface-strong {
+  box-shadow: none;
+  border: 1px solid var(--border-default);
+}
+
+/* ─── Title bar ──────────────────────────────────────────────────────────────── */
+
+/*
+ * The shell runs `.fullSizeContentView`, so content occupies the whole frame and the traffic
+ * lights float over the top-left. The app's own filter row moves up into that band and is
+ * indented clear of them, which is where a Mac app puts its toolbar — rather than padding the
+ * whole page down and leaving an empty strip.
+ *
+ * --titlebar-height is set by the shell from the real metric, not hardcoded.
+ */
+html.platform-macos [data-app-toolbar] {
+  /* Room for the three window buttons. Fixed size, and macOS exposes no metric for it that
+     CSS can reach. */
+  padding-left: 72px;
+  min-height: var(--titlebar-height, 28px);
+  /* Deliberately looser than the density scale above: cramped controls beside the traffic
+     lights look like a mistake rather than like a toolbar. */
+  gap: 0.5rem;
+}
+
+/* Views with no toolbar row still have to clear the buttons. */
 html.platform-macos .app-shell:not(:has([data-app-toolbar])) {
   padding-top: var(--titlebar-height, 28px);
 }
 
-/* Let the window be dragged by its empty top strip, the way every Mac app does. Inputs
-   and buttons opt back out below, or a drag starting on a control would move the window
-   instead of operating it. */
-/* A drag strip across the very top, left of and above the toolbar controls. Kept narrow
-   and behind the content so it cannot swallow a click meant for a control. */
+/* The sidebar spans the full window height, so it clears the buttons itself — it is a sibling
+   of the shell, not a child. */
+html.platform-macos [data-tour="sidebar"] {
+  padding-top: var(--titlebar-height, 28px);
+}
+
+/* A drag strip across the very top. Behind the content and non-interactive, so it cannot
+   swallow a click meant for a control. */
 html.platform-macos #root::before {
   content: "";
   position: fixed;
@@ -113,10 +172,9 @@ html.platform-macos a {
   -webkit-app-region: no-drag;
 }
 
-/*
- * Focus rings. WebKit's default is a heavy blue outline; macOS uses a thinner ring in the
- * accent colour, inset slightly.
- */
+/* ─── Controls ───────────────────────────────────────────────────────────────── */
+
+/* macOS uses a thin ring in the accent colour, not WebKit's heavy blue outline. */
 html.platform-macos :focus-visible {
   outline: 2px solid AccentColor;
   outline-offset: 1px;
@@ -126,18 +184,15 @@ html.platform-macos :focus:not(:focus-visible) {
   outline: none;
 }
 
-/* Text selection in the accent colour, like every other Mac app. */
 html.platform-macos ::selection {
   background: AccentColor;
   color: AccentColorText;
 }
 
 /*
- * Scrollbars: hand them back to the system.
- *
- * index.css hides them and reveals a custom thumb on hover, which is a web convention.
- * macOS already does the right thing -- overlay scrollbars that appear while scrolling
- * and respect "Show scroll bars" in System Settings.
+ * Scrollbars: hand them back to the system. index.css hides them and reveals a custom thumb
+ * on hover, which is a web convention; macOS already does overlay scrollbars and respects
+ * "Show scroll bars" in System Settings.
  */
 html.platform-macos ::-webkit-scrollbar {
   width: initial;
@@ -153,119 +208,15 @@ html.platform-macos *:hover::-webkit-scrollbar-thumb {
    button labels, and an accidental drag-select of the UI is a giveaway. */
 html.platform-macos button,
 html.platform-macos label,
-html.platform-macos .app-nav,
 html.platform-macos [role="button"] {
   cursor: default;
   -webkit-user-select: none;
   user-select: none;
 }
 
-/* Amounts, labels and anything the user might want to copy stay selectable. */
 html.platform-macos [data-selectable],
 html.platform-macos input,
 html.platform-macos textarea {
   -webkit-user-select: auto;
   user-select: auto;
-}
-
-/*
- * Panels keep a fill, but a translucent one, so the window's material reads through them
- * instead of being covered by a stack of opaque rectangles. This is what makes the
- * sidebar and cards look like macOS surfaces rather than divs.
- *
- * color-mix rather than a hand-picked rgba: the surface tokens differ between the light
- * and dark themes, and hardcoding either would break the other.
- */
-html.platform-macos .app-surface,
-html.platform-macos .app-card {
-  background: color-mix(in srgb, var(--surface-primary) 72%, transparent);
-  backdrop-filter: saturate(140%) blur(20px);
-  -webkit-backdrop-filter: saturate(140%) blur(20px);
-  /* The heavy web-style drop shadow reads as a floating card on a page. macOS surfaces
-     sit *in* the window; a hairline border does that job. */
-  box-shadow: none;
-  border-color: color-mix(in srgb, var(--border-soft) 60%, transparent);
-}
-
-html.platform-macos .app-surface-strong {
-  background: color-mix(in srgb, var(--surface-secondary) 78%, transparent);
-  backdrop-filter: saturate(140%) blur(20px);
-  -webkit-backdrop-filter: saturate(140%) blur(20px);
-  box-shadow: none;
-}
-
-/*
- * Everything else that paints an opaque page background.
- *
- * `!important` and a wrapper selector are needed here, not preferred: App.tsx's shell
- * carries Tailwind's `dark:bg-gray-900`, and the sidebar sets `background` as an inline
- * style. Neither can be overridden from a stylesheet otherwise, and each one alone is
- * enough to hide the window's material completely — which is why the first attempt at
- * vibrancy looked identical to no vibrancy at all.
- */
-html.platform-macos #root > div,
-html.platform-macos #root > div > div {
-  background: transparent !important;
-}
-
-/*
- * The sidebar gets its own, lighter material.
- *
- * macOS gives sidebars a distinct translucency from the window body — Finder, Mail and
- * System Settings all do — and matching that is a bigger native cue than any amount of
- * font tuning. Done in CSS rather than with a second NSVisualEffectView because the
- * sidebar's width is decided by the web layout and changes when it expands.
- */
-html.platform-macos [data-tour="sidebar"] {
-  background: color-mix(in srgb, var(--sidebar-bg) 55%, transparent) !important;
-  backdrop-filter: saturate(180%) blur(30px);
-  -webkit-backdrop-filter: saturate(180%) blur(30px);
-  border-color: color-mix(in srgb, var(--sidebar-border) 50%, transparent) !important;
-}
-
-/* The sidebar runs the full window height, so its own top items need to clear the
-   traffic lights too — it is a sibling of the padded shell, not a child. */
-html.platform-macos [data-tour="sidebar"] {
-  padding-top: var(--titlebar-height, 28px);
-}
-
-/*
- * ─── Density ──────────────────────────────────────────────────────────────────
- *
- * A Mac app is denser than a web page, and the audit made the two specific reasons
- * measurable.
- *
- * 1. `--spacing` is the single variable every Tailwind spacing utility derives from
- *    (`.p-4` emits `calc(var(--spacing) * 4)`). Reducing it here tightens padding, gaps
- *    and margins across all 22 pages proportionally, without editing any of them and
- *    without changing what `p-4` *means* -- which a per-utility override would have done,
- *    and which would confuse the next person to read the markup.
- *
- * 2. 806 rendered elements were computing to 16px text: not a deliberate size, just the
- *    browser default inherited by everything without an explicit `text-*` class. Tailwind's
- *    text utilities are stated in rem and are unaffected by the line below, so this moves
- *    only the ones nobody chose -- from a web default to the macOS UI size.
- */
-/*
- * NOT tightened globally: `--spacing`.
- *
- * Reducing it (0.25rem -> 0.1875rem) does tighten every padding, gap and margin at once,
- * which is why it looked like the right lever. It is not: Tailwind derives *widths* from the
- * same variable, so `w-40` went from 160px to 120px and labels started truncating --
- * "Transportati..." in the category list -- and the date range clipped out of the toolbar.
- * Icon sizes (`w-4 h-4`) come from it too.
- *
- * Density here comes from the two changes below plus the standardised chart heights in
- * index.css, none of which can change a layout width. Anything further should be done per
- * component, deliberately, rather than by rescaling the whole system.
- */
-
-html.platform-macos body {
-  font-size: 13px;
-}
-
-/* The toolbar row keeps its breathing room: it sits in the title bar, where cramped
-   controls collide with the traffic lights rather than looking tidy. */
-html.platform-macos [data-app-toolbar] {
-  gap: 0.5rem;
 }

@@ -39,7 +39,10 @@ const CHART_HEIGHT_KEY = 'finance-flow-chart-height'
  */
 function defaultChartHeight() {
   const viewport = typeof window === 'undefined' ? 900 : window.innerHeight
-  return Math.round(Math.min(420, Math.max(240, viewport * 0.34)))
+  // 0.28 capped at 340, not 0.34 capped at 420: on a tall window the old cap was reached
+  // every time and the chart alone took a third of the screen, pushing the category and
+  // merchant panels below the fold. The drag handle is still there for anyone who wants more.
+  return Math.round(Math.min(340, Math.max(220, viewport * 0.28)))
 }
 
 /** The height the user last dragged to, if any. */

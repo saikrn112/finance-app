@@ -15,19 +15,27 @@ public struct BackendEnvironment: Sendable {
     public var privatePluginsDirectory: URL?
     public var displayCurrency: String?
     public var logLevel: String
+    /// Replaces monetary values in API responses with fake ones.
+    ///
+    /// For screenshots and screen sharing. Set at the *backend*, not just in the UI, so real
+    /// figures never leave the process — the frontend's own privacy toggle only hides what it
+    /// has already received.
+    public var privacyMask: Bool
 
     public init(
         layout: BundleLayout,
         mode: String = "live",
         privatePluginsDirectory: URL? = nil,
         displayCurrency: String? = nil,
-        logLevel: String = "info"
+        logLevel: String = "info",
+        privacyMask: Bool = false
     ) {
         self.layout = layout
         self.mode = mode
         self.privatePluginsDirectory = privatePluginsDirectory
         self.displayCurrency = displayCurrency
         self.logLevel = logLevel
+        self.privacyMask = privacyMask
     }
 
     public func variables(port: UInt16, token: SessionToken) -> [String: String] {
@@ -78,6 +86,9 @@ public struct BackendEnvironment: Sendable {
         }
         if let displayCurrency {
             environment["FINANCE_APP_DISPLAY_CURRENCY"] = displayCurrency
+        }
+        if privacyMask {
+            environment["FINANCE_APP_PRIVACY_MASK"] = "1"
         }
         return environment
     }

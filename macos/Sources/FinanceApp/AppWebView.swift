@@ -87,28 +87,10 @@ final class AppWebViewController: NSViewController {
         webView.allowsMagnification = false
         webView.allowsBackForwardNavigationGestures = false
         webView.pageZoom = Self.storedZoom()
-        // Not a browser: no drag-out of the whole document.
-        webView.setValue(false, forKey: "drawsBackground")
-
-        // Real macOS material behind the transparent page. This is the single biggest
-        // visual difference between "a web page in a window" and an app: the sidebar and
-        // background pick up the desktop behind them the way Mail and Notes do.
-        //
-        // It only works because the webview does not draw its own background and
-        // macos.css gives up `body`'s. Either one alone leaves an opaque rectangle.
-        let backdrop = NSVisualEffectView()
-        backdrop.material = .underWindowBackground
-        backdrop.blendingMode = .behindWindow
-        backdrop.state = .followsWindowActiveState
-        backdrop.autoresizingMask = [.width, .height]
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1160, height: 780))
-        backdrop.frame = container.bounds
-        webView.frame = container.bounds
-        webView.autoresizingMask = [.width, .height]
-        container.addSubview(backdrop)
-        container.addSubview(webView)
-        view = container
+        // The webview paints its own background. It briefly did not, so an
+        // NSVisualEffectView behind it could show through -- see the note on
+        // `window.isOpaque` in AppDelegate for why that was removed.
+        view = webView
     }
 
     override func viewDidLoad() {
@@ -137,6 +119,29 @@ final class AppWebViewController: NSViewController {
             ])
         }
         webView.load(URLRequest(url: endpoint.baseURL))
+    }
+
+    /// Walk a list of bus commands, one every `interval` seconds, logging each.
+    ///
+    /// A debug affordance, driven by FINANCE_APP_DISPATCH. It exists because the visual
+    /// verification gap it closes was expensive: the page was being checked with Playwright,
+    /// which renders on a plain background and cannot show the window's material, its opacity
+    /// or its real surfaces — so a wash that made the whole app look muddy was invisible to
+    /// the check. This lets a script step the *real* window through every view and screenshot
+    /// each one.
+    ///
+    /// Off unless the variable is set, and it only dispatches names the frontend already
+    /// registers, so it can reach nothing a menu item could not.
+    func runDispatchTour(commands: [String], interval: TimeInterval) {
+        guard !commands.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            for command in commands {
+                try? await Task.sleep(for: .seconds(interval))
+                guard let self else { return }
+                self.dispatch(command: command)
+            }
+            self?.navigationHandler.log.write("dispatch tour finished")
+        }
     }
 
     /// Wraps `fetch` and `XMLHttpRequest` so same-origin requests carry the token.
@@ -329,7 +334,10 @@ final class AppWebViewController: NSViewController {
             case .success(let value):
                 switch value as? String {
                 case "ok":
-                    break
+                    // Logged on success too, not only on failure: the screenshot script reads
+                    // these lines to know when a navigation has actually landed, rather than
+                    // sleeping a guessed interval and hoping.
+                    self.navigationHandler.log.write("dispatched '\(command)'")
                 case "unhandled":
                     self.navigationHandler.log.write(
                         "command '\(command)' is in the menu but not registered by the frontend"

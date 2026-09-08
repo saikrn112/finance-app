@@ -63,9 +63,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             reason: "Keeping the finance backend responsive"
         )
 
+        // FINANCE_APP_PRIVACY_MASK is read from the shell's own environment rather than
+        // being a setting, because its only current caller is the screenshot script: it must
+        // be impossible to leave on by accident, and a launch from the Dock never sets it.
+        let privacyMask = ["1", "true", "yes"].contains(
+            (ProcessInfo.processInfo.environment["FINANCE_APP_PRIVACY_MASK"] ?? "").lowercased()
+        )
+        if privacyMask { log.write("privacy mask ON: API values are fake") }
         let supervisor = BackendSupervisor(
             layout: layout,
-            environment: BackendEnvironment(layout: layout)
+            environment: BackendEnvironment(layout: layout, privacyMask: privacyMask)
         )
         self.supervisor = supervisor
 
@@ -126,11 +133,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // dark, which is the giveaway that it is a wrapped web page.
         window.appearance = nil
         window.isMovableByWindowBackground = false
-        // Required for the NSVisualEffectView's `.behindWindow` blending: an opaque window
-        // has nothing behind it to blend, and the material renders as a flat fill. Setting
-        // the material without these two is why the first attempt looked unchanged.
-        window.isOpaque = false
-        window.backgroundColor = .clear
+        // Opaque, deliberately.
+        //
+        // This was briefly a non-opaque window over an NSVisualEffectView, so the desktop
+        // showed through. It looked right in isolation and wrong in use: a data-dense page
+        // composited over whatever wallpaper happens to be behind it turns muddy, the
+        // wallpaper's colour bleeds into every panel, and panel-to-panel contrast stops
+        // being predictable. macOS uses vibrancy for chrome -- sidebars, toolbars, popovers --
+        // not for a full content area, and that distinction is the reason.
+        //
+        // Worth recording how it got shipped: it was verified with Playwright, which renders
+        // the page on a plain background and cannot show a window material at all. The
+        // defect was invisible to the only check that was run.
+        window.isOpaque = true
+        window.backgroundColor = NSColor(
+            // Matches the dark theme's --surface-page (#020617) so there is no flash of a
+            // different colour before the web content paints.
+            srgbRed: 0x02 / 255, green: 0x06 / 255, blue: 0x17 / 255, alpha: 1
+        )
         let root = RootViewController(supervisor: supervisor, layout: layout, log: log)
         rootController = root
         window.contentViewController = root
