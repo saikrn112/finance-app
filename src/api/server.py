@@ -11,6 +11,7 @@ from src.ingestion.plaid_activity import migrate_investment_transactions
 from src.services.auto_tasks import start_auto_tasks, stop_auto_tasks
 from src.privacy_mask import PRIVACY_MASK_ENABLED, mask_json_body
 from src.api.local_auth import install_local_token_gate
+from src.api.static_web import index_file, mount_static_frontend
 import os
 from pathlib import Path
 
@@ -128,4 +129,15 @@ def root_callback(
 ):
     if code and state:
         return settings.complete_google_drive_connect(code=code, state=state, db=db)
+    # When a built frontend is bundled, "/" is the app. The OAuth callback above keeps
+    # priority because it is identified by its query parameters, not by its path.
+    if (index := index_file()) is not None:
+        from fastapi.responses import FileResponse
+
+        return FileResponse(index)
     return {"status": "ok", "service": "finance-app-api"}
+
+
+# Last, deliberately: Starlette matches routes in registration order, so a mount at "/"
+# added any earlier would shadow every API route above it.
+mount_static_frontend(app)

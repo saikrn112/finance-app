@@ -49,6 +49,24 @@ enum MainMenu {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        // View. The zoom items drive WKWebView's pageZoom explicitly, because pinch
+        // magnification is disabled: it fights ag-grid's row virtualisation and
+        // WKWebView's rubber-band scrolling, and the loser is whichever the user
+        // actually meant to scroll.
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Reload", action: Selector(("reloadApp:")), keyEquivalent: "r")
+        viewMenu.addItem(.separator())
+        viewMenu.addItem(withTitle: "Actual Size", action: Selector(("resetZoom:")), keyEquivalent: "0")
+        viewMenu.addItem(withTitle: "Zoom In", action: Selector(("zoomIn:")), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Zoom Out", action: Selector(("zoomOut:")), keyEquivalent: "-")
+        viewMenu.addItem(.separator())
+        viewMenu.addItem(
+            withTitle: "Restart Backend", action: Selector(("restartBackend:")), keyEquivalent: ""
+        )
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(

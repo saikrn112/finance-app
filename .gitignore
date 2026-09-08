@@ -33,6 +33,9 @@ node_modules/
 frontend/dist/
 frontend/test-report/
 frontend/test-results/
+# Playwright output from macos/scripts/verify_bundle.sh. Traces and failure
+# screenshots of a real database must never be committed.
+frontend/test-results-bundle/
 
 # IDE
 .idea/

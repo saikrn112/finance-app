@@ -7,14 +7,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var instanceGuard: SingleInstanceGuard?
     private var supervisor: BackendSupervisor?
     private var window: NSWindow?
+    private var rootController: RootViewController?
     private var activity: NSObjectProtocol?
     private var sweepTimer: Timer?
     private let signalHandler = TerminationSignalHandler()
 
     private let layout = BundleLayout.forRunningApplication()
+    private lazy var log = ShellLog(url: layout.shellLogURL)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainMenu.install()
+        log.write("launching")
 
         // AppKit does not turn a signal into applicationWillTerminate, so without
         // this a `pkill` on the shell orphans the backend -- observed, then fixed.
@@ -91,15 +94,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showWindow(for supervisor: BackendSupervisor) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 1160, height: 780),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "FinanceApp"
-        window.contentView = NSHostingView(
-            rootView: BackendStatusView(supervisor: supervisor, layout: layout)
-        )
+        // The ledger is a wide grid; below this it starts crushing columns into
+        // ellipses (AGENTS.md caveat #6).
+        window.minSize = NSSize(width: 900, height: 560)
+        let root = RootViewController(supervisor: supervisor, layout: layout, log: log)
+        rootController = root
+        window.contentViewController = root
         window.center()
         // Restores size and position across launches. Cheap, and its absence is the
         // kind of thing that makes a webview app feel unfinished.
@@ -107,6 +113,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - View menu actions
+    //
+    // AppKit routes unhandled menu actions to the app delegate, so these need no
+    // explicit target. They are no-ops while the backend is not ready, which is
+    // correct -- there is no page to zoom.
+
+    @objc func zoomIn(_ sender: Any?) { rootController?.activeWebController?.zoomIn() }
+    @objc func zoomOut(_ sender: Any?) { rootController?.activeWebController?.zoomOut() }
+    @objc func resetZoom(_ sender: Any?) { rootController?.activeWebController?.resetZoom() }
+    @objc func reloadApp(_ sender: Any?) { rootController?.activeWebController?.reload() }
+
+    @objc func restartBackend(_ sender: Any?) {
+        supervisor?.stop()
+        supervisor?.start()
     }
 
     private func presentFatal(_ message: String, detail: String) {
@@ -128,11 +150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         switch result {
         case .terminated(let pid):
-            NSLog("swept a backend left over from a previous launch (pgid %d)", pid)
+            log.write("swept a backend left over from a previous launch (pgid \(pid))")
         case .notOurs:
             // Pid reuse. Signalling a stranger's process group is far worse than
             // failing to clean up, so this deliberately does nothing.
-            NSLog("recorded backend pid now belongs to another process; left alone")
+            log.write("recorded backend pid now belongs to another process; left alone")
         case .alreadyGone, .nothingRecorded:
             break
         }

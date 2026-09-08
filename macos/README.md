@@ -44,10 +44,14 @@ stay thin.
 ```bash
 bash macos/scripts/build_backend.sh      # ~2 min cold, most of it wheel downloads
 bash macos/scripts/spike_phase0.sh       # phase 0 checks, throwaway data dir
+cd frontend && npx vite build            # NOT `npm run build`: that runs `tsc -b`
+                                         # first, which fails on the 59 pre-existing
+                                         # errors. vite build does not typecheck.
 bash macos/scripts/build_app.sh          # -> macos/build/FinanceApp.app
 open macos/build/FinanceApp.app
 
 cd macos && swift test                   # 61 tests
+bash macos/scripts/verify_bundle.sh      # Playwright against the bundle
 ```
 
 `spike_phase0.sh` never touches `data/` — it runs against `macos/build/spike/data`.
@@ -180,14 +184,85 @@ menu bar is therefore part of phase 1, not phase 3.
 
 ---
 
+## Phase 2 result: the app appears
+
+`vite build` output ships in `Resources/web`, FastAPI serves it from its own origin, and
+a `WKWebView` loads `http://127.0.0.1:<port>/` with the session token already in its
+cookie store.
+
+Being same-origin removes three things at once: CORS, the Vite proxy, and the
+`vite.config.ts` env-var trap that made every `/api` call fail on a non-default port
+(`AGENTS.md` caveat #9). The frontend needed **no changes** — `api.ts` already uses a
+relative `/api` base, and there is no router, so no SPA fallback was required.
+
+### Verified
+
+`macos/scripts/verify_bundle.sh` runs Playwright against the *bundled* frontend and the
+*bundled* backend — no mocks, no dev server (12 passed, 2 skipped):
+
+- `/` serves the built `index.html`; every `/assets/*` returns 200.
+- The API is not shadowed by the static mount (which is why it is registered last).
+- The Google OAuth callback still wins at `/`, because it is identified by its query
+  parameters rather than by a distinct path.
+- Page traffic carries the token; a cookie-less request to `/api/meta` gets 401 while `/`
+  still returns 200.
+- The token appears nowhere in the served HTML.
+- Home, Projects, Uncategorized, Payroll, Imports and Settings each render with no
+  uncaught error, no 401 and no 5xx.
+
+Driving the real bundle, with `shell.log` as the observable:
+
+```
+launching
+backend ready on port 62656; showing the app
+webview loaded http://127.0.0.1:62656
+backend no longer ready; showing the status view      <- kill -9 on the backend
+backend ready on port 62733; showing the app
+webview loaded http://127.0.0.1:62733
+```
+
+The webview is rebuilt rather than reloaded on restart, because the port *and* the token
+both change; a reload would keep a cookie for a token that no longer exists.
+
+### Two blockers found, one of them not ours
+
+1. **First run is blocked by `OnboardingGate`, and its Google flow cannot work in a
+   webview.** On a live database with no vault connection the gate covers the whole app
+   until Google Drive is connected, and there is no skip. Its connect flow uses
+   `window.open` plus `window.opener.postMessage` — but the shell sends off-origin
+   navigation to the system browser, so there is no `opener` to post back to. This is
+   phase 4 work (a custom URL scheme and a real return path), and until then the bundled
+   app can only be driven in `demo` mode. Recorded here because it makes "every page
+   loads" conditional in a way the plan did not anticipate.
+
+2. **A pre-existing race in `_ensure_identity_rates`** (`src/services/exchange_rates.py`)
+   returns 500 to concurrent callers: each sees the identity rates missing and each
+   inserts them, and the losers get `UNIQUE constraint failed: exchange_rates.…` from a
+   query-invoked autoflush. Reproduced on an **unmodified `main` at 4b847fd**: 11 of 12
+   concurrent `/api/analytics/summary` requests returned 500. It affects the web app too
+   and is **not fixed here** — out of scope, and it is in the money layer where this
+   repo's rules are strictest. `verify_bundle.sh` warms the rates with one sequential
+   request first, so the suite's 5xx assertions can stay strict.
+
+### And one Swift trap worth knowing
+
+`WKNavigationDelegate`'s `decidePolicyFor` takes a `@MainActor @Sendable` completion. A
+near-miss signature **compiles**, emits only a "nearly matches optional requirement"
+warning, and is never called — which would have left off-origin navigation completely
+unenforced while looking implemented. Build with zero warnings here; that one is load-bearing.
+
+---
+
 ## Test baselines
 
 Compare before/after rather than expecting green (`AGENTS.md` §6).
 
 | | Baseline at `4b847fd` | Now |
 | --- | --- | --- |
-| `pytest tests/ -q` | 61 failed, 134 passed | 61 failed, 136 passed |
+| `pytest tests/ -q` | 61 failed, 134 passed | 61 failed, 147 passed |
+| `npx tsc -p tsconfig.app.json --noEmit` | 59 errors | 59 errors |
 | `swift test` (new) | — | 61 passed |
+| `macos/scripts/verify_bundle.sh` (new) | — | 12 passed, 2 skipped |
 
 Frontend typecheck is untouched so far; record it before the first
 `frontend/` change:

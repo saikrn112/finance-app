@@ -53,6 +53,14 @@ public struct BackendEnvironment: Sendable {
             "FINANCE_APP_DB_PATH": layout.databaseURL.path,
             "FINANCE_APP_LOG_LEVEL": logLevel,
         ]
+        // Only when the built frontend is actually present. Pointing the backend at a
+        // missing directory would make it serve 404s for the app shell, which reads as
+        // a broken app rather than a bundle built without `vite build`.
+        if FileManager.default.fileExists(
+            atPath: layout.webDirectory.appending(path: "index.html").path
+        ) {
+            environment["FINANCE_APP_WEB_DIR"] = layout.webDirectory.path
+        }
         if let privatePluginsDirectory {
             environment["FINANCE_PLUGINS_DIR"] = privatePluginsDirectory.path
         }
