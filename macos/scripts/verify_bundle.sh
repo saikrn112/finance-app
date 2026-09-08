@@ -30,6 +30,17 @@ trap cleanup EXIT
 [ -d "$APP" ] || die "no bundle at $APP -- run build_app.sh first"
 [ -f "$WEB/index.html" ] || die "the bundle has no web UI; run 'npx vite build' in frontend/ then build_app.sh"
 
+# Refuse to test a stale copy.
+#
+# This script serves the *bundle's* web assets, not frontend/dist, so running `vite build`
+# alone changes nothing here. That is a silent failure: the suite passes against the
+# previous build and the result looks like the change had no effect -- which is exactly what
+# happened while auditing the palette.
+if [ -f "$REPO_ROOT/frontend/dist/index.html" ] \
+   && [ "$REPO_ROOT/frontend/dist/index.html" -nt "$WEB/index.html" ]; then
+  die "frontend/dist is newer than the bundle's copy. Run: bash macos/scripts/build_app.sh"
+fi
+
 rm -rf "$VERIFY_DIR"
 mkdir -p "$VERIFY_DIR/data/runtime/prod"
 

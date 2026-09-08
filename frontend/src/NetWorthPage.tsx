@@ -309,7 +309,7 @@ export function NetWorthPage({ onBack, snapshotSources }: Props) {
                 </div>
               </div>
 
-              <div className="h-[380px]">
+              <div className="chart-h">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={chartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.18)" />

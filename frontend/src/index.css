@@ -2,8 +2,137 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * ─── Palette bridge ───────────────────────────────────────────────────────────
+ *
+ * Points Tailwind's neutral ramps at this app's own neutrals, so the two ways of
+ * writing a colour cannot disagree.
+ *
+ * Why this exists rather than a lint rule: the pages use 1130 raw palette utilities
+ * (`bg-slate-800`, `dark:text-gray-400`, …) alongside the 142 design tokens below, in
+ * two different neutral families — 735 `slate` and 64 `gray`. In *dark* mode that was
+ * survivable, because the dark tokens happen to be the Tailwind slate ramp already
+ * (`#020617` is slate-950, `#1e293b` is slate-800). In *light* mode it was not: the light
+ * tokens are a warm cream set (`#f6efe3`, borders `#dfcfb8`) while the utilities stayed
+ * cool blue-grey slate, so warm surfaces sat directly against cool ones and every page
+ * picked a slightly different mix.
+ *
+ * Remapping the ramp fixes all of it at once, in both modes, without editing 22 files by
+ * hand — which is the version of this change most likely to introduce mistakes. The ramp
+ * itself is mode-dependent via `--neutral-*` (defined in :root and .dark below), because
+ * one fixed ramp cannot be both warm and cool.
+ *
+ * `gray` is aliased to the same values, collapsing the second family.
+ *
+ * The duplicate accents go too: `green` and `red` are aliased onto `emerald` and `rose`,
+ * which are what the semantic tokens use, so "positive" and "negative" are one colour
+ * each rather than two near-misses.
+ *
+ * New code should use the tokens (`var(--surface-primary)`) or the `.app-*` classes.
+ * This bridge is here so existing code is *consistent*, not so more of it gets written.
+ */
+@theme {
+  --color-slate-50: var(--neutral-50);
+  --color-slate-100: var(--neutral-100);
+  --color-slate-200: var(--neutral-200);
+  --color-slate-300: var(--neutral-300);
+  --color-slate-400: var(--neutral-400);
+  --color-slate-500: var(--neutral-500);
+  --color-slate-600: var(--neutral-600);
+  --color-slate-700: var(--neutral-700);
+  --color-slate-800: var(--neutral-800);
+  --color-slate-900: var(--neutral-900);
+  --color-slate-950: var(--neutral-950);
+
+  --color-gray-50: var(--neutral-50);
+  --color-gray-100: var(--neutral-100);
+  --color-gray-200: var(--neutral-200);
+  --color-gray-300: var(--neutral-300);
+  --color-gray-400: var(--neutral-400);
+  --color-gray-500: var(--neutral-500);
+  --color-gray-600: var(--neutral-600);
+  --color-gray-700: var(--neutral-700);
+  --color-gray-800: var(--neutral-800);
+  --color-gray-900: var(--neutral-900);
+  --color-gray-950: var(--neutral-950);
+
+  /*
+   * Accents collapse onto the four semantic tokens.
+   *
+   * The audit found the same *meaning* rendered in different colours on different pages:
+   * "positive" was emerald-600 in 32 places and emerald-400 in 12 more, in the same
+   * appearance. Worse, several pages picked a shade that suited one mode and not the other,
+   * because a fixed emerald cannot be right on both cream and near-black.
+   *
+   * Mapping each ramp to `--accent-*` (which resolve from --color-positive and friends per
+   * mode) makes each meaning exactly one colour, and makes it automatically correct in both
+   * appearances. `green`/`teal` join emerald, `red` joins rose, `yellow`/`orange` join
+   * amber, `sky`/`indigo` join blue.
+   *
+   * `violet` and `purple` are left alone: they are chart series colours, not semantics.
+   */
+  --color-emerald-300: var(--accent-positive-soft);
+  --color-emerald-400: var(--accent-positive-soft);
+  --color-emerald-500: var(--accent-positive);
+  --color-emerald-600: var(--accent-positive);
+  --color-emerald-700: var(--accent-positive-strong);
+  --color-green-400: var(--accent-positive-soft);
+  --color-green-500: var(--accent-positive);
+  --color-green-600: var(--accent-positive);
+  --color-teal-400: var(--accent-positive-soft);
+  --color-teal-500: var(--accent-positive);
+
+  --color-rose-300: var(--accent-negative-soft);
+  --color-rose-400: var(--accent-negative-soft);
+  --color-rose-500: var(--accent-negative);
+  --color-rose-600: var(--accent-negative);
+  --color-rose-700: var(--accent-negative-strong);
+  --color-red-300: var(--accent-negative-soft);
+  --color-red-400: var(--accent-negative-soft);
+  --color-red-500: var(--accent-negative);
+  --color-red-600: var(--accent-negative);
+  --color-red-700: var(--accent-negative-strong);
+
+  --color-amber-300: var(--accent-warning-soft);
+  --color-amber-400: var(--accent-warning-soft);
+  --color-amber-500: var(--accent-warning);
+  --color-amber-600: var(--accent-warning);
+  --color-amber-700: var(--accent-warning-strong);
+  --color-yellow-300: var(--accent-warning-soft);
+  --color-yellow-400: var(--accent-warning-soft);
+  --color-yellow-500: var(--accent-warning);
+  --color-orange-400: var(--accent-warning-soft);
+  --color-orange-500: var(--accent-warning);
+
+  --color-blue-300: var(--accent-info-soft);
+  --color-blue-400: var(--accent-info-soft);
+  --color-blue-500: var(--accent-info);
+  --color-blue-600: var(--accent-info);
+  --color-blue-700: var(--accent-info-strong);
+  --color-sky-400: var(--accent-info-soft);
+  --color-sky-500: var(--accent-info);
+  --color-indigo-400: var(--accent-info-soft);
+  --color-indigo-500: var(--accent-info);
+}
+
 :root {
   color-scheme: light;
+
+  /* Neutral ramp for the palette bridge above. Warm, to match the cream surfaces:
+     50 is the lightest surface, 950 the darkest text. Derived from the tokens that
+     follow, so the ramp and the tokens cannot drift apart. */
+  --neutral-50: #fffaf2;
+  --neutral-100: #f6efe3;
+  --neutral-200: #eaddca;
+  --neutral-300: #dfcfb8;
+  --neutral-400: #c4a882;
+  --neutral-500: #a08a6a;
+  --neutral-600: #756a5c;
+  --neutral-700: #5c5347;
+  --neutral-800: #443d33;
+  --neutral-900: #322c23;
+  --neutral-950: #221e18;
+
 
   /* Surfaces */
   --surface-page: #f6efe3;
@@ -34,10 +163,30 @@
   --color-negative-bg: rgba(190, 18, 60, 0.08);
   --color-warning: #b45309;
   --color-warning-bg: rgba(180, 83, 9, 0.08);
-  --color-info: #1d4ed8;
-  --color-info-bg: rgba(29, 78, 216, 0.08);
+  /* Calmed from #1d4ed8. The other three light accents (#047857, #be123c, #b45309) are
+     all deep and low-chroma so they sit on the cream surfaces; an electric blue among
+     them was the one colour that read as belonging to a different palette, and it showed
+     up wherever a count or an axis label was rendered as "info". */
+  --color-info: #1f5b8f;
+  --color-info-bg: rgba(31, 91, 143, 0.08);
   --color-neutral: #64748b;
   --color-neutral-bg: rgba(100, 116, 139, 0.08);
+
+  /* Accent scale for the palette bridge. `soft` fades toward the surface and `strong`
+     pushes toward the text colour, so both stay legible in either appearance -- a fixed
+     lighter/darker pair would invert in one of them. */
+  --accent-positive: var(--color-positive);
+  --accent-positive-soft: color-mix(in oklab, var(--color-positive) 72%, var(--surface-primary));
+  --accent-positive-strong: color-mix(in oklab, var(--color-positive) 80%, var(--text-primary));
+  --accent-negative: var(--color-negative);
+  --accent-negative-soft: color-mix(in oklab, var(--color-negative) 72%, var(--surface-primary));
+  --accent-negative-strong: color-mix(in oklab, var(--color-negative) 80%, var(--text-primary));
+  --accent-warning: var(--color-warning);
+  --accent-warning-soft: color-mix(in oklab, var(--color-warning) 72%, var(--surface-primary));
+  --accent-warning-strong: color-mix(in oklab, var(--color-warning) 80%, var(--text-primary));
+  --accent-info: var(--color-info);
+  --accent-info-soft: color-mix(in oklab, var(--color-info) 72%, var(--surface-primary));
+  --accent-info-strong: color-mix(in oklab, var(--color-info) 80%, var(--text-primary));
 
   /* Charts */
   --chart-bg: #fff8ef;
@@ -46,7 +195,7 @@
   --chart-bar-track: #f0e6d6;
   --chart-tooltip-bg: #fffaf2;
   --chart-tooltip-border: #dfcfb8;
-  --chart-line-1: #2563eb;
+  --chart-line-1: #26648f;
   --chart-line-2: #059669;
   --chart-line-3: #d97706;
   --chart-line-4: #e11d48;
@@ -104,6 +253,21 @@
 .dark {
   color-scheme: dark;
 
+  /* Neutral ramp, dark. These are the values the dark tokens already used, written out
+     so the correspondence is explicit instead of accidental. */
+  --neutral-50: #f8fafc;
+  --neutral-100: #f1f5f9;
+  --neutral-200: #e2e8f0;
+  --neutral-300: #cbd5e1;
+  --neutral-400: #94a3b8;
+  --neutral-500: #64748b;
+  --neutral-600: #475569;
+  --neutral-700: #334155;
+  --neutral-800: #1e293b;
+  --neutral-900: #0f172a;
+  --neutral-950: #020617;
+
+
   /* Surfaces */
   --surface-page: #020617;
   --surface-primary: #0f172a;
@@ -137,6 +301,22 @@
   --color-info-bg: rgba(96, 165, 250, 0.12);
   --color-neutral: #94a3b8;
   --color-neutral-bg: rgba(148, 163, 184, 0.12);
+
+  /* Accent scale for the palette bridge. `soft` fades toward the surface and `strong`
+     pushes toward the text colour, so both stay legible in either appearance -- a fixed
+     lighter/darker pair would invert in one of them. */
+  --accent-positive: var(--color-positive);
+  --accent-positive-soft: color-mix(in oklab, var(--color-positive) 72%, var(--surface-primary));
+  --accent-positive-strong: color-mix(in oklab, var(--color-positive) 80%, var(--text-primary));
+  --accent-negative: var(--color-negative);
+  --accent-negative-soft: color-mix(in oklab, var(--color-negative) 72%, var(--surface-primary));
+  --accent-negative-strong: color-mix(in oklab, var(--color-negative) 80%, var(--text-primary));
+  --accent-warning: var(--color-warning);
+  --accent-warning-soft: color-mix(in oklab, var(--color-warning) 72%, var(--surface-primary));
+  --accent-warning-strong: color-mix(in oklab, var(--color-warning) 80%, var(--text-primary));
+  --accent-info: var(--color-info);
+  --accent-info-soft: color-mix(in oklab, var(--color-info) 72%, var(--surface-primary));
+  --accent-info-strong: color-mix(in oklab, var(--color-info) 80%, var(--text-primary));
 
   /* Charts */
   --chart-bg: #0f172a;
@@ -211,6 +391,23 @@ body {
 }
 
 /* ─── Shared Utility Classes ─── */
+
+/*
+ * Chart heights.
+ *
+ * There were six different fixed heights across the pages -- 180, 220, 300, 340, 360, 380 --
+ * chosen independently, so two charts of the same importance were different sizes on
+ * different pages and the tallest pushed the content under it off-screen. Two named sizes
+ * instead: `chart-h` for a page's main chart, `chart-h-sm` for a secondary one.
+ */
+.chart-h {
+  height: 300px;
+}
+
+.chart-h-sm {
+  height: 180px;
+}
+
 
 .app-shell {
   background: linear-gradient(180deg, #fbf5ea 0%, var(--surface-page) 100%);

@@ -408,7 +408,7 @@ export function RecurringPage({ onBack }: { onBack: () => void }) {
             </div>
           </div>
 
-          <div className="h-[340px]">
+          <div className="chart-h">
             {!trendView.data.length && !trendsLoading ? (
               <EmptyState title="No recurring trend yet" body="Once recurring entities are inferred, trend history will appear here." />
             ) : (

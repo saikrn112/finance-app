@@ -228,3 +228,44 @@ html.platform-macos [data-tour="sidebar"] {
 html.platform-macos [data-tour="sidebar"] {
   padding-top: var(--titlebar-height, 28px);
 }
+
+/*
+ * ─── Density ──────────────────────────────────────────────────────────────────
+ *
+ * A Mac app is denser than a web page, and the audit made the two specific reasons
+ * measurable.
+ *
+ * 1. `--spacing` is the single variable every Tailwind spacing utility derives from
+ *    (`.p-4` emits `calc(var(--spacing) * 4)`). Reducing it here tightens padding, gaps
+ *    and margins across all 22 pages proportionally, without editing any of them and
+ *    without changing what `p-4` *means* -- which a per-utility override would have done,
+ *    and which would confuse the next person to read the markup.
+ *
+ * 2. 806 rendered elements were computing to 16px text: not a deliberate size, just the
+ *    browser default inherited by everything without an explicit `text-*` class. Tailwind's
+ *    text utilities are stated in rem and are unaffected by the line below, so this moves
+ *    only the ones nobody chose -- from a web default to the macOS UI size.
+ */
+/*
+ * NOT tightened globally: `--spacing`.
+ *
+ * Reducing it (0.25rem -> 0.1875rem) does tighten every padding, gap and margin at once,
+ * which is why it looked like the right lever. It is not: Tailwind derives *widths* from the
+ * same variable, so `w-40` went from 160px to 120px and labels started truncating --
+ * "Transportati..." in the category list -- and the date range clipped out of the toolbar.
+ * Icon sizes (`w-4 h-4`) come from it too.
+ *
+ * Density here comes from the two changes below plus the standardised chart heights in
+ * index.css, none of which can change a layout width. Anything further should be done per
+ * component, deliberately, rather than by rescaling the whole system.
+ */
+
+html.platform-macos body {
+  font-size: 13px;
+}
+
+/* The toolbar row keeps its breathing room: it sits in the title bar, where cramped
+   controls collide with the traffic lights rather than looking tidy. */
+html.platform-macos [data-app-toolbar] {
+  gap: 0.5rem;
+}

@@ -28,6 +28,34 @@ function transformData(data: RawTrend[], excluded: Set<string>) {
   return { spending }
 }
 
+const CHART_HEIGHT_KEY = 'finance-flow-chart-height'
+
+/**
+ * The flow chart's default height.
+ *
+ * Was a flat 500px, which on a laptop window pushed everything below it off-screen and
+ * spent most of that space on empty plot area. Proportional to the viewport with a clamp
+ * instead: tall enough to read, never more than about a third of the window.
+ */
+function defaultChartHeight() {
+  const viewport = typeof window === 'undefined' ? 900 : window.innerHeight
+  return Math.round(Math.min(420, Math.max(240, viewport * 0.34)))
+}
+
+/** The height the user last dragged to, if any. */
+function storedChartHeight() {
+  try {
+    const raw = window.localStorage.getItem(CHART_HEIGHT_KEY)
+    const value = raw ? Number(raw) : NaN
+    // Bounded by the same limits the drag handle enforces, so a hand-edited or stale
+    // value cannot produce a chart that is unusable or invisible.
+    if (Number.isFinite(value) && value >= 150 && value <= 600) return value
+  } catch {
+    // Storage can be unavailable; the default is fine.
+  }
+  return defaultChartHeight()
+}
+
 export function FlowChart({ data, excludedCategories = new Set(), dark, filterButton }: Props) {
   const privacyMode = useFilterStore((state) => state.privacyMode)
   const displayCurrency = useFilterStore((state) => state.displayCurrency)
@@ -41,7 +69,12 @@ export function FlowChart({ data, excludedCategories = new Set(), dark, filterBu
   const skipSync = useRef(false)
   const hoverSnapshotRef = useRef<string | null>(null)
   const [hoverData, setHoverData] = useState<{ period: string; income: number; spending: number; net: number } | null>(null)
-  const [chartHeight, setChartHeight] = useState(500)
+  const [chartHeight, setChartHeight] = useState(storedChartHeight)
+  // Mirrors chartHeight so the pointerup handler can read the value the drag ended on.
+  // The handler's closure captured the height at pointerdown, so reading `chartHeight`
+  // there would persist the height the drag *started* from.
+  const chartHeightRef = useRef(chartHeight)
+  useEffect(() => { chartHeightRef.current = chartHeight }, [chartHeight])
   const incomeByDay = useRef<Map<string, number>>(new Map())
 
   const { spending: spendingData, incomeBarData } = useMemo(() => {
@@ -118,7 +151,7 @@ export function FlowChart({ data, excludedCategories = new Set(), dark, filterBu
     if (!chartRef.current || !minimapRef.current) return
 
     const chart = createChart(chartRef.current, {
-      height: 500,
+      height: storedChartHeight(),
       layout: { attributionLogo: false, background: { type: ColorType.Solid, color: bg }, textColor: text, fontFamily: 'ui-monospace, monospace' },
       localization: {
         locale: 'en-US',
@@ -408,13 +441,19 @@ export function FlowChart({ data, excludedCategories = new Set(), dark, filterBu
       </div>
       {/* Resize handle */}
       <div className="flex justify-center cursor-row-resize select-none py-1 group"
-        onDoubleClick={() => setChartHeight(500)}
+        onDoubleClick={() => setChartHeight(defaultChartHeight())}
         onPointerDown={(e) => {
           e.preventDefault()
           const startY = e.clientY
           const startH = chartHeight
           const onMove = (ev: PointerEvent) => setChartHeight(Math.max(150, Math.min(600, startH + ev.clientY - startY)))
-          const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp) }
+          const onUp = () => {
+            window.removeEventListener('pointermove', onMove)
+            window.removeEventListener('pointerup', onUp)
+            // Persist on release rather than on every move: one write per drag, and the
+            // height survives a reload, which it previously did not.
+            try { window.localStorage.setItem(CHART_HEIGHT_KEY, String(chartHeightRef.current)) } catch { /* storage unavailable */ }
+          }
           window.addEventListener('pointermove', onMove)
           window.addEventListener('pointerup', onUp)
         }}>

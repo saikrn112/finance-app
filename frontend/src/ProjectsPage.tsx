@@ -5,7 +5,7 @@ import { api, ApiError, type Contact, type Transaction, type ProjectDetail as Pr
 import { useFilterStore } from './store'
 import { formatCount, formatCurrency } from './privacy'
 import { Ledger } from './Ledger'
-import { getCategoryColor } from './colors'
+import { getCategoryColor, getCategoryColorFaded } from './colors'
 
 const COLORS = [
   '#22c55e', '#3b82f6', '#eab308', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4',
@@ -417,7 +417,7 @@ function ProjectDetail({
                       <div key={`${c.category}-${sub.name}`} className="flex items-center gap-3 text-xs" style={{ color: 'var(--text-muted)' }}>
                         <span className="w-40 truncate">• {sub.name}</span>
                         <div className="flex-1 h-2.5 rounded overflow-hidden" style={{ background: 'var(--chart-bar-track)' }}>
-                          <div className="h-full rounded" style={{ width: `${(sub.total / totalCategorySpend) * 100}%`, backgroundColor: `${getCategoryColor(c.category)}bb` }} />
+                          <div className="h-full rounded" style={{ width: `${(sub.total / totalCategorySpend) * 100}%`, backgroundColor: getCategoryColorFaded(c.category) }} />
                         </div>
                         <span className="w-24 text-right">{fmt(sub.total)}</span>
                       </div>

@@ -543,7 +543,7 @@ export function PayslipPage({ onBack }: { onBack: () => void }) {
               ))}
             </div>
           </div>
-          <div className="h-[300px]">
+          <div className="chart-h">
             <PayrollTrendChart data={graphData} dark={dark} privacyMode={privacyMode} displayCurrency={displayCurrency} />
           </div>
         </section>
@@ -878,7 +878,7 @@ function PayCycleCompositionPanel({
       </div>
       {composition && composition.slices.length > 0 ? (
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-          <div className="h-[300px] min-w-0">
+          <div className="chart-h min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
@@ -974,7 +974,7 @@ function EmployerSummaryCard({
       <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
         {/* Radii are percentages so the donut scales with the column instead of being
             clipped when the window narrows (fixed px radii need >=140px to draw). */}
-        <div className="h-[180px] min-w-0">
+        <div className="chart-h-sm min-w-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie data={chartData} dataKey="amount" nameKey="label" innerRadius="55%" outerRadius="85%" stroke="none">
