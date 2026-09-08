@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var activity: NSObjectProtocol?
     private var sweepTimer: Timer?
     private let signalHandler = TerminationSignalHandler()
+    private var appearanceObserver: NSKeyValueObservation?
 
     private let layout = BundleLayout.forRunningApplication()
     private lazy var log = ShellLog(url: layout.shellLogURL)
@@ -69,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.supervisor = supervisor
 
         showWindow(for: supervisor)
+        observeAppearanceChanges()
         observeSleepWake()
         startPeriodicSweep()
         supervisor.start()
@@ -109,11 +111,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // browser window, while content running under a transparent bar reads as Mail,
         // Notes or Xcode.
         //
-        // Not `.fullSizeContentView` yet. It is the more native look, but it puts the web
-        // content under the traffic lights, and the frontend's top row is a filter bar with
-        // controls at the very left -- they would sit beneath the close button. Doing it
-        // properly needs a top inset on the page (a CSS variable the shell sets), which is
-        // a frontend change worth making deliberately rather than as a side effect.
+        // Content runs the full height of the window, under a transparent title bar --
+        // the arrangement Mail, Notes and Xcode use, and the clearest single signal that
+        // this is an app rather than a browser window.
+        //
+        // Safe only because the page insets itself: the shell sets --titlebar-height from
+        // the real metric and macos.css pads the app shell by it, so the frontend's filter
+        // row does not end up under the traffic lights.
+        window.styleMask.insert(.fullSizeContentView)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         // Follow the system, so ⌘⇧D inside the app is a *preference* rather than the only
@@ -121,6 +126,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // dark, which is the giveaway that it is a wrapped web page.
         window.appearance = nil
         window.isMovableByWindowBackground = false
+        // Required for the NSVisualEffectView's `.behindWindow` blending: an opaque window
+        // has nothing behind it to blend, and the material renders as a flat fill. Setting
+        // the material without these two is why the first attempt looked unchanged.
+        window.isOpaque = false
+        window.backgroundColor = .clear
         let root = RootViewController(supervisor: supervisor, layout: layout, log: log)
         rootController = root
         window.contentViewController = root
@@ -203,6 +213,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case .alreadyGone, .nothingRecorded:
             break
         }
+    }
+
+    // MARK: - Appearance
+
+    /// Keep the web content's light/dark mode in step with System Settings.
+    ///
+    /// A Mac app follows the system by default; a web app remembers its own toggle. Left
+    /// alone the two disagree, and a dark window frame around light content is the most
+    /// obvious tell that the inside is a web page.
+    private func observeAppearanceChanges() {
+        appearanceObserver = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.pushAppearanceToWebContent() }
+        }
+        pushAppearanceToWebContent()
+    }
+
+    private func pushAppearanceToWebContent() {
+        let isDark =
+            NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        rootController?.activeWebController?.setAppearance(dark: isDark)
     }
 
     // MARK: - Sleep, wake, and the periodic sweep

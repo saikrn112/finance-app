@@ -30,6 +30,7 @@ interface FilterState {
   includeRentInCoreExpenses: boolean
   displayCurrency: string
   dark: boolean
+  setDark: (next: boolean) => void
   category: string | null
   search: string
   accounts: Set<string> | null
@@ -117,6 +118,13 @@ export const useFilterStore = create<FilterState>((set, get) => {
     togglePrivacyMode: () => set((state) => ({ privacyMode: !state.privacyMode })),
     toggleDark: () => set((state) => {
       const next = !state.dark
+      document.documentElement.classList.toggle('dark', next)
+      return { dark: next }
+    }),
+    setDark: (next: boolean) => set(() => {
+      // Separate from toggleDark because a host shell needs to *set* the appearance to
+      // match the system, not flip whatever it currently is -- flipping from an unknown
+      // state gets it right only half the time.
       document.documentElement.classList.toggle('dark', next)
       return { dark: next }
     }),

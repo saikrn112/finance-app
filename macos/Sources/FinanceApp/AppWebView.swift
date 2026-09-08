@@ -37,6 +37,7 @@ final class AppWebViewController: NSViewController {
     private static let zoomDefaultsKey = "webViewPageZoom"
 
     private let oauthBridge: OAuthBridge
+    private var pendingAppearanceIsDark: Bool?
 
     init(endpoint: BackendEndpoint, log: ShellLog) {
         self.endpoint = endpoint
@@ -48,17 +49,30 @@ final class AppWebViewController: NSViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not supported") }
 
+    /// Measured rather than hardcoded: a standard title bar and a large one differ, and
+    /// this value positions the app's own header clear of the traffic lights.
+    private var titlebarHeight: CGFloat {
+        let contentRect = NSWindow.contentRect(
+            forFrameRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable]
+        )
+        return 600 - contentRect.height
+    }
+
     override func loadView() {
         let configuration = WKWebViewConfiguration()
-        // Non-persistent: the token is per-launch, and nothing else here is worth keeping
-        // between launches. localStorage is the exception the frontend does use (theme,
-        // "getting started" done), and losing it is a small cost against not persisting
-        // anything derived from a financial API.
-        configuration.websiteDataStore = .nonPersistent()
+        // Persistent, deliberately. A non-persistent store was the first choice -- it kept
+        // the per-launch session cookie from outliving its token -- but the token no longer
+        // travels as a cookie, and wiping the store took localStorage with it. The visible
+        // result: the twelve-step "getting started" tour reopened on *every* launch,
+        // because the flag recording that it was finished never survived.
+        configuration.websiteDataStore = .default()
         configuration.suppressesIncrementalRendering = false
         configuration.userContentController.addUserScript(
             WKUserScript(
-                source: Self.tokenInjectionScript(token: endpoint.token),
+                source: Self.tokenInjectionScript(
+                    token: endpoint.token, titlebarHeight: titlebarHeight
+                ),
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
@@ -75,13 +89,38 @@ final class AppWebViewController: NSViewController {
         webView.pageZoom = Self.storedZoom()
         // Not a browser: no drag-out of the whole document.
         webView.setValue(false, forKey: "drawsBackground")
-        view = webView
+
+        // Real macOS material behind the transparent page. This is the single biggest
+        // visual difference between "a web page in a window" and an app: the sidebar and
+        // background pick up the desktop behind them the way Mail and Notes do.
+        //
+        // It only works because the webview does not draw its own background and
+        // macos.css gives up `body`'s. Either one alone leaves an opaque rectangle.
+        let backdrop = NSVisualEffectView()
+        backdrop.material = .underWindowBackground
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .followsWindowActiveState
+        backdrop.autoresizingMask = [.width, .height]
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1160, height: 780))
+        backdrop.frame = container.bounds
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(backdrop)
+        container.addSubview(webView)
+        view = container
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         navigationHandler.onLoadFinished = { [weak self] in
-            self?.checkAuthenticatedFromInsideTheWebview()
+            guard let self else { return }
+            self.checkAuthenticatedFromInsideTheWebview()
+            // Re-apply after every load: a reload starts the frontend from its own stored
+            // preference, which is not necessarily the system's.
+            if let dark = self.pendingAppearanceIsDark {
+                self.dispatch(command: "set:appearance", argument: dark ? "dark" : "light")
+            }
         }
         navigationHandler.onOAuthStart = { [weak self] url in
             self?.oauthBridge.begin(startURL: url)
@@ -106,7 +145,10 @@ final class AppWebViewController: NSViewController {
     /// back out. That is not a real security boundary -- any script on this origin can make
     /// authenticated requests regardless -- but it does keep the value out of anything that
     /// serialises `window`, and out of a stray `console.log`.
-    private static func tokenInjectionScript(token: SessionToken) -> String {
+    private static func tokenInjectionScript(
+        token: SessionToken, titlebarHeight: CGFloat
+    ) -> String {
+        let titlebarHeightLiteral = String(format: "%.0f", titlebarHeight)
         // JSON-encoded so the value cannot break out of the string literal. The token is
         // URL-safe base64 today, but relying on that here would be a trap for later.
         let encoded = String(
@@ -117,6 +159,16 @@ final class AppWebViewController: NSViewController {
               'use strict';
               const TOKEN = \(encoded);
               const HEADER = 'x-finance-token';
+
+              // Marks the page as running inside the macOS shell. macos.css is scoped
+              // entirely to this class, so a browser is unaffected. Set at document start,
+              // before first paint, so there is no flash of the web styling.
+              document.documentElement.classList.add('platform-macos');
+              // The title bar's real height, rather than a magic number that is wrong on
+              // whichever machine nobody tested.
+              document.documentElement.style.setProperty(
+                '--titlebar-height', \(titlebarHeightLiteral) + 'px'
+              );
 
               function isSameOrigin(url) {
                 try {
@@ -246,6 +298,13 @@ final class AppWebViewController: NSViewController {
         webView.reloadFromOrigin()
     }
 
+    /// Tell the page which appearance to use. Also re-sent after every load, because a
+    /// reload starts the frontend from its own stored preference again.
+    func setAppearance(dark: Bool) {
+        pendingAppearanceIsDark = dark
+        dispatch(command: "set:appearance", argument: dark ? "dark" : "light")
+    }
+
     // MARK: - Commands
 
     /// Dispatch a named command to the frontend's command bus.
@@ -254,14 +313,16 @@ final class AppWebViewController: NSViewController {
     /// rather than swallowed: a menu item that silently does nothing is the most annoying
     /// possible failure, and the shell's menu table and the frontend's registrations are
     /// two lists that can drift.
-    func dispatch(command: String) {
+    func dispatch(command: String, argument: String? = nil) {
         let script = """
             const bus = window.__financeCommandBus;
             if (!bus) return 'no-bus';
-            return (await bus.dispatch(name)) ? 'ok' : 'unhandled';
+            return (await bus.dispatch(name, argument)) ? 'ok' : 'unhandled';
             """
         webView.callAsyncJavaScript(
-            script, arguments: ["name": command], in: nil, in: .page
+            script,
+            arguments: ["name": command, "argument": argument ?? NSNull()],
+            in: nil, in: .page
         ) { [weak self] result in
             guard let self else { return }
             switch result {

@@ -51,6 +51,9 @@ public struct BundleLayout: Sendable {
     public var runtimeStateURL: URL { supportDirectory.appending(path: "runtime-state.json") }
     /// flock target for the single-instance guard.
     public var instanceLockURL: URL { supportDirectory.appending(path: "instance.lock") }
+    /// The port used last launch. Reused when free so the page's origin -- and therefore
+    /// its localStorage -- survives a restart.
+    public var portMemoryURL: URL { supportDirectory.appending(path: "port") }
 
     // MARK: - Construction
 

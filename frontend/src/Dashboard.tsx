@@ -91,6 +91,7 @@ export function Dashboard() {
   const { category, setCategory, setSearch, accounts, toggleAccount, setAccounts, setGranularity, clearFilters, privacyMode, coreExpensesOnly, setCoreExpensesOnly, includeRentInCoreExpenses, setIncludeRentInCoreExpenses, displayCurrency, setDisplayCurrency, dark, toggleDark } = useFilterStore()
   const search = useFilterStore(s => s.search)
   const togglePrivacyMode = useFilterStore(s => s.togglePrivacyMode)
+  const setDark = useFilterStore(s => s.setDark)
   const fmt = (n: number) => formatCurrency(n, privacyMode, { currency: displayCurrency })
 
   const queryClient = useQueryClient()
@@ -268,6 +269,10 @@ export function Dashboard() {
       'open:getting-started': () => setShowGettingStarted(true),
       'toggle:privacy': togglePrivacyMode,
       'toggle:dark': toggleDark,
+      // The shell sets this from NSApp.effectiveAppearance, so the app follows System
+      // Settings the way a Mac app does. `set`, not `toggle`: flipping from an unknown
+      // state gets it right only half the time.
+      'set:appearance': (mode) => setDark(mode === 'dark'),
       'toggle:sidebar': () => setSidebarExpanded((expanded) => !expanded),
       sync: handleRefresh,
       'clear:filters': clearFilters,
@@ -332,8 +337,10 @@ export function Dashboard() {
           Demo mode is active. The app is using isolated data at `{appMeta.database_path}`.
         </div>
       )}
-      {/* Global Filters */}
-      <div className="flex items-center gap-3 mb-5 flex-wrap">
+      {/* Global Filters. data-app-toolbar lets the macOS shell lift this row into the
+          window's title bar area, the way a Mac app's toolbar sits beside the traffic
+          lights rather than below them. */}
+      <div data-app-toolbar className="flex items-center gap-3 mb-5 flex-wrap">
         <select value={accounts ? Array.from(accounts).join(',') : ''} onChange={e => setAccounts(e.target.value ? new Set([e.target.value]) : null)}
           className="app-input text-xs rounded px-2 py-1.5">
           <option value="">All Accounts</option>

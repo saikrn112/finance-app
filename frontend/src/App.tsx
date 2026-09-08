@@ -3,6 +3,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Dashboard } from './Dashboard'
 import { api } from './api'
 import './index.css'
+// Scoped to html.platform-macos, which only the desktop shell adds. Inert in a browser.
+import './macos.css'
 
 const queryClient = new QueryClient()
 

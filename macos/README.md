@@ -311,6 +311,59 @@ one, unlike the others.
 
 ---
 
+## Native feel
+
+The chosen direction is **native shell surfaces plus a restyled web layer**: chrome,
+window behaviour and (in progress) onboarding and Settings are real AppKit/SwiftUI, while
+the dense data views stay web and are restyled so the two read as one application. A full
+SwiftUI rewrite was considered and rejected for the reason the plan gives — `Ledger.tsx`
+alone is 1,094 lines of custom grid behaviour, and a rewrite loses behaviour nobody wrote
+down.
+
+Signing follows Timeslice (`~/workspace/persona/timeslice/scripts/`): not sandboxed,
+ad-hoc by default, no App Store.
+
+### What makes it read as an app
+
+| | How |
+| --- | --- |
+| Full-height content under a transparent title bar | `.fullSizeContentView`, and the page insets *itself* from `--titlebar-height` |
+| The filter row acts as the window's toolbar | `[data-app-toolbar]` is lifted into the title bar band and indented clear of the traffic lights |
+| Real macOS material behind the content | `NSVisualEffectView` + a non-opaque window + a transparent page |
+| A distinct, lighter sidebar material | `backdrop-filter` on the sidebar, as Finder and Mail do |
+| System typography and tabular figures | `-apple-system`, `font-variant-numeric: tabular-nums` |
+| Controls, focus rings and selection follow the user's accent | `accent-color: AccentColor`, `color-scheme: light dark` |
+| System scrollbars | the web app's custom hover-thumb scrollbars are handed back to the OS |
+| Light/dark follows System Settings | the shell observes `effectiveAppearance` and dispatches `set:appearance` |
+
+All of it is scoped to `html.platform-macos`, a class only the shell adds, so the web app
+in a browser is untouched.
+
+### Things that only showed up on screen
+
+- **Vibrancy needs three things, and any one missing looks like none of them.** The
+  webview must not draw its own background, the *window* must be non-opaque
+  (`isOpaque = false`, `backgroundColor = .clear`) or `.behindWindow` blending has nothing
+  to blend, and the page must give up its fills. The first attempt set the material only
+  and looked completely unchanged.
+- **`!important` was unavoidable for two of those fills.** `App.tsx`'s shell carries
+  Tailwind's `dark:bg-gray-900`, and the sidebar sets `background` as an inline style.
+- **A random port per launch silently reset the frontend's `localStorage`**, because the
+  origin changed. The visible symptom was the twelve-step getting-started tour reopening on
+  *every* launch. `PortAllocator.preferredLoopbackPort` now reuses the last port when it is
+  free.
+- **That fix did nothing until the probe used `SO_REUSEADDR`.** After a quit, the webview's
+  closed connections sit in `TIME_WAIT`, so a plain bind of the remembered port fails —
+  while uvicorn, which sets `SO_REUSEADDR`, binds happily. Measured: 53698 then 53771, then
+  53771 three launches running once fixed.
+- **A non-persistent `WKWebsiteDataStore` takes `localStorage` with it.** It was chosen to
+  stop the session cookie outliving its token; the token no longer travels as a cookie, so
+  the store is persistent again.
+- **Padding both `.app-shell` and `#root > div`** applied the title-bar inset twice, because
+  they are parent and child.
+
+---
+
 ## Test baselines
 
 Compare before/after rather than expecting green (`AGENTS.md` §6).
@@ -318,8 +371,8 @@ Compare before/after rather than expecting green (`AGENTS.md` §6).
 | | Baseline at `4b847fd` | Now |
 | --- | --- | --- |
 | `pytest tests/ -q` | 61 failed, 134 passed | 61 failed, 147 passed |
-| `npx tsc -p tsconfig.app.json --noEmit` | 59 errors | 59 errors |
-| `swift test` (new) | — | 61 passed |
+| `npx tsc -p tsconfig.app.json --noEmit` | 59 errors | 58 errors |
+| `swift test` (new) | — | 65 passed |
 | `macos/scripts/verify_bundle.sh` (new) | — | 13 passed, 2 skipped |
 
 Frontend typecheck is untouched so far; record it before the first

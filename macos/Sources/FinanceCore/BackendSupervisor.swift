@@ -169,7 +169,7 @@ public final class BackendSupervisor: ObservableObject {
         try validatePayload()
         try layout.createSupportDirectories()
 
-        let port = try PortAllocator.freeLoopbackPort()
+        let port = try PortAllocator.preferredLoopbackPort(rememberedAt: layout.portMemoryURL)
         let token = SessionToken()
 
         let logFile = LogFile(url: layout.backendLogURL)

@@ -365,3 +365,76 @@ struct BackendEnvironmentTests {
         #expect(variables["PYTHONHOME"] == nil)
     }
 }
+
+@Suite("PortAllocator: remembered port")
+struct RememberedPortTests {
+    private func memoryURL() -> URL {
+        FileManager.default.temporaryDirectory.appending(path: "port-\(UUID().uuidString)")
+    }
+
+    @Test("the first call allocates and records a port")
+    func recordsOnFirstUse() throws {
+        let url = memoryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let port = try PortAllocator.preferredLoopbackPort(rememberedAt: url)
+        #expect(port > 1024)
+        let recorded = try String(contentsOf: url, encoding: .utf8)
+        #expect(UInt16(recorded.trimmingCharacters(in: .whitespacesAndNewlines)) == port)
+    }
+
+    @Test("a later call reuses the same port")
+    func reusesRememberedPort() throws {
+        // The whole point: a stable port means a stable origin, and a stable origin means
+        // the frontend's localStorage survives a relaunch. A fresh port every launch
+        // reopened the twelve-step getting-started tour every launch.
+        let url = memoryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = try PortAllocator.preferredLoopbackPort(rememberedAt: url)
+        let second = try PortAllocator.preferredLoopbackPort(rememberedAt: url)
+        #expect(first == second)
+    }
+
+    @Test("a taken port is replaced rather than refused")
+    func fallsBackWhenTaken() throws {
+        let url = memoryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let taken = try PortAllocator.freeLoopbackPort()
+        try String(taken).write(to: url, atomically: true, encoding: .utf8)
+
+        // Actually hold it, so the bindability check has something real to fail against.
+        let holder = socket(AF_INET, SOCK_STREAM, 0)
+        #expect(holder >= 0)
+        defer { close(holder) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = taken.bigEndian
+        address.sin_addr.s_addr = INADDR_LOOPBACK.bigEndian
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(holder, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        #expect(bound == 0)
+
+        // Losing localStorage for one launch beats refusing to start.
+        let allocated = try PortAllocator.preferredLoopbackPort(rememberedAt: url)
+        #expect(allocated != taken)
+    }
+
+    @Test("a corrupt or privileged remembered value is ignored")
+    func ignoresBadValues() throws {
+        // A truncated write, or a hand-edited file. Binding below 1024 needs root, and 0
+        // means "pick one" -- neither is a value this code ever wrote.
+        for bad in ["", "not a port", "0", "80", "99999999"] {
+            let url = memoryURL()
+            defer { try? FileManager.default.removeItem(at: url) }
+            try bad.write(to: url, atomically: true, encoding: .utf8)
+            let port = try PortAllocator.preferredLoopbackPort(rememberedAt: url)
+            #expect(port > 1024, "accepted \(bad.isEmpty ? "<empty>" : bad)")
+        }
+    }
+}
