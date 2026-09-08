@@ -22,6 +22,7 @@ import { AppTour } from './AppTour'
 import { OnboardingGate } from './OnboardingGate'
 import { formatCurrency } from './privacy'
 import { SUPPORTED_CURRENCIES } from './currency'
+import { installCommandBus, registerCommands } from './commandBus'
 import { X } from 'lucide-react'
 
 type DashboardView = 'dashboard' | 'recurring' | 'projects' | 'investments' | 'retirement' | 'payroll' | 'net-worth' | 'uncategorized'
@@ -89,6 +90,7 @@ export function Dashboard() {
   const [selectedRetirementSource, setSelectedRetirementSource] = useState<string | null>(() => retirementSourceFromUrl())
   const { category, setCategory, setSearch, accounts, toggleAccount, setAccounts, setGranularity, clearFilters, privacyMode, coreExpensesOnly, setCoreExpensesOnly, includeRentInCoreExpenses, setIncludeRentInCoreExpenses, displayCurrency, setDisplayCurrency, dark, toggleDark } = useFilterStore()
   const search = useFilterStore(s => s.search)
+  const togglePrivacyMode = useFilterStore(s => s.togglePrivacyMode)
   const fmt = (n: number) => formatCurrency(n, privacyMode, { currency: displayCurrency })
 
   const queryClient = useQueryClient()
@@ -241,6 +243,51 @@ export function Dashboard() {
     }
   }
 
+  // Commands a host shell can invoke. The macOS app's menu bar drives these instead of
+  // synthesising clicks on CSS selectors, which would break silently the first time a
+  // class name changed and would give no way to tell "did nothing" from "not wired".
+  // Inert in a browser: nothing ever dispatches.
+  //
+  // No dependency array on purpose. These handlers close over current state, and this
+  // effect only writes to a module-level Map — so re-registering on every render is
+  // cheap and always correct, whereas a dependency list would go stale exactly when
+  // someone adds a command that reads new state.
+  useEffect(() => {
+    installCommandBus()
+    return registerCommands({
+      'navigate:home': handleShowHome,
+      'navigate:projects': () => navigateToView('projects'),
+      'navigate:uncategorized': () => navigateToView('uncategorized'),
+      'navigate:payroll': () => navigateToView('payroll'),
+      'navigate:recurring': () => navigateToView('recurring'),
+      'navigate:net-worth': handleShowNetWorth,
+      'navigate:investments': () => navigateToView('investments'),
+      'navigate:retirement': () => navigateToView('retirement'),
+      'open:settings': () => setSettingsOpen(true),
+      'open:imports': () => setShowImports(true),
+      'open:getting-started': () => setShowGettingStarted(true),
+      'toggle:privacy': togglePrivacyMode,
+      'toggle:dark': toggleDark,
+      'toggle:sidebar': () => setSidebarExpanded((expanded) => !expanded),
+      sync: handleRefresh,
+      'clear:filters': clearFilters,
+      // Dispatched by the macOS shell once a provider OAuth flow it carried out to the
+      // system browser has landed. The page cannot notice on its own: the popup it
+      // expected to watch opened in another application.
+      'refresh:settings': async () => {
+        await refetchSettings()
+        await queryClient.invalidateQueries()
+      },
+      'focus:search': () => {
+        // Queried by a stable data attribute rather than threading a ref through the
+        // shared JSX block this input lives in. The attribute exists for this and is
+        // not a styling hook.
+        const input = document.querySelector<HTMLInputElement>('[data-command="search-merchant"]')
+        input?.focus()
+        input?.select()
+      },
+    })
+  })
 
   const allCats = useMemo(() => {
     const map = new Map(Object.keys(CATEGORY_COLORS).map(c => [c, 0]))
@@ -300,6 +347,7 @@ export function Dashboard() {
           {CATEGORY_ORDER.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
         <input type="text" placeholder="Search merchant..."
+          data-command="search-merchant"
           value={search}
           onChange={e => setSearch(e.target.value)}
           className="app-input text-xs rounded px-2 py-1.5 w-40" />

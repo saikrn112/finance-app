@@ -1,86 +1,145 @@
 import AppKit
 
-/// The minimum menu bar an AppKit app needs to be usable.
+/// Builds the menu bar.
 ///
-/// Without a main menu there is no ⌘Q, so the only way to quit is to kill the
-/// process -- which is exactly the path that orphans the backend. Phase 3 replaces
-/// this with real in-app commands dispatched into the webview; until then it exists
-/// so that "clean shutdown" is reachable by a user rather than only by a script.
+/// An AppKit app with no main menu has no ⌘Q at all, so the only way to quit is to kill the
+/// process — which is exactly the path that orphans the backend. That is why even the
+/// minimum version of this was part of phase 1.
+///
+/// Items that drive the app carry their bus command name in `representedObject` and share
+/// one action. The alternative — a selector per command — means twenty near-identical
+/// methods on the delegate, and one of them being wrong is invisible until someone presses
+/// that key.
 @MainActor
 enum MainMenu {
+    /// The shared action for every bus-backed item. `#selector` rather than a string, so a
+    /// renamed method breaks the build instead of breaking a menu item at runtime.
+    static let dispatchSelector = #selector(AppDelegate.dispatchAppCommand(_:))
+
     static func install(applicationName: String = "FinanceApp") {
         let mainMenu = NSMenu()
 
-        // The first item's own submenu is the application menu; its title comes from
-        // the bundle, not from this string.
-        let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(
+        mainMenu.addItem(applicationMenuItem(applicationName: applicationName))
+        mainMenu.addItem(editMenuItem())
+        mainMenu.addItem(viewMenuItem())
+        for menu in AppCommands.busMenus {
+            mainMenu.addItem(busMenuItem(menu))
+        }
+        let windowMenu = NSMenu(title: "Window")
+        mainMenu.addItem(windowMenuItem(windowMenu))
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    // MARK: - Menus
+
+    private static func applicationMenuItem(applicationName: String) -> NSMenuItem {
+        // The first item's submenu is the application menu; its title comes from the
+        // bundle, not from anything set here.
+        let container = NSMenuItem()
+        let menu = NSMenu()
+        menu.addItem(
             withTitle: "About \(applicationName)",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
-        appMenu.addItem(.separator())
-        appMenu.addItem(
+        menu.addItem(.separator())
+        if let settings = commandItem(AppCommands.settingsItem) {
+            menu.addItem(settings)
+        }
+        menu.addItem(.separator())
+        menu.addItem(
             withTitle: "Hide \(applicationName)",
             action: #selector(NSApplication.hide(_:)),
             keyEquivalent: "h"
         )
-        appMenu.addItem(.separator())
-        appMenu.addItem(
+        menu.addItem(.separator())
+        menu.addItem(
             withTitle: "Quit \(applicationName)",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
-        appMenuItem.submenu = appMenu
-        mainMenu.addItem(appMenuItem)
+        container.submenu = menu
+        return container
+    }
 
-        // Edit, purely so that Copy works in the selectable path and log text. A
-        // text view that cannot be copied from is a diagnostics panel nobody can
-        // paste into a bug report.
-        let editMenuItem = NSMenuItem()
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(
+    private static func editMenuItem() -> NSMenuItem {
+        let container = NSMenuItem()
+        let menu = NSMenu(title: "Edit")
+        // Standard clipboard items, so text in the app (and in the diagnostics panel) can
+        // be copied at all. A panel nobody can paste from is not a diagnostics panel.
+        menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        menu.addItem(
             withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"
         )
-        editMenuItem.submenu = editMenu
-        mainMenu.addItem(editMenuItem)
+        append(AppCommands.editItems, to: menu)
+        container.submenu = menu
+        return container
+    }
 
-        // View. The zoom items drive WKWebView's pageZoom explicitly, because pinch
-        // magnification is disabled: it fights ag-grid's row virtualisation and
-        // WKWebView's rubber-band scrolling, and the loser is whichever the user
-        // actually meant to scroll.
-        let viewMenuItem = NSMenuItem()
-        let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(withTitle: "Reload", action: Selector(("reloadApp:")), keyEquivalent: "r")
-        viewMenu.addItem(.separator())
-        viewMenu.addItem(withTitle: "Actual Size", action: Selector(("resetZoom:")), keyEquivalent: "0")
-        viewMenu.addItem(withTitle: "Zoom In", action: Selector(("zoomIn:")), keyEquivalent: "+")
-        viewMenu.addItem(withTitle: "Zoom Out", action: Selector(("zoomOut:")), keyEquivalent: "-")
-        viewMenu.addItem(.separator())
-        viewMenu.addItem(
-            withTitle: "Restart Backend", action: Selector(("restartBackend:")), keyEquivalent: ""
+    private static func viewMenuItem() -> NSMenuItem {
+        let container = NSMenuItem()
+        let menu = NSMenu(title: "View")
+        // Shell-local: these never reach the page. The zoom items drive WKWebView's
+        // pageZoom explicitly because pinch magnification is disabled — it fights
+        // ag-grid's row virtualisation, and the loser is whichever the user meant to
+        // scroll.
+        menu.addItem(withTitle: "Reload", action: #selector(AppDelegate.reloadApp(_:)), keyEquivalent: "r")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Actual Size", action: #selector(AppDelegate.resetZoom(_:)), keyEquivalent: "0")
+        menu.addItem(withTitle: "Zoom In", action: #selector(AppDelegate.zoomIn(_:)), keyEquivalent: "+")
+        menu.addItem(withTitle: "Zoom Out", action: #selector(AppDelegate.zoomOut(_:)), keyEquivalent: "-")
+        append(AppCommands.viewItems, to: menu)
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: "Restart Backend", action: #selector(AppDelegate.restartBackend(_:)),
+            keyEquivalent: ""
         )
-        viewMenuItem.submenu = viewMenu
-        mainMenu.addItem(viewMenuItem)
+        container.submenu = menu
+        return container
+    }
 
-        let windowMenuItem = NSMenuItem()
-        let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(
+    private static func busMenuItem(_ definition: AppCommands.Menu) -> NSMenuItem {
+        let container = NSMenuItem()
+        let menu = NSMenu(title: definition.title)
+        append(definition.items, to: menu)
+        container.submenu = menu
+        return container
+    }
+
+    private static func windowMenuItem(_ menu: NSMenu) -> NSMenuItem {
+        let container = NSMenuItem()
+        menu.addItem(
             withTitle: "Minimize",
             action: #selector(NSWindow.performMiniaturize(_:)),
             keyEquivalent: "m"
         )
-        windowMenu.addItem(
+        menu.addItem(
             withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"
         )
-        windowMenuItem.submenu = windowMenu
-        mainMenu.addItem(windowMenuItem)
+        container.submenu = menu
+        return container
+    }
 
-        NSApp.mainMenu = mainMenu
-        NSApp.windowsMenu = windowMenu
+    // MARK: - Items
+
+    private static func append(_ items: [AppCommands.Item], to menu: NSMenu) {
+        for item in items {
+            menu.addItem(commandItem(item) ?? .separator())
+        }
+    }
+
+    /// `nil` for a separator.
+    private static func commandItem(_ definition: AppCommands.Item) -> NSMenuItem? {
+        guard let command = definition.command else { return nil }
+        let item = NSMenuItem(
+            title: definition.title, action: dispatchSelector, keyEquivalent: definition.key
+        )
+        item.keyEquivalentModifierMask = definition.modifiers
+        item.representedObject = command
+        return item
     }
 }

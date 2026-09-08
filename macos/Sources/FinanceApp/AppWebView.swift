@@ -36,9 +36,12 @@ final class AppWebViewController: NSViewController {
     private static let zoomSteps: [CGFloat] = [0.75, 0.85, 1.0, 1.15, 1.3, 1.5]
     private static let zoomDefaultsKey = "webViewPageZoom"
 
+    private let oauthBridge: OAuthBridge
+
     init(endpoint: BackendEndpoint, log: ShellLog) {
         self.endpoint = endpoint
         self.navigationHandler = ExternalNavigationHandler(allowedPort: endpoint.port, log: log)
+        self.oauthBridge = OAuthBridge(endpoint: endpoint, log: log)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -79,6 +82,20 @@ final class AppWebViewController: NSViewController {
         super.viewDidLoad()
         navigationHandler.onLoadFinished = { [weak self] in
             self?.checkAuthenticatedFromInsideTheWebview()
+        }
+        navigationHandler.onOAuthStart = { [weak self] url in
+            self?.oauthBridge.begin(startURL: url)
+        }
+        oauthBridge.onConnected = { [weak self] in
+            // Two commands, tried in order, because the right thing to do depends on what
+            // is on screen. The onboarding gate owns a whole post-connect flow (discover
+            // backups, offer a restore) that must not be skipped; if the gate is not open,
+            // refetching settings is all that is needed. Each name has exactly one owner,
+            // so neither can silently overwrite the other in the bus.
+            self?.dispatchFirstHandled(commands: [
+                "onboarding:provider-returned",
+                "refresh:settings",
+            ])
         }
         webView.load(URLRequest(url: endpoint.baseURL))
     }
@@ -228,6 +245,82 @@ final class AppWebViewController: NSViewController {
     func reload() {
         webView.reloadFromOrigin()
     }
+
+    // MARK: - Commands
+
+    /// Dispatch a named command to the frontend's command bus.
+    ///
+    /// The bus reports whether a handler existed, and an unhandled command is logged
+    /// rather than swallowed: a menu item that silently does nothing is the most annoying
+    /// possible failure, and the shell's menu table and the frontend's registrations are
+    /// two lists that can drift.
+    func dispatch(command: String) {
+        let script = """
+            const bus = window.__financeCommandBus;
+            if (!bus) return 'no-bus';
+            return (await bus.dispatch(name)) ? 'ok' : 'unhandled';
+            """
+        webView.callAsyncJavaScript(
+            script, arguments: ["name": command], in: nil, in: .page
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let value):
+                switch value as? String {
+                case "ok":
+                    break
+                case "unhandled":
+                    self.navigationHandler.log.write(
+                        "command '\(command)' is in the menu but not registered by the frontend"
+                    )
+                default:
+                    // Expected briefly during a reload, before the bundle has run.
+                    self.navigationHandler.log.write(
+                        "command '\(command)' arrived before the command bus was installed"
+                    )
+                }
+            case .failure(let error):
+                self.navigationHandler.log.write(
+                    "command '\(command)' failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// Dispatch the first command in `commands` that the frontend actually handles.
+    ///
+    /// Used where the appropriate action depends on what the page is currently showing.
+    /// Falling through in order beats asking the page "what state are you in?" and then
+    /// deciding here, which would put a copy of the frontend's state machine in Swift.
+    func dispatchFirstHandled(commands: [String]) {
+        guard let first = commands.first else { return }
+        let script = """
+            const bus = window.__financeCommandBus;
+            if (!bus) return false;
+            return await bus.dispatch(name);
+            """
+        webView.callAsyncJavaScript(
+            script, arguments: ["name": first], in: nil, in: .page
+        ) { [weak self] result in
+            guard let self else { return }
+            let handled = ((try? result.get()) as? NSNumber)?.boolValue ?? false
+            if handled {
+                self.navigationHandler.log.write("dispatched '\(first)'")
+            } else {
+                self.dispatchFirstHandled(commands: Array(commands.dropFirst()))
+            }
+        }
+    }
+
+    /// The command names the frontend has actually registered. For diagnostics and tests.
+    func registeredCommands(completion: @escaping ([String]) -> Void) {
+        webView.callAsyncJavaScript(
+            "return window.__financeCommandBus ? window.__financeCommandBus.list() : [];",
+            arguments: [:], in: nil, in: .page
+        ) { result in
+            completion((try? result.get()) as? [String] ?? [])
+        }
+    }
 }
 
 /// Keeps the webview on the local app and sends everything else to the browser.
@@ -242,6 +335,8 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
     let log: ShellLog
     /// Called after each successful load, so the controller can run its self-check.
     var onLoadFinished: (() -> Void)?
+    /// Called when the page tries to reach a provider OAuth start endpoint.
+    var onOAuthStart: ((URL) -> Void)?
 
     init(allowedPort: UInt16, log: ShellLog) {
         self.allowedPort = allowedPort
@@ -265,6 +360,27 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
         decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
     ) {
         let url = navigationAction.request.url
+
+        // An OAuth start endpoint is a redirect to a provider. It cannot be loaded here:
+        // a navigation carries no session token, so it 401s, and the provider's consent
+        // page must not run in this origin regardless.
+        if isLocalApp(url), let url, OAuthBridge.isStart(url) {
+            onOAuthStart?(url)
+            decisionHandler(.cancel)
+            return
+        }
+
+        // Nothing else under /api may become the window either. The app is a single page
+        // that talks to the API with fetch; a top-level navigation to an API URL is always
+        // a mistake, and the failure mode is severe -- the entire app is replaced by a JSON
+        // body, with no way back but Reload. That is exactly what happened with the Google
+        // popup before this check existed.
+        if isLocalApp(url), let url, url.path.hasPrefix("/api/") {
+            log.write("blocked a top-level navigation to an API path")
+            decisionHandler(.cancel)
+            return
+        }
+
         if isLocalApp(url) {
             decisionHandler(.allow)
             return
@@ -320,11 +436,23 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if let url = navigationAction.request.url, !isLocalApp(url) {
-            NSWorkspace.shared.open(url)
-        } else if let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
+        guard let url = navigationAction.request.url else { return nil }
+
+        // `window.open` on an OAuth start endpoint: the whole reason this method needed
+        // rewriting. It used to load the popup's URL into the *main* webview, which
+        // replaced the running app with `{"detail":"unauthorized"}`.
+        if OAuthBridge.isStart(url) {
+            onOAuthStart?(url)
+            return nil
         }
+        if !isLocalApp(url) {
+            NSWorkspace.shared.open(url)
+            return nil
+        }
+        // A same-origin popup we do not recognise. Loading it into the main webview would
+        // destroy the app, so log it and do nothing: a missing popup is a visible,
+        // recoverable annoyance; a replaced app is not.
+        log.write("ignored a same-origin popup the shell does not handle")
         return nil
     }
 }

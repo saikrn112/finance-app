@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertCircle, CheckCircle2, Cloud, LoaderCircle } from 'lucide-react'
 import { ApiError, api, type SettingsResponse } from './api'
+import { registerCommand } from './commandBus'
 
 interface Props {
   open: boolean
@@ -112,28 +113,41 @@ export function OnboardingGate({
     postConnectStartedRef.current = false
   }, [clearPopupPoll, open])
 
+  /** The provider flow finished, however we found out. */
+  const handleProviderReturned = useCallback(async () => {
+    clearPopupPoll()
+    popupRef.current = null
+    if (postConnectStartedRef.current) return
+    postConnectStartedRef.current = true
+    const latestSettings = await onRefreshSettings()
+    if (!latestSettings?.vault.connected) {
+      postConnectStartedRef.current = false
+      setPhase('connect')
+      setMessage('Connect your Google account to open this workspace.')
+      return
+    }
+    await runPostConnectFlow(latestSettings)
+  }, [clearPopupPoll, onRefreshSettings, runPostConnectFlow])
+
   useEffect(() => {
     if (!open) return
     const listener = (event: MessageEvent) => {
-      if (event.data?.type === 'vault-google-connected') {
-        clearPopupPoll()
-        popupRef.current = null
-        if (postConnectStartedRef.current) return
-        postConnectStartedRef.current = true
-        void onRefreshSettings().then((latestSettings) => {
-          if (!latestSettings?.vault.connected) {
-            postConnectStartedRef.current = false
-            setPhase('connect')
-            setMessage('Connect your Google account to open this workspace.')
-            return
-          }
-          void runPostConnectFlow(latestSettings)
-        })
-      }
+      if (event.data?.type === 'vault-google-connected') void handleProviderReturned()
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [open, onRefreshSettings, clearPopupPoll, runPostConnectFlow])
+  }, [open, handleProviderReturned])
+
+  // The same completion, for a host that carried the flow out to a real browser.
+  //
+  // The postMessage path above cannot work there: the popup opened in another
+  // application, so there is no `window.opener` to post back through and the
+  // "did the popup close?" poll never fires. The macOS shell watches the backend
+  // instead and dispatches this once the vault reports connected.
+  useEffect(() => {
+    if (!open) return
+    return registerCommand('onboarding:provider-returned', () => handleProviderReturned())
+  }, [open, handleProviderReturned])
 
   useEffect(() => () => clearPopupPoll(), [clearPopupPoll])
 

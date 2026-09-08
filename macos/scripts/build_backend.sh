@@ -104,6 +104,11 @@ mkdir -p "$BACKEND_DIR/app"
 for item in src rules; do
   cp -R "$REPO_ROOT/$item" "$BACKEND_DIR/app/$item"
 done
+# The tracked example, so src/config.py has defaults to fall back on when the user has
+# no config.yaml yet. Without it a first run gets an all-empty config, and the first
+# symptom is Google OAuth failing with no explanation. Only the *example* ships --
+# config.yaml itself holds real Plaid and Google secrets and is gitignored.
+cp "$REPO_ROOT/config.yaml.example" "$BACKEND_DIR/app/config.yaml.example"
 mkdir -p "$BACKEND_DIR/app/plugins"
 # Tracked template plugins only -- never whatever happens to be sitting in the
 # working tree, which on a real machine is the owner's private parsers.

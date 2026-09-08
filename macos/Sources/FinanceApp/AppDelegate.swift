@@ -3,7 +3,7 @@ import FinanceCore
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var instanceGuard: SingleInstanceGuard?
     private var supervisor: BackendSupervisor?
     private var window: NSWindow?
@@ -103,6 +103,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The ledger is a wide grid; below this it starts crushing columns into
         // ellipses (AGENTS.md caveat #6).
         window.minSize = NSSize(width: 900, height: 560)
+
+        // Native chrome. The single biggest thing separating "a webview in a box" from an
+        // app is the title bar: a full-height opaque bar with a centred title reads as a
+        // browser window, while content running under a transparent bar reads as Mail,
+        // Notes or Xcode.
+        //
+        // Not `.fullSizeContentView` yet. It is the more native look, but it puts the web
+        // content under the traffic lights, and the frontend's top row is a filter bar with
+        // controls at the very left -- they would sit beneath the close button. Doing it
+        // properly needs a top inset on the page (a CSS variable the shell sets), which is
+        // a frontend change worth making deliberately rather than as a side effect.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        // Follow the system, so ⌘⇧D inside the app is a *preference* rather than the only
+        // way to get a dark window. Without this the frame is light while the content is
+        // dark, which is the giveaway that it is a wrapped web page.
+        window.appearance = nil
+        window.isMovableByWindowBackground = false
         let root = RootViewController(supervisor: supervisor, layout: layout, log: log)
         rootController = root
         window.contentViewController = root
@@ -129,6 +147,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func restartBackend(_ sender: Any?) {
         supervisor?.stop()
         supervisor?.start()
+    }
+
+    /// The single action behind every bus-backed menu item. The command name travels in
+    /// `representedObject`, so adding a command means one line in `AppCommands` rather
+    /// than another near-identical method here.
+    @objc func dispatchAppCommand(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? String else { return }
+        rootController?.activeWebController?.dispatch(command: command)
+    }
+
+    /// Grey out the app-driving items while the backend is not ready. Without this they
+    /// look available and do nothing, which is worse than being visibly disabled.
+    ///
+    /// From NSMenuItemValidation, not an override: NSObject has no such method, and
+    /// spelling it `override` fails to compile rather than silently doing nothing.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let webIsLive = rootController?.activeWebController != nil
+        switch menuItem.action {
+        case #selector(dispatchAppCommand(_:)),
+             #selector(reloadApp(_:)),
+             #selector(zoomIn(_:)),
+             #selector(zoomOut(_:)),
+             #selector(resetZoom(_:)):
+            return webIsLive
+        default:
+            return true
+        }
     }
 
     private func presentFatal(_ message: String, detail: String) {
