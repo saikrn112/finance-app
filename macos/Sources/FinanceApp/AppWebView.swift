@@ -90,7 +90,30 @@ final class AppWebViewController: NSViewController {
         // The webview paints its own background. It briefly did not, so an
         // NSVisualEffectView behind it could show through -- see the note on
         // `window.isOpaque` in AppDelegate for why that was removed.
-        view = webView
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1160, height: 780))
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+
+        // A real drag strip above the webview. The page insets its content by the same
+        // height, so this covers only empty background and cannot sit over a control.
+        let drag = TitlebarDragView(
+            frame: NSRect(
+                x: 0, y: container.bounds.height - titlebarHeight,
+                width: container.bounds.width, height: titlebarHeight
+            )
+        )
+        // Pinned to the top edge and stretching horizontally.
+        drag.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(drag)
+        // Logged so its presence and geometry are checkable without a permission grant:
+        // synthesising a real drag needs Accessibility, which this machine does not have.
+        navigationHandler.log.write(
+            "titlebar drag strip installed, height \(Int(titlebarHeight))pt, "
+                + "movesWindow=\(drag.mouseDownCanMoveWindow)"
+        )
+
+        view = container
     }
 
     override func viewDidLoad() {

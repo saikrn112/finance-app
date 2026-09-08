@@ -124,53 +124,38 @@ html.platform-macos .app-surface-strong {
 /* ─── Title bar ──────────────────────────────────────────────────────────────── */
 
 /*
- * The shell runs `.fullSizeContentView`, so content occupies the whole frame and the traffic
- * lights float over the top-left. The app's own filter row moves up into that band and is
- * indented clear of them, which is where a Mac app puts its toolbar — rather than padding the
- * whole page down and leaving an empty strip.
+ * The shell runs `.fullSizeContentView`, so web content occupies the whole window frame and
+ * the traffic lights float over the top-left. Every view therefore insets itself by the
+ * title-bar height, and the strip that frees up is the window's drag area (TitlebarDragView).
  *
  * --titlebar-height is set by the shell from the real metric, not hardcoded.
  */
-html.platform-macos [data-app-toolbar] {
-  /* Room for the three window buttons. Fixed size, and macOS exposes no metric for it that
-     CSS can reach. */
-  padding-left: 72px;
-  min-height: var(--titlebar-height, 28px);
-  /* Deliberately looser than the density scale above: cramped controls beside the traffic
-     lights look like a mistake rather than like a toolbar. */
-  gap: 0.5rem;
-}
-
-/* Views with no toolbar row still have to clear the buttons. */
-html.platform-macos .app-shell:not(:has([data-app-toolbar])) {
-  padding-top: var(--titlebar-height, 28px);
-}
-
-/* The sidebar spans the full window height, so it clears the buttons itself — it is a sibling
-   of the shell, not a child. */
+html.platform-macos .app-shell,
 html.platform-macos [data-tour="sidebar"] {
+  /*
+   * Every view is inset by the title-bar height. Unconditionally, not only when a view has a
+   * toolbar row: the previous rule used `:not(:has([data-app-toolbar]))`, and on the views
+   * without one it did not apply, so the page title ended up underneath the traffic lights
+   * with a tooltip colliding with it.
+   *
+   * The sidebar is listed too because it spans the full window height as a sibling of the
+   * shell, not a child, so it does not inherit the inset.
+   */
   padding-top: var(--titlebar-height, 28px);
 }
 
-/* A drag strip across the very top. Behind the content and non-interactive, so it cannot
-   swallow a click meant for a control. */
-html.platform-macos #root::before {
-  content: "";
-  position: fixed;
-  inset: 0 0 auto 0;
-  height: var(--titlebar-height, 28px);
-  -webkit-app-region: drag;
-  z-index: 0;
-  pointer-events: none;
-}
-
-html.platform-macos button,
-html.platform-macos input,
-html.platform-macos select,
-html.platform-macos textarea,
-html.platform-macos a {
-  -webkit-app-region: no-drag;
-}
+/*
+ * The filter row is no longer lifted into the title-bar band.
+ *
+ * Putting it there looked more native and made the whole band un-draggable: the only place a
+ * window can be grabbed was full of controls, and leaving a gap beside them would have meant
+ * guessing at their extent from CSS. A toolbar in the title bar wants a real NSToolbar; until
+ * there is one, the honest arrangement is content below the strip and the strip reserved for
+ * dragging (see TitlebarDragView).
+ *
+ * Nothing sets `-webkit-app-region` any more either — that is an Electron extension and
+ * WKWebView ignores it, so the CSS "drag strip" it used to declare never worked.
+ */
 
 /* ─── Controls ───────────────────────────────────────────────────────────────── */
 
