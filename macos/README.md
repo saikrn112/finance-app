@@ -410,3 +410,47 @@ income aqua from the validated categorical palette, into a deeper step of the sa
 Drawn per size rather than downsampled from one master, which is where small icons usually
 turn to mud: the coin gap is proportional, and **the glyphs are suppressed below 40px** so
 the small sizes are a deliberate silhouette instead of a blurred one.
+
+---
+
+## Feedback notes
+
+A sidebar button (and ⇧⌘F, and `open:feedback` on the command bus) opens a panel for notes about
+the app, with screenshots attached.
+
+Modelled on Timeslice's feedback sheet — write, edit, resolve/reopen, delete, show-done, an open
+count, stable per-note numbers, paste/drop/pick images, click a thumbnail to open it full size,
+remove one while editing.
+
+Two of Timeslice's features are deliberately absent, as asked: the platform tag and the platform
+filter. Timeslice has a Mac app and an iPhone app, so "who has to act on this" is a real question;
+here there is one app and a tag whose only value is "macOS" carries no information. Its
+device-label context is gone for the same reason — there is one device.
+
+It lives in the app's own stack (FastAPI + React) rather than in SwiftUI, so it works in the web
+app too and reuses the existing upload and migration machinery. `src/models/feedback.py` and
+`src/api/routes/feedback.py`; `frontend/src/FeedbackPanel.tsx`.
+
+- **Images are files, not rows.** A screenshot is easily hundreds of kilobytes and the database is
+  backed up to the vault in full; embedding a few would multiply every backup for data that
+  compresses badly and is never queried. Stored 0600 under the runtime directory, named from the
+  row id — never from the uploaded filename, which is user-supplied and not unique.
+- **The bytes are sniffed, not the declared type.** This endpoint writes a file and serves it back,
+  and the client controls both the content type and the extension. `imghdr` would have been the
+  obvious tool and is removed in Python 3.13 — a working import that breaks on a routine
+  interpreter bump — so the magic-byte check is explicit.
+- **Note numbers come from a persistent counter**, not `MAX(seq) + 1`. Deleting the newest note
+  lowers the maximum, so the next note would reuse a number that has already been used and "look
+  at 12" would mean different things on different days. Caught by a test written before the bug
+  was noticed.
+
+### The bug worth remembering
+
+Clicking the ✕ on a thumbnail did nothing at all: no error, no request. The remove button only
+appears while a note is being edited, and the editor commits on blur — so mousedown blurred the
+textarea, the commit ended the edit, the button unmounted, and **the click never dispatched**. It
+now handles `onMouseDown` with `preventDefault`, so focus never moves.
+
+"Attach another image" had the same hazard and cannot use the same fix — `preventDefault` on a
+file-input label stops the picker opening — so attaching is no longer gated on editing at all.
+Removing still is, so a stray click in the list cannot destroy an image.

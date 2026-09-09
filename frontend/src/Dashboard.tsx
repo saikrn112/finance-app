@@ -11,6 +11,7 @@ import { RetirementPage } from './RetirementPage'
 import { PayslipPage } from './PayslipPage'
 import { NetWorthPage } from './NetWorthPage'
 import { ImportsPanel } from './ImportsPanel'
+import { FeedbackPanel } from './FeedbackPanel'
 import { UncategorizedPage } from './UncategorizedPage'
 import { Ledger } from './Ledger'
 import { PeriodNav } from './PeriodNav'
@@ -82,6 +83,7 @@ export function Dashboard() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [activeView, setActiveView] = useState<DashboardView>(() => viewFromHash(window.location.hash))
   const [showImports, setShowImports] = useState(false)
+  const [showFeedback, setShowFeedback] = useState(false)
   const [showGettingStarted, setShowGettingStarted] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
@@ -266,6 +268,7 @@ export function Dashboard() {
       'navigate:retirement': () => navigateToView('retirement'),
       'open:settings': () => setSettingsOpen(true),
       'open:imports': () => setShowImports(true),
+      'open:feedback': () => setShowFeedback(true),
       'open:getting-started': () => setShowGettingStarted(true),
       'toggle:privacy': togglePrivacyMode,
       'toggle:dark': toggleDark,
@@ -525,6 +528,7 @@ export function Dashboard() {
         onShowUncategorized={() => navigateToView('uncategorized')}
         onShowImports={() => setShowImports(true)}
         onOpenGettingStarted={() => setShowGettingStarted(true)}
+        onOpenFeedback={() => setShowFeedback(true)}
         syncing={syncing}
         expanded={sidebarExpanded}
         onToggleExpanded={() => setSidebarExpanded(!sidebarExpanded)}
@@ -543,6 +547,7 @@ export function Dashboard() {
         onComplete={handleCompleteGettingStarted}
       />
       <ImportsPanel open={showImports} onClose={() => setShowImports(false)} onSuccess={handleDataChange} />
+      <FeedbackPanel open={showFeedback} onClose={() => setShowFeedback(false)} />
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} onDataChange={handleDataChange} />
       <div
         data-tour="tour-dashboard"

@@ -96,31 +96,7 @@ find "$BACKEND_DIR/site-packages" -name '__pycache__' -type d -prune -exec rm -r
 # shell never invokes them and they hardcode the build machine's paths.
 rm -rf "$BACKEND_DIR/site-packages/bin"
 
-log "copying application source"
-# Only the app's own Python and the *bundled public* plugin templates. The
-# private plugin directory is deliberately never bundled (plan §4); the shell
-# points FINANCE_PLUGINS_DIR at a user-chosen path.
-mkdir -p "$BACKEND_DIR/app"
-for item in src rules; do
-  cp -R "$REPO_ROOT/$item" "$BACKEND_DIR/app/$item"
-done
-# The tracked example, so src/config.py has defaults to fall back on when the user has
-# no config.yaml yet. Without it a first run gets an all-empty config, and the first
-# symptom is Google OAuth failing with no explanation. Only the *example* ships --
-# config.yaml itself holds real Plaid and Google secrets and is gitignored.
-cp "$REPO_ROOT/config.yaml.example" "$BACKEND_DIR/app/config.yaml.example"
-mkdir -p "$BACKEND_DIR/app/plugins"
-# Tracked template plugins only -- never whatever happens to be sitting in the
-# working tree, which on a real machine is the owner's private parsers.
-( cd "$REPO_ROOT" && git ls-files plugins ) | while read -r tracked; do
-  mkdir -p "$BACKEND_DIR/app/$(dirname "$tracked")"
-  cp "$REPO_ROOT/$tracked" "$BACKEND_DIR/app/$tracked"
-done
-find "$BACKEND_DIR/app" -name '__pycache__' -type d -prune -exec rm -rf {} +
-find "$BACKEND_DIR/app" -name '*.pyc' -delete
-
-cp "$MACOS_DIR/payload/bootstrap.py" "$BACKEND_DIR/bootstrap.py"
-cp "$MACOS_DIR/payload/import_smoke.py" "$BACKEND_DIR/import_smoke.py"
+bash "$MACOS_DIR/scripts/sync_app_source.sh" "$BACKEND_DIR"
 
 # ------------------------------------------------------------------ manifest --
 {

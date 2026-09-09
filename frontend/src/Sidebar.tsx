@@ -1,4 +1,4 @@
-import { RefreshCw, Settings, Moon, Sun, Eye, EyeOff, ChevronLeft, ChevronRight, FolderKanban, TrendingUp, Receipt, BookOpen, Upload, Landmark, CreditCard, PiggyBank, Tags, House } from 'lucide-react'
+import { RefreshCw, Settings, Moon, Sun, Eye, EyeOff, ChevronLeft, ChevronRight, FolderKanban, TrendingUp, Receipt, BookOpen, Upload, Landmark, CreditCard, PiggyBank, Tags, House, MessageSquare } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { SidebarAccount } from './api'
 import { useFilterStore } from './store'
@@ -30,6 +30,7 @@ interface Props {
   onShowUncategorized: () => void
   onShowImports: () => void
   onOpenGettingStarted: () => void
+  onOpenFeedback: () => void
   expanded: boolean
   onToggleExpanded: () => void
   syncing: boolean
@@ -109,6 +110,7 @@ export function Sidebar({
   onShowUncategorized,
   onShowImports,
   onOpenGettingStarted,
+  onOpenFeedback,
   expanded,
   onToggleExpanded,
   syncing,
@@ -129,6 +131,8 @@ export function Sidebar({
     { key: 'imports', label: 'Imports', icon: <Upload size={15} />, onClick: onShowImports, dataTour: 'tour-imports' },
     { key: 'theme', label: dark ? 'Light Mode' : 'Dark Mode', icon: dark ? <Sun size={15} /> : <Moon size={15} />, onClick: onToggleDark },
     { key: 'privacy', label: 'Privacy', icon: privacyMode ? <EyeOff size={15} /> : <Eye size={15} />, onClick: togglePrivacyMode, title: privacyMode ? 'Disable privacy mode' : 'Enable privacy mode' },
+    { key: 'feedback', label: 'Feedback', icon: <MessageSquare size={15} />, onClick: onOpenFeedback,
+      title: 'Notes about the app — paste screenshots here' },
     { key: 'settings', label: 'Settings', icon: <Settings size={15} />, onClick: onOpenSettings, dataTour: 'tour-settings' },
   ]
   const utilityCols = 8

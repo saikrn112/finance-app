@@ -31,7 +31,12 @@ BINARY="$(cd "$MACOS_DIR" && swift build -c "$CONFIGURATION" --show-bin-path)/$A
 if [ ! -f "$BUILD_DIR/backend/bootstrap.py" ] || [ "${FORCE_BACKEND:-0}" = "1" ]; then
   bash "$MACOS_DIR/scripts/build_backend.sh"
 else
-  log "reusing existing backend payload (FORCE_BACKEND=1 to rebuild)"
+  # The interpreter and the wheelhouse are reused -- they take minutes and rarely change.
+  # The app's own Python is re-copied unconditionally, because it changes constantly and
+  # caching it shipped stale code: a route added in the repo 404ed in the bundle with nothing
+  # to explain it, and `FORCE_BACKEND=1` was the workaround for a wrong default.
+  log "reusing the cached interpreter and wheels (FORCE_BACKEND=1 to rebuild them)"
+  bash "$MACOS_DIR/scripts/sync_app_source.sh"
 fi
 
 # ------------------------------------------------------------------- the bundle --

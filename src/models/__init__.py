@@ -1,4 +1,5 @@
 from src.models.database import Base, engine, get_db, init_db, SessionLocal
+from src.models.feedback import Feedback, FeedbackAttachment
 from src.models.transaction import (
     Transaction,
     Subscription,
@@ -26,6 +27,8 @@ from src.models.transaction import (
 )
 
 __all__ = [
+    "Feedback",
+    "FeedbackAttachment",
     "Base", "engine", "get_db", "init_db", "SessionLocal",
     "Transaction", "Subscription", "Rule", "SyncLog", "Balance",
     "AccountSnapshot", "InvestmentHoldingSnapshot", "SourceBalanceHistory", "InvestmentPeriodFact",

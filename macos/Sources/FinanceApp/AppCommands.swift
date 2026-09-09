@@ -41,6 +41,10 @@ enum AppCommands {
             items: [
                 item("Import Statements…", "open:imports", "i"),
                 item("Sync Now", "sync", "s"),
+                .separator,
+                // Shift-Cmd-F, not Cmd-F: Cmd-F is Find, and a note-taking panel stealing the
+                // find shortcut in an app full of searchable tables would be a bad trade.
+                item("Feedback…", "open:feedback", "f", [.command, .shift]),
             ]
         ),
         Menu(

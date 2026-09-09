@@ -565,7 +565,66 @@ function currencyParamRequired(currency: string) {
   return `&currency=${encodeURIComponent(currency)}`
 }
 
+
+// ─── Feedback ───────────────────────────────────────────────────────────────
+
+export interface FeedbackAttachment {
+  id: string
+  filename: string
+  byte_size: number
+  created_at: string
+}
+
+export interface FeedbackNote {
+  id: string
+  /** The number the note is *called* — short enough to say out loud, unlike the uuid id. */
+  seq: number
+  body: string
+  created_at: string
+  updated_at: string
+  resolved_at: string | null
+  attachments: FeedbackAttachment[]
+}
+
+export interface FeedbackList {
+  items: FeedbackNote[]
+  open_count: number
+}
+
 export const api = {
+  // Feedback
+  listFeedback: () => fetchJson<FeedbackList>(`/feedback/`),
+  addFeedback: (body: string) =>
+    request<FeedbackNote>(`/feedback/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    }),
+  updateFeedback: (id: string, patch: { body?: string; resolved?: boolean }) =>
+    request<FeedbackNote>(`/feedback/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+  deleteFeedback: (id: string) =>
+    request<{ status: string }>(`/feedback/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  addFeedbackAttachment: (id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<FeedbackAttachment>(
+      `/feedback/${encodeURIComponent(id)}/attachments`,
+      { method: 'POST', body: form },
+    )
+  },
+  deleteFeedbackAttachment: (attachmentId: string) =>
+    request<{ status: string }>(
+      `/feedback/attachments/${encodeURIComponent(attachmentId)}`,
+      { method: 'DELETE' },
+    ),
+  /** The image's URL. Same-origin, so the shell's token header is added automatically. */
+  feedbackAttachmentUrl: (attachmentId: string) =>
+    `${API_BASE}/feedback/attachments/${encodeURIComponent(attachmentId)}/image`,
+
   getSummary: (start: string, end: string, accounts?: Set<string> | null, category?: string | null, currency?: string | null) => fetchJson<Summary>(`/analytics/summary?start_date=${start}&end_date=${end}${sourceParam(accounts)}${catParam(category)}${currencyParam(currency)}`),
   getByCategory: (start: string, end: string, accounts?: Set<string> | null, coreExpensesOnly?: boolean, includeRent = true, currency?: string | null) => fetchJson<CategoryData[]>(`/analytics/by-category?start_date=${start}&end_date=${end}${sourceParam(accounts)}${coreExpensesParam(coreExpensesOnly, includeRent)}${currencyParam(currency)}`),
   getByMerchant: (start: string, end: string, accounts?: Set<string> | null, category?: string | null, coreExpensesOnly?: boolean, includeRent = true, currency?: string | null) => fetchJson<MerchantData[]>(`/analytics/by-merchant?start_date=${start}&end_date=${end}${sourceParam(accounts)}${catParam(category)}${coreExpensesParam(coreExpensesOnly, includeRent)}${currencyParam(currency)}`),
