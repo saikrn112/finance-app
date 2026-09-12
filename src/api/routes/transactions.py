@@ -289,7 +289,8 @@ def list_transactions(
         )
     if source:
         sources = [s.strip() for s in source.split(',')]
-        query = query.filter(Transaction.source.in_(sources))
+        from src.services.account_filters import transaction_account_filter
+        query = query.filter(transaction_account_filter(sources))
 
     if core_expenses_only:
         rows = query.order_by(desc(_effective_date_expr()), desc(Transaction.date)).all()

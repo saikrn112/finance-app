@@ -43,6 +43,17 @@ class GoogleDriveConfig(BaseModel):
     oauth_client_type: str = "desktop"
 
 
+class SplitwiseConfig(BaseModel):
+    """Optional. Absent credentials simply mean the integration is unavailable."""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+    # Splitwise creates one expense per API call; there is no documented bulk endpoint.
+    # Commits are therefore batched client-side so a large project drains over several
+    # presses rather than one long request. Tune if the real limits differ.
+    commit_batch_size: int = 4
+
+
 class Settings(BaseSettings):
     app: AppConfig = AppConfig()
     plaid: PlaidConfig = PlaidConfig()
@@ -50,6 +61,7 @@ class Settings(BaseSettings):
     server: ServerConfig = ServerConfig()
     database: DatabaseConfig = DatabaseConfig()
     google_drive: GoogleDriveConfig = GoogleDriveConfig()
+    splitwise: SplitwiseConfig = SplitwiseConfig()
 
     @staticmethod
     def _deep_update(base: dict, overrides: dict) -> dict:
@@ -100,6 +112,14 @@ class Settings(BaseSettings):
             overrides.setdefault("google_drive", {})["client_secret"] = google_client_secret
         if google_client_type := os.getenv("FINANCE_APP_GOOGLE_CLIENT_TYPE"):
             overrides.setdefault("google_drive", {})["oauth_client_type"] = google_client_type
+        if sw_client_id := os.getenv("FINANCE_APP_SPLITWISE_CLIENT_ID"):
+            overrides.setdefault("splitwise", {})["client_id"] = sw_client_id
+        if sw_client_secret := os.getenv("FINANCE_APP_SPLITWISE_CLIENT_SECRET"):
+            overrides.setdefault("splitwise", {})["client_secret"] = sw_client_secret
+        if sw_redirect := os.getenv("FINANCE_APP_SPLITWISE_REDIRECT_URI"):
+            overrides.setdefault("splitwise", {})["redirect_uri"] = sw_redirect
+        if sw_batch := os.getenv("FINANCE_APP_SPLITWISE_BATCH_SIZE"):
+            overrides.setdefault("splitwise", {})["commit_batch_size"] = int(sw_batch)
         if display_currency := os.getenv("FINANCE_APP_DISPLAY_CURRENCY"):
             overrides.setdefault("app", {})["display_currency"] = display_currency
 
@@ -118,6 +138,9 @@ class Settings(BaseSettings):
         if not instance.google_drive.redirect_uri:
             port = instance.server.port
             instance.google_drive.redirect_uri = f"http://localhost:{port}/api/settings/vault/google/callback"
+        if not instance.splitwise.redirect_uri:
+            port = instance.server.port
+            instance.splitwise.redirect_uri = f"http://localhost:{port}/api/splitwise/callback"
         return instance
 
     @property

@@ -10,7 +10,7 @@ from sqlalchemy import and_, func, literal
 
 from src.models import (
     get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot,
-    ExchangeRate, SourceBalanceHistory, InvestmentPeriodFact, AccountActivity,
+    ExchangeRate, SourceBalanceHistory, InvestmentPeriodFact, AccountActivity, ConnectedAccount,
 )
 from src.config import settings
 from src.demo import get_demo_investments, get_demo_plaid_balances, get_demo_sidebar_accounts
@@ -18,14 +18,16 @@ from src.ingestion.plaid_client import create_link_token, exchange_public_token,
 from src.ingestion.csv_importer import import_csv_file
 from src.ingestion.import_service import commit_import, preview_import
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
-from src.ingestion.plaid_activity import apply_account_activity_batch
+from src.ingestion.plaid_activity import apply_account_activity_batch, plaid_transactions_destination
 from src.ingestion.plaid_usage import (
     plaid_usage_summary, record_plaid_usage, finish_plaid_usage, upsert_product_enrollments,
 )
 from src.processing.categorizer import RuleMatcher
 from src.processing.parse_retirement import summarize_retirement_transactions
-from src.plugins.registry import get_all_sources, get_credit_card_sources, classify_source
+from src.plugins.registry import get_all_sources, get_credit_card_sources, classify_source, get_plaid_account_profile
 from src.services.exchange_rates import latest_rate_subquery, ensure_rates_fresh
+from src.services import job_lock
+from src.services.plaid_health import blocked_error, record_error, record_success
 from src.services.account_values import latest_account_values, record_account_value
 from src.api.schemas import (
     SidebarResponse,
@@ -36,6 +38,7 @@ from src.api.schemas import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
 SNAPSHOT_REFRESH_INTERVAL = timedelta(days=14)
 
 
@@ -96,6 +99,64 @@ def _account_fingerprints(accounts: list[dict]) -> list[dict[str, str]]:
     return fingerprints
 
 
+def _upsert_connected_accounts(
+    db: Session, log: SyncLog, institution: str, accounts: list[dict], synced_at: datetime,
+) -> dict[str, ConnectedAccount]:
+    """Persist the accounts within an Item and return them by Plaid account id."""
+    source_key = classify_source(institution) or institution
+    seen: set[str] = set()
+    result: dict[str, ConnectedAccount] = {}
+    for account in accounts:
+        external_id = str(account.get("account_id") or "")
+        if not external_id:
+            continue
+        seen.add(external_id)
+        row = db.query(ConnectedAccount).filter(
+            ConnectedAccount.sync_log_id == log.id,
+            ConnectedAccount.external_account_id == external_id,
+        ).first()
+        profile = get_plaid_account_profile(institution, account)
+        if row is None and account.get("mask"):
+            candidates = db.query(ConnectedAccount).filter(
+                ConnectedAccount.sync_log_id == log.id,
+                ConnectedAccount.mask == str(account["mask"]),
+                ConnectedAccount.account_type == str(account.get("type") or ""),
+                ConnectedAccount.subtype == str(account.get("subtype") or ""),
+                ConnectedAccount.external_account_id.notin_([str(a.get("account_id") or "") for a in accounts]),
+            ).all()
+            if len(candidates) == 1:
+                row = candidates[0]
+                old_id = row.external_account_id
+                for model, column in [(Transaction, Transaction.plaid_account_id),
+                                      (AccountActivity, AccountActivity.account_id),
+                                      (InvestmentHoldingSnapshot, InvestmentHoldingSnapshot.plaid_account_id)]:
+                    db.query(model).filter(column == old_id, model.source == institution).update({column: external_id}, synchronize_session=False)
+                row.external_account_id = external_id
+        if row is None:
+            row = ConnectedAccount(sync_log_id=log.id, external_account_id=external_id)
+            db.add(row)
+        row.source_key = source_key
+        row.source = institution
+        row.name = str(account.get("name") or institution)
+        row.display_name = profile["display_name"]
+        row.mask = str(account.get("mask") or "")[-4:] or None
+        row.account_type = str(account.get("type") or "") or None
+        row.subtype = str(account.get("subtype") or "") or None
+        row.account_group = profile["group"]
+        row.detail_view = profile["detail_view"] or None
+        row.currency = str(account.get("currency") or "USD")
+        row.active = True
+        row.last_seen_at = synced_at
+        db.flush()
+        result[external_id] = row
+    if seen:
+        db.query(ConnectedAccount).filter(
+            ConnectedAccount.sync_log_id == log.id,
+            ConnectedAccount.external_account_id.notin_(seen),
+        ).update({ConnectedAccount.active: False}, synchronize_session=False)
+    return result
+
+
 def _has_duplicate_connection(
     db: Session,
     institution_name: str,
@@ -119,6 +180,59 @@ def _has_duplicate_connection(
         # repair consent or add accounts without duplicating transaction IDs.
         return True
     return False
+
+
+# Plaid raises these when an Item was never linked with the investments product. They are a
+# permanent property of the Item, not a transient sync failure, so we stop asking rather
+# than resurfacing the same error on every sync.
+_NO_INVESTMENTS_ERROR_CODES = {
+    "ADDITIONAL_CONSENT_REQUIRED",
+    "INVALID_PRODUCT",
+    "PRODUCTS_NOT_SUPPORTED",
+}
+
+
+def _item_supports_investments(log: SyncLog) -> bool:
+    """Whether it is worth asking this Item for holdings.
+
+    Only returns False on positive evidence: the Item records its products and investments
+    is absent. Items linked before products were tracked record nothing, and those must
+    still be attempted or genuine brokerage accounts would silently stop syncing.
+    """
+    extra = log.extra_data or {}
+    if extra.get("investments_unavailable"):
+        return False
+    products = extra.get("plaid_products")
+    if not products:
+        return True
+    return "investments" in products
+
+
+# Plaid returns this when the Item no longer exists on its side: removed via /item/remove,
+# or access revoked at the institution. Update mode cannot repair it — the only way back is
+# to disconnect locally and link the institution again — so it gets its own state rather
+# than being reported as a sync failure the user could retry.
+ITEM_GONE_ERROR_CODE = "ITEM_NOT_FOUND"
+
+
+def _plaid_error_code(exc: Exception) -> str | None:
+    body = getattr(exc, "body", None)
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return None
+    return parsed.get("error_code") if isinstance(parsed, dict) else None
+
+
+def _mark_item_gone(db: Session, log: SyncLog, exc: Exception) -> None:
+    """Record that this Item is unusable so the UI stops offering Reconnect."""
+    extra = dict(log.extra_data or {})
+    extra["last_sync_error"] = _plaid_sync_error_payload(exc)
+    extra["item_gone"] = True
+    log.extra_data = extra
+    db.commit()
 
 
 def _plaid_sync_error_payload(exc: Exception) -> dict:
@@ -229,6 +343,9 @@ def _persist_account_snapshot(
     connection_state: str,
     current_value: float,
     synced_at: datetime,
+    account_key: str | None = None,
+    account_name: str | None = None,
+    currency: str = "USD",
 ) -> bool:
     snapshot_value = round(current_value, 2)
     source_key = classify_source(source) or source
@@ -236,8 +353,9 @@ def _persist_account_snapshot(
         db.query(SourceBalanceHistory)
         .filter(
             SourceBalanceHistory.source_key == source_key,
+            SourceBalanceHistory.account_key == account_key,
             SourceBalanceHistory.account_group == account_group,
-            SourceBalanceHistory.currency == "USD",
+            SourceBalanceHistory.currency == currency,
             SourceBalanceHistory.provenance == "account_snapshot",
         )
         .order_by(SourceBalanceHistory.date.desc(), SourceBalanceHistory.created_at.desc())
@@ -249,14 +367,17 @@ def _persist_account_snapshot(
     db.add(
         AccountSnapshot(
             source=source,
+            account_key=account_key,
+            account_name=account_name,
             account_group=account_group,
             connection_state=connection_state,
             current_value=snapshot_value,
+            currency=currency,
             synced_at=synced_at,
             created_at=synced_at,
         )
     )
-    if account_group == "investment":
+    if account_group == "investment" and account_key is None:
         _persist_investment_period_fact(
             db,
             source=source,
@@ -272,6 +393,9 @@ def _persist_account_snapshot(
         value=snapshot_value,
         observed_at=synced_at,
         provenance="account_snapshot",
+        currency=currency,
+        account_key=account_key,
+        account_name=account_name,
     )
     return True
 
@@ -318,8 +442,7 @@ def _persist_investment_period_fact(
 
 def _plaid_activity_destination(log: SyncLog) -> str:
     institution = (log.extra_data or {}).get("institution_name", "Unknown")
-    plugin = get_all_sources().get(classify_source(institution))
-    return "account_activity" if plugin and plugin.domain in {"investments", "retirement"} else "transactions"
+    return plaid_transactions_destination(institution)
 
 
 def _persist_investment_holdings_snapshot(
@@ -395,9 +518,14 @@ def _latest_investment_holdings(db: Session, currency: str = "USD") -> dict:
 
     for row in rows:
         snapshot = row.InvestmentHoldingSnapshot
+        connected = db.query(ConnectedAccount).filter(
+            ConnectedAccount.external_account_id == snapshot.plaid_account_id,
+            ConnectedAccount.source == snapshot.source,
+        ).first()
         holdings.append(
             {
                 "account_id": snapshot.plaid_account_id,
+                "account_key": connected.id if connected else None,
                 "security_id": snapshot.security_id,
                 "ticker": snapshot.ticker,
                 "name": snapshot.name,
@@ -441,6 +569,7 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
         )
         .join(lr, and_(lr.c.from_currency == SourceBalanceHistory.currency, lr.c.to_currency == literal(currency)))
         .outerjoin(InvestmentPeriodFact, and_(
+            SourceBalanceHistory.account_key.is_(None),
             InvestmentPeriodFact.source == SourceBalanceHistory.source,
             InvestmentPeriodFact.period_end == SourceBalanceHistory.date,
             InvestmentPeriodFact.currency == SourceBalanceHistory.currency,
@@ -454,6 +583,8 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
         item = {
             "synced_at": f"{row.SourceBalanceHistory.date.isoformat()}T12:00:00",
             "source": row.SourceBalanceHistory.source,
+            "account_key": row.SourceBalanceHistory.account_key,
+            "account_name": row.SourceBalanceHistory.account_name,
             "value": round(float(row.value or 0), 2),
         }
         if row.InvestmentPeriodFact is not None:
@@ -511,6 +642,8 @@ def _refresh_sidebar_snapshots(
     plaid_logs = logs if logs is not None else _connected_plaid_logs(db)
 
     for log in plaid_logs:
+        if blocked_error(log):
+            continue
         institution = (log.extra_data or {}).get("institution_name", "Unknown")
         access_token = (log.extra_data or {}).get("access_token")
         if not access_token:
@@ -524,12 +657,22 @@ def _refresh_sidebar_snapshots(
                 should_refresh = datetime.utcnow() - last_dt.replace(tzinfo=None) >= SNAPSHOT_REFRESH_INTERVAL
             except Exception:
                 should_refresh = True
+        if not db.query(ConnectedAccount.id).filter(ConnectedAccount.sync_log_id == log.id).first():
+            should_refresh = True
+        if extra_data.get("sync_stage_errors") or extra_data.get("last_sync_error"):
+            should_refresh = True
         if not should_refresh:
             continue
 
         holdings_succeeded = False
         usage_id = None
-        try:
+        holdings = None
+        if not _item_supports_investments(log):
+            # Transactions-only Item: asking for holdings just produces a recurring
+            # ADDITIONAL_CONSENT_REQUIRED error and burns an API call.
+            pass
+        else:
+          try:
             usage_id = record_plaid_usage(
                 db,
                 endpoint="investments_holdings_get",
@@ -537,19 +680,33 @@ def _refresh_sidebar_snapshots(
                 plaid_item_id=log.plaid_item_id,
                 metadata={"status": "attempted"},
             )
+            # Commit first: never hold SQLite's write lock across a network call.
+            db.commit()
             holdings = get_investment_holdings(access_token)
             finish_plaid_usage(db, usage_id, success=True)
             holdings_succeeded = True
-        except Exception as exc:
+            record_success(log, "holdings")
+            extra_data = dict(log.extra_data or {})
+          except Exception as exc:
             if usage_id:
                 finish_plaid_usage(db, usage_id, success=False, error_code=type(exc).__name__)
-            logger.exception("Plaid holdings refresh failed for %s", institution)
-            error = {"source": institution, "stage": "holdings", **_plaid_sync_error_payload(exc)}
-            if errors is not None:
-                errors.append(error)
-            extra_data["last_sync_error"] = error
-            log.extra_data = extra_data
+            payload = _plaid_sync_error_payload(exc)
             holdings = None
+            if payload.get("code") in _NO_INVESTMENTS_ERROR_CODES:
+                # Remember it so later syncs skip the call instead of re-reporting a
+                # permanent property of the Item as a sync failure.
+                logger.info("%s has no investments product; skipping holdings from now on", institution)
+                extra_data["investments_unavailable"] = payload.get("code")
+                log.extra_data = extra_data
+            else:
+                logger.exception("Plaid holdings refresh failed for %s", institution)
+                error = {"source": institution, "stage": "holdings", **payload}
+                if errors is not None:
+                    errors.append(error)
+                record_error(log, "holdings", error)
+                extra_data = dict(log.extra_data or {})
+                if blocked_error(log):
+                    continue
         if holdings:
             _persist_investment_holdings_snapshot(
                 db,
@@ -572,8 +729,12 @@ def _refresh_sidebar_snapshots(
                 plaid_item_id=log.plaid_item_id,
                 metadata={"status": "attempted"},
             )
+            # Commit first: never hold SQLite's write lock across a network call.
+            db.commit()
             accounts = get_account_balances(access_token)
             finish_plaid_usage(db, usage_id, success=True)
+            record_success(log, "balances")
+            extra_data = dict(log.extra_data or {})
         except Exception as exc:
             if usage_id:
                 finish_plaid_usage(db, usage_id, success=False, error_code=type(exc).__name__)
@@ -581,61 +742,51 @@ def _refresh_sidebar_snapshots(
             error = {"source": institution, "stage": "balances", **_plaid_sync_error_payload(exc)}
             if errors is not None:
                 errors.append(error)
-            extra_data["last_sync_error"] = error
-            log.extra_data = extra_data
+            record_error(log, "balances", error)
+            extra_data = dict(log.extra_data or {})
             accounts = []
 
         if accounts:
             extra_data["account_fingerprints"] = _account_fingerprints(accounts)
 
-        non_investment_accounts = [
-            account
-            for account in accounts
-            if account.get("current") is not None and account.get("type") != "investment"
-        ]
-        if non_investment_accounts:
-            group = _classify_sidebar_group(
-                institution,
-                ledger_balance=ledger_balances.get(institution),
-                plaid_account_types=[str(account.get("type") or "") for account in non_investment_accounts],
-            )
-            current_value = round(_signed_snapshot_value(
-                group,
-                sum(float(account["current"]) for account in non_investment_accounts if account.get("current") is not None),
-            ), 2)
-            # Known investment sources should prefer holdings value when available
-            # rather than writing an additional same-source cash snapshot that can mask brokerage value.
-            plugin = get_all_sources().get(classify_source(institution))
-            is_investment_source = bool(plugin and plugin.domain == "investments")
-            # A zero cash subaccount must not erase a brokerage valuation when the
-            # holdings endpoint failed. Positive cash-management balances remain valid.
-            should_record_cash_value = not is_investment_source or current_value != 0
-            if should_record_cash_value and (institution not in _get_investment_sources() or investment_value <= 0):
-                persisted = _persist_account_snapshot(
-                    db,
-                    source=institution,
-                    account_group=group,
-                    connection_state="plaid",
-                    current_value=current_value,
-                    synced_at=synced_at,
-                )
-                if persisted:
-                    snapshots.append({"source": institution, "group": group, "balance": current_value})
+        connected_accounts = _upsert_connected_accounts(db, log, institution, accounts, synced_at)
+        holdings_by_account: dict[str, float] = {}
+        for holding in (holdings or {}).get("holdings", []):
+            external_id = str(holding.get("account_id") or "")
+            holdings_by_account[external_id] = holdings_by_account.get(external_id, 0) + float(holding.get("value") or 0)
 
-        if investment_value:
+        for account in accounts:
+            external_id = str(account.get("account_id") or "")
+            connected = connected_accounts.get(external_id)
+            if connected is None:
+                continue
+            raw_value = holdings_by_account.get(external_id)
+            if raw_value is None:
+                raw_value = account.get("current")
+            if raw_value is None:
+                continue
+            current_value = round(_signed_snapshot_value(connected.account_group, float(raw_value)), 2)
             persisted = _persist_account_snapshot(
                 db,
                 source=institution,
-                account_group="investment",
+                account_key=connected.id,
+                account_name=connected.display_name,
+                account_group=connected.account_group,
                 connection_state="plaid",
-                current_value=investment_value,
+                current_value=current_value,
+                currency=connected.currency,
                 synced_at=synced_at,
             )
             if persisted:
-                snapshots.append({"source": institution, "group": "investment", "balance": investment_value})
+                snapshots.append({
+                    "source": connected.display_name,
+                    "account_key": connected.id,
+                    "group": connected.account_group,
+                    "balance": current_value,
+                })
 
         plugin = get_all_sources().get(classify_source(institution))
-        if holdings_succeeded or not (plugin and plugin.domain == "investments"):
+        if accounts and (holdings_succeeded or not _item_supports_investments(log)):
             extra_data["last_snapshot_refresh_at"] = datetime.utcnow().isoformat()
             log.extra_data = extra_data
 
@@ -652,11 +803,17 @@ def _refresh_investment_holdings(db: Session, logs: list[SyncLog] | None = None)
     all_accounts: list[dict] = []
 
     for log in plaid_logs:
+        if blocked_error(log):
+            continue
         institution = (log.extra_data or {}).get("institution_name", "Unknown")
         access_token = (log.extra_data or {}).get("access_token")
         if not access_token:
             continue
+        if not _item_supports_investments(log):
+            continue
         try:
+            # Commit first: never hold SQLite's write lock across a network call.
+            db.commit()
             data = get_investment_holdings(access_token)
             record_plaid_usage(
                 db,
@@ -729,6 +886,8 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
     # Merge aliases into one canonical valuation row.
     merged_values: dict[str, "SourceBalanceHistory"] = {}
     for source, value_row in latest_values.items():
+        if value_row.account_key:
+            continue
         canon = _canonical(source)
         existing = merged_values.get(canon)
         if existing is None or (value_row.date, value_row.created_at) > (existing.date, existing.created_at):
@@ -805,6 +964,32 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
             }
         )
 
+    connected = db.query(ConnectedAccount).join(SyncLog, SyncLog.id == ConnectedAccount.sync_log_id).filter(
+        ConnectedAccount.active.is_(True), SyncLog.status == "connected",
+    ).all()
+    represented = {classify_source(account.source) for account in connected}
+    rows = [row for row in rows if row["source_key"] not in represented]
+    for account in connected:
+        value = db.query(
+            SourceBalanceHistory, (SourceBalanceHistory._value * lr.c.rate).label("converted"),
+        ).join(lr, and_(lr.c.from_currency == SourceBalanceHistory.currency, lr.c.to_currency == literal(target_currency))).filter(
+            SourceBalanceHistory.account_key == account.id,
+        ).order_by(SourceBalanceHistory.date.desc(), SourceBalanceHistory.created_at.desc()).first()
+        ledger = db.query(func.sum(Transaction._amount * lr.c.rate)).join(
+            lr, and_(lr.c.from_currency == Transaction.currency, lr.c.to_currency == literal(target_currency)),
+        ).filter(Transaction.plaid_account_id == account.external_account_id).scalar()
+        plugin = all_plugins.get(account.source_key)
+        balance = round(float(value.converted), 2) if value else None
+        rows.append({
+            "source": account.display_name, "source_key": account.source_key,
+            "account_key": account.id, "provider_source": account.source,
+            "group": account.account_group, "connection_state": "plaid",
+            "balance": balance, "snapshot_balance": balance,
+            "ledger_balance": round(float(ledger), 2) if ledger is not None else None,
+            "currency": target_currency, "filter_source": f"account:{account.id}",
+            "last_synced": account.last_seen_at.isoformat(),
+            "icon_url": plugin.icon_url if plugin else "",
+        })
     rows.sort(key=lambda row: (group_order.get(row["group"], 99), row["source"]))
     return rows
 
@@ -855,7 +1040,29 @@ def get_link_token(products: str = "transactions", account_id: str | None = None
             existing_products = (log.extra_data or {}).get("plaid_products")
             if existing_products:
                 requested_products = ",".join(existing_products)
-        token = create_link_token(products=requested_products.split(","), access_token=access_token)
+            if (blocked_error(log) or {}).get("action") == "relink":
+                access_token = None
+        try:
+            token = create_link_token(products=requested_products.split(","), access_token=access_token)
+        except Exception as exc:
+            code = _plaid_error_code(exc)
+            if code == ITEM_GONE_ERROR_CODE and account_id:
+                # Nothing to reconnect to. Flag the row so the UI offers the right action.
+                _mark_item_gone(db, log, exc)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This connection no longer exists at Plaid, so it cannot be "
+                        "reconnected. Remove it here and add the institution again."
+                    ),
+                ) from exc
+            if code:
+                payload = _plaid_sync_error_payload(exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"{code}: {payload.get('display_message') or payload.get('message')}",
+                ) from exc
+            raise
         return {"link_token": token}
     except HTTPException:
         raise
@@ -877,8 +1084,6 @@ def exchange_token(
     if settings.is_demo:
         return {"status": "connected", "item_id": f"demo-{institution_name or 'plaid'}"}
     try:
-        access_token, item_id, _ = exchange_public_token(public_token)
-
         try:
             fingerprints = json.loads(account_fingerprints)
             if not isinstance(fingerprints, list):
@@ -886,21 +1091,70 @@ def exchange_token(
         except (TypeError, ValueError):
             fingerprints = []
 
+        if account_id:
+            existing_log = db.query(SyncLog).filter(
+                SyncLog.id == account_id,
+                SyncLog.source == "plaid",
+                SyncLog.status == "connected",
+            ).first()
+            if not existing_log:
+                raise HTTPException(status_code=404, detail="Plaid connection not found")
+            extra = dict(existing_log.extra_data or {})
+            if (blocked_error(existing_log) or {}).get("action") == "relink":
+                if not institution_name or classify_source(institution_name) != classify_source(extra.get("institution_name", "")):
+                    raise HTTPException(400, "Select the same institution when replacing this connection")
+                replacement_token, replacement_id, _ = exchange_public_token(public_token)
+                extra["access_token"] = replacement_token
+                existing_log.plaid_item_id = replacement_id
+                existing_log.plaid_cursor = None
+                extra.pop("item_gone", None)
+                extra.pop("last_investment_transactions_sync_at", None)
+                extra.pop("investments_unavailable", None)
+                record_plaid_usage(db, endpoint="item_public_token_exchange", institution=institution_name, plaid_item_id=replacement_id)
+            if institution_name:
+                extra["institution_name"] = institution_name
+            if institution_id:
+                extra["institution_id"] = institution_id
+            if fingerprints:
+                extra["account_fingerprints"] = fingerprints
+            if products and not extra.get("plaid_products"):
+                extra["plaid_products"] = [item for item in products.split(",") if item]
+            extra.pop("last_snapshot_refresh_at", None)
+            extra.pop("last_sync_error", None)
+            extra.pop("sync_stage_errors", None)
+            extra.pop("retry_after", None)
+            extra.pop("retry_count", None)
+            existing_log.extra_data = extra
+            db.commit()
+            return {"status": "connected", "item_id": existing_log.plaid_item_id}
+
+        access_token, item_id, _ = exchange_public_token(public_token)
+
         if not account_id and _has_duplicate_connection(
             db,
             institution_name=institution_name,
             institution_id=institution_id,
             fingerprints=fingerprints,
         ):
-            remove_item(access_token)
+            # Plaid can hand back the *same* Item for a re-link of an institution that is
+            # already connected. Removing it then destroys the live connection and leaves the
+            # stored token pointing at nothing, which surfaces later as ITEM_NOT_FOUND on a
+            # row still marked "connected". Only revoke a genuinely new Item.
+            already_known = bool(item_id) and db.query(SyncLog).filter(
+                SyncLog.source == "plaid",
+                SyncLog.plaid_item_id == item_id,
+            ).first() is not None
+            if not already_known:
+                try:
+                    remove_item(access_token, db=db, institution=institution_name)
+                except Exception:
+                    logger.warning("Could not revoke duplicate Plaid Item", exc_info=True)
             raise HTTPException(
                 status_code=409,
                 detail=f"{institution_name or 'This institution'} is already connected. Use Reconnect to update its accounts.",
             )
 
         existing_log = None
-        if account_id:
-            existing_log = db.query(SyncLog).filter(SyncLog.id == account_id, SyncLog.source == "plaid").first()
         if not existing_log and item_id:
             existing_log = db.query(SyncLog).filter(SyncLog.plaid_item_id == item_id, SyncLog.source == "plaid").order_by(SyncLog.created_at.desc()).first()
 
@@ -961,6 +1215,17 @@ def sync_plaid(db: Session = Depends(get_db)):
     """Sync transactions from all connected Plaid accounts."""
     if settings.is_demo:
         return {"status": "demo", "added": 0, "message": "Demo data is pre-seeded and isolated from live accounts"}
+    with job_lock.try_acquire("plaid sync") as acquired:
+        if not acquired:
+            return {
+                "status": "already_running",
+                "added": 0,
+                "message": f"Busy: {job_lock.current_holder() or 'another job'} is running",
+            }
+        return _sync_plaid_locked(db)
+
+
+def _sync_plaid_locked(db: Session):
     logs = _connected_plaid_logs(db)
     
     if not logs:
@@ -981,6 +1246,10 @@ def sync_plaid(db: Session = Depends(get_db)):
     sync_errors: list[dict] = []
     
     for log in logs:
+        blocked = blocked_error(log)
+        if blocked:
+            sync_errors.append({"source": (log.extra_data or {}).get("institution_name", "Unknown"), **blocked})
+            continue
         access_token = log.extra_data.get("access_token") if log.extra_data else None
         if not access_token:
             continue
@@ -1000,6 +1269,11 @@ def sync_plaid(db: Session = Depends(get_db)):
           has_more = True
           destination = _plaid_activity_destination(log)
           while has_more:
+              # Release the write lock before every network round-trip. Usage telemetry and
+              # the previous page's rows leave this session dirty, and holding SQLite's
+              # single writer across a multi-second Plaid call is what made concurrent
+              # requests fail with "database is locked".
+              db.commit()
               result = sync_transactions(access_token, cursor)
               record_plaid_usage(
                   db,
@@ -1033,11 +1307,12 @@ def sync_plaid(db: Session = Depends(get_db)):
               db.commit()
           extra_data = dict(log.extra_data or {})
           plugin = get_all_sources().get(classify_source(institution))
-          if plugin and plugin.domain == "investments":
+          if plugin and plugin.domain == "investments" and _item_supports_investments(log):
               previous_investment_sync = extra_data.get("last_investment_transactions_sync_at")
               investment_start = date(2010, 1, 1)
               if previous_investment_sync:
                   investment_start = datetime.fromisoformat(previous_investment_sync.replace("Z", "+00:00")).date() - timedelta(days=7)
+              db.commit()
               investment_transactions = get_investment_transactions(
                   access_token,
                   start_date=investment_start,
@@ -1063,8 +1338,8 @@ def sync_plaid(db: Session = Depends(get_db)):
           extra_data["last_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_counts"] = account_counts
           extra_data["activity_destination"] = destination
-          extra_data.pop("last_sync_error", None)
           log.extra_data = extra_data
+          record_success(log, "transactions")
           log.plaid_cursor = cursor
           log.record_count = (log.record_count or 0) + account_counts["added"]
           log.status = "connected"
@@ -1074,8 +1349,8 @@ def sync_plaid(db: Session = Depends(get_db)):
           logger.exception("Plaid sync failed for %s", institution)
           db.rollback()
           extra_data = dict(log.extra_data or {})
-          extra_data["last_sync_error"] = _plaid_sync_error_payload(exc)
-          log.extra_data = extra_data
+          record_error(log, "transactions", _plaid_sync_error_payload(exc))
+          extra_data = dict(log.extra_data or {})
           db.commit()
           sync_errors.append({"source": institution, "stage": "transactions", **extra_data["last_sync_error"]})
           account_results.append({
@@ -1156,6 +1431,23 @@ def get_investment_activity(
 ):
     ensure_rates_fresh(db)
     lr = latest_rate_subquery(db)
+    account = db.get(ConnectedAccount, source)
+    if account:
+        activity_rows = db.query(AccountActivity, (AccountActivity._amount * lr.c.rate).label("converted")).join(
+            lr, and_(lr.c.from_currency == AccountActivity.currency, lr.c.to_currency == literal(currency)),
+        ).filter(AccountActivity.account_id == account.external_account_id).all()
+        ledger_rows = db.query(Transaction, (Transaction._amount * lr.c.rate).label("converted")).join(
+            lr, and_(lr.c.from_currency == Transaction.currency, lr.c.to_currency == literal(currency)),
+        ).filter(Transaction.plaid_account_id == account.external_account_id).all()
+        activity = [{"id": r.AccountActivity.id, "date": r.AccountActivity.date.isoformat(),
+                     "description": r.AccountActivity.description, "merchant": r.AccountActivity.merchant,
+                     "type": r.AccountActivity.activity_type, "amount": round(float(r.converted), 2),
+                     "pending": r.AccountActivity.pending} for r in activity_rows]
+        activity.extend({"id": r.Transaction.id, "date": r.Transaction.date.isoformat(),
+                         "description": r.Transaction.merchant_raw, "merchant": r.Transaction.merchant_clean,
+                         "type": "other", "amount": round(float(r.converted), 2),
+                         "pending": r.Transaction.pending} for r in ledger_rows)
+        return {"currency": currency, "activity": sorted(activity, key=lambda r: (r["date"], r["id"]), reverse=True)}
     rates = db.query(lr.c.from_currency, lr.c.rate).filter(lr.c.to_currency == currency).all()
     rate_map = {row[0]: float(row[1]) for row in rates}
     source_key = classify_source(source) or source
@@ -1233,6 +1525,8 @@ def plaid_balances(db: Session = Depends(get_db), all: bool = False, currency: s
     logs = db.query(SyncLog).filter(SyncLog.source == "plaid", SyncLog.status == "connected").all()
     to_fetch = []
     for log in logs:
+        if blocked_error(log):
+            continue
         institution = (log.extra_data or {}).get("institution_name", "Unknown")
         if institution in inv_sources:
             continue

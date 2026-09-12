@@ -268,5 +268,23 @@ def backfill_audit_facts_command(apply_changes: bool):
         db.close()
 
 
+@cli.command("reroute-plaid-transactions")
+@click.option("--apply", "apply_changes", is_flag=True, help="Move rows after preview")
+def reroute_plaid_transactions_command(apply_changes: bool):
+    """Apply plugin routing policy to previously stored Plaid account activity."""
+    from src.models import SessionLocal, init_db
+    from src.ingestion.plaid_activity import reroute_account_activity_to_transactions
+
+    init_db()
+    db = SessionLocal()
+    try:
+        result = reroute_account_activity_to_transactions(db, apply=apply_changes)
+        click.echo(f"{'Applied' if apply_changes else 'Preview'}: {result}")
+        if not apply_changes:
+            click.echo("Dry run only. Re-run with --apply after backing up the database.")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     cli()

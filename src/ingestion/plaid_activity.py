@@ -3,10 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from src.models import AccountActivity, Transaction, TransactionProject
 from src.plugins.registry import classify_source, get_all_sources
+
+
+def plaid_transactions_destination(source: str) -> str:
+    plugin = get_all_sources().get(classify_source(source))
+    configured = getattr(plugin, "plaid_transactions_destination", None) if plugin else None
+    if configured in {"transactions", "account_activity"}:
+        return configured
+    return "account_activity" if plugin and plugin.domain in {"investments", "retirement"} else "transactions"
 
 
 @dataclass
@@ -93,7 +102,7 @@ def migrate_investment_transactions(db: Session) -> int:
     investment_sources = {
         alias
         for plugin in get_all_sources().values()
-        if plugin.domain in {"investments", "retirement"}
+        if plaid_transactions_destination(plugin.label) == "account_activity"
         for alias in {plugin.label, *plugin.source_aliases}
     }
     if not investment_sources:
@@ -128,3 +137,59 @@ def migrate_investment_transactions(db: Session) -> int:
     if moved:
         db.commit()
     return moved
+
+
+def reroute_account_activity_to_transactions(db: Session, *, apply: bool = False) -> dict[str, int]:
+    """Move Plaid Transactions rows to the ledger when plugin policy opts in."""
+    from src.ingestion.plaid_sync import apply_plaid_sync_batch
+    from src.processing.categorizer import RuleMatcher
+
+    ledger_sources = {
+        alias
+        for plugin in get_all_sources().values()
+        if getattr(plugin, "plaid_transactions_destination", None) == "transactions"
+        for alias in {plugin.label, *plugin.source_aliases}
+    }
+    rows = db.query(AccountActivity).filter(AccountActivity.source.in_(ledger_sources)).all() if ledger_sources else []
+    if not apply:
+        return {"candidates": len(rows), "moved": 0, "recategorized": 0}
+
+    matcher = RuleMatcher()
+    moved = 0
+    for row in rows:
+        raw = row.raw_data or {}
+        data = {
+            "source_id": row.source_id,
+            "date": row.date,
+            "authorized_date": row.authorized_date,
+            "amount": float(row._amount or 0),
+            "merchant_raw": row.description,
+            "merchant_clean": row.merchant or row.description,
+            "account_last4": row.account_last4,
+            "plaid_account_id": row.account_id,
+            "original_description": row.description,
+            "payment_channel": raw.get("payment_channel"),
+            "pending_transaction_id": row.pending_activity_id,
+            "pending": row.pending,
+            "currency": row.currency,
+            "plaid_category": raw.get("plaid_category"),
+        }
+        apply_plaid_sync_batch(db, institution=row.source, added=[data], modified=[], removed=[], matcher=matcher)
+        db.delete(row)
+        moved += 1
+    db.flush()
+    recategorized = 0
+    for txn in db.query(Transaction).filter(
+        Transaction.origin == "plaid",
+        Transaction.source.in_(ledger_sources),
+        or_(Transaction.category_source.is_(None), Transaction.category_source != "user"),
+    ).all():
+        result = matcher.match(txn.merchant_raw)
+        if result and (txn.category != result.category or (result.merchant_clean and txn.merchant_clean != result.merchant_clean)):
+            txn.category = result.category
+            txn.category_source = result.source
+            if result.merchant_clean:
+                txn.merchant_clean = result.merchant_clean
+            recategorized += 1
+    db.commit()
+    return {"candidates": len(rows), "moved": moved, "recategorized": recategorized}

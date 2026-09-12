@@ -1,9 +1,13 @@
 """Categorization engine: Rules + Gemini LLM fallback."""
+import logging
 import re
 import yaml
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class CategoryResult:
@@ -24,15 +28,38 @@ class RuleMatcher:
         env_plugins_dir = os.environ.get("FINANCE_PLUGINS_DIR")
         plugin_rules_path = Path(env_plugins_dir) / "rules" / "categories.yaml" if env_plugins_dir else Path("plugins/rules/categories.yaml")
         effective_path = plugin_rules_path if plugin_rules_path.exists() else rules_path
-        if effective_path.exists():
+        if not effective_path.exists():
+            logger.warning("No categorization rules found at %s; everything will be Uncategorized", effective_path)
+            return
+
+        # Rules are partly machine-written from merchant text by the "learn this merchant"
+        # flow, so a single malformed pattern is plausible. Skip the bad rule rather than
+        # letting it raise out of __init__, which would silently disable *all*
+        # categorization and quietly file every synced transaction as Uncategorized.
+        try:
             with open(effective_path) as f:
-                data = yaml.safe_load(f)
-                for rule in data.get("rules", []):
-                    self.rules.append({
-                        "pattern": re.compile(rule["pattern"], re.IGNORECASE),
-                        "category": rule["category"],
-                        "merchant_clean": rule.get("merchant_clean"),
-                    })
+                data = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError):
+            logger.error("Could not read %s; categorization disabled", effective_path, exc_info=True)
+            return
+
+        for index, rule in enumerate(data.get("rules") or []):
+            try:
+                compiled = re.compile(rule["pattern"], re.IGNORECASE)
+            except (re.error, KeyError, TypeError):
+                logger.warning("Skipping unusable rule #%d in %s", index, effective_path, exc_info=True)
+                continue
+            if not rule.get("category"):
+                logger.warning("Skipping rule #%d in %s: no category", index, effective_path)
+                continue
+            self.rules.append({
+                "pattern": compiled,
+                "category": rule["category"],
+                "merchant_clean": rule.get("merchant_clean"),
+            })
+
+        if not self.rules:
+            logger.error("Loaded 0 categorization rules from %s", effective_path)
     
     def match(self, merchant_raw: str) -> Optional[CategoryResult]:
         """Try to match merchant against rules."""

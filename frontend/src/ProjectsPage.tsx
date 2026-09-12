@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useProjects, useProject } from './hooks'
-import { api, ApiError, type Contact, type Transaction, type ProjectDetail as ProjectDetailType, type ProjectSummary } from './api'
+import { api, ApiError, type Contact, type MemberTotal, type SplitwiseCommitSummary, type Transaction, type ProjectDetail as ProjectDetailType, type ProjectSummary } from './api'
 import { useFilterStore } from './store'
 import { formatCount, formatCurrency } from './privacy'
 import { Ledger } from './Ledger'
 import { getCategoryColor, getCategoryColorFaded } from './colors'
+import { sortByRecentActivity } from './projectSort'
 
 const COLORS = [
   '#22c55e', '#3b82f6', '#eab308', '#f97316', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4',
@@ -39,8 +40,14 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const qc = useQueryClient()
 
-  const active = useMemo(() => projects?.filter(p => p.status === 'active') || [], [projects])
-  const completed = useMemo(() => projects?.filter(p => p.status !== 'active') || [], [projects])
+  const active = useMemo(
+    () => sortByRecentActivity(projects?.filter(p => p.status === 'active') || []),
+    [projects],
+  )
+  const completed = useMemo(
+    () => sortByRecentActivity(projects?.filter(p => p.status !== 'active') || []),
+    [projects],
+  )
 
   useEffect(() => {
     if (!projects || projects.length === 0) {
@@ -271,11 +278,19 @@ function ProjectDetail({
   return (
     <div>
       <div className="flex items-center gap-3 mb-4">
-        <span className="w-4 h-4 rounded-full" style={{ backgroundColor: p.color }} />
+        <span className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
         <h2 className="text-xl font-bold">{p.name}</h2>
         <span className={`text-xs px-2 py-0.5 rounded-full ${p.status === 'active' ? 'app-badge-positive' : 'app-badge-neutral'}`}>
           {p.status}
         </span>
+        {/* Delete lives in Project Settings, deliberately far from this button. */}
+        <button
+          onClick={onToggleStatus}
+          disabled={busy !== null}
+          className="app-btn-secondary ml-auto shrink-0 text-xs disabled:opacity-60"
+        >
+          {busy === 'toggle' ? 'Updating…' : p.status === 'active' ? 'Mark Complete' : 'Reactivate'}
+        </button>
       </div>
 
       <div className="app-surface rounded-lg p-4 mb-5">
@@ -356,10 +371,15 @@ function ProjectDetail({
         <div className="mt-4 border-t border-slate-200/30 pt-3">
           <MembersSection projectId={p.id} members={p.members || []} />
         </div>
+        <div className="mt-4 border-t border-slate-200/30 pt-3">
+          <DeleteProjectSection name={p.name} busy={busy === 'delete'} onDelete={onDelete} />
+        </div>
       </div>
 
       {/* Member-wise split summary */}
-      <MemberSplitSummary transactions={p.transactions} members={p.members || []} fmt={fmt} fmtSigned={fmtSigned} />
+      <SplitwiseCommitPanel projectId={p.id} />
+
+      <MemberSplitSummary transactions={p.transactions} members={p.members || []} memberTotals={p.member_totals} fmt={fmt} fmtSigned={fmtSigned} />
 
       {/* Stats */}
       <div className={`grid gap-3 mb-5 ${p.budget ? 'grid-cols-5' : 'grid-cols-3'}`}>
@@ -441,13 +461,72 @@ function ProjectDetail({
         />
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-2">
-        <button onClick={onToggleStatus} disabled={busy !== null} className="app-btn-secondary text-xs disabled:opacity-60">
-          {busy === 'toggle' ? 'Updating…' : p.status === 'active' ? 'Mark Complete' : 'Reactivate'}
+
+    </div>
+  )
+}
+
+
+function DeleteProjectSection({ name, busy, onDelete }: { name: string; busy: boolean; onDelete: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [typed, setTyped] = useState('')
+  // Deleting a project also drops its transaction links, and there is no undo. Requiring the
+  // name to be typed makes it impossible to do by accident.
+  const confirmed = typed.trim() === name
+
+  if (!open) {
+    return (
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold" style={{ color: 'var(--color-negative)' }}>Delete project</div>
+          <div className="text-xs text-slate-500">
+            Removes the project and its transaction assignments. The transactions themselves stay
+            in the ledger. This cannot be undone.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => { setOpen(true); setTyped('') }}
+          className="app-btn-secondary shrink-0 text-xs"
+        >
+          Delete…
         </button>
-        <button onClick={onDelete} disabled={busy !== null} className="app-badge-negative text-xs px-3 py-1.5 rounded disabled:opacity-60">
-          {busy === 'delete' ? 'Deleting…' : 'Delete'}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div className="text-xs font-semibold mb-2" style={{ color: 'var(--color-negative)' }}>
+        Type <span className="font-mono">{name}</span> to confirm
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          placeholder={name}
+          autoFocus
+          className="app-input min-w-0 flex-1 rounded px-3 py-2 text-sm"
+        />
+        <button
+          type="button"
+          onClick={() => {
+            // Last gate before an irreversible delete, on top of the typed name.
+            if (!window.confirm(`Delete "${name}"? Its transaction assignments and splits go with it. This cannot be undone.`)) return
+            onDelete()
+          }}
+          disabled={!confirmed || busy}
+          className="app-badge-negative shrink-0 rounded px-3 py-1.5 text-xs disabled:opacity-40"
+        >
+          {busy ? 'Deleting…' : 'Delete project'}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setTyped('') }}
+          disabled={busy}
+          className="app-btn-secondary shrink-0 text-xs"
+        >
+          Cancel
         </button>
       </div>
     </div>
@@ -648,28 +727,38 @@ function MembersSection({ projectId, members }: { projectId: string; members: Co
 function MemberSplitSummary({
   transactions,
   members,
+  memberTotals,
   fmt,
   fmtSigned,
 }: {
   transactions: Transaction[]
   members: Contact[]
+  memberTotals?: MemberTotal[]
   fmt: (n: number) => string
   fmtSigned: (n: number) => string
 }) {
   if (!members || members.length === 0) return null
 
   const totals = useMemo(() => {
+    // Prefer the server's figures: they are the same numbers a Splitwise commit will use,
+    // so the UI can't drift from what actually gets pushed. The local pass below is a
+    // fallback for a response that predates member_totals.
+    if (memberTotals && memberTotals.length > 0) {
+      return memberTotals.filter(m => m.expenditure > 0 || m.income > 0)
+    }
     const map = new Map<string, { expenditure: number; income: number }>()
     for (const m of members) map.set(m.id, { expenditure: 0, income: 0 })
     for (const txn of transactions) {
       const splits = txn.splits || []
       if (splits.length === 0) continue
-      const perPerson = Math.abs(txn.amount) / splits.length
+      const equalShare = Math.abs(txn.amount) / splits.length
       for (const s of splits) {
         const total = map.get(s.id)
         if (!total) continue
-        if (txn.amount < 0) total.expenditure += perPerson
-        else if (txn.amount > 0) total.income += perPerson
+        // An explicit share wins; otherwise the transaction divides equally.
+        const share = s.share_amount == null ? equalShare : Math.abs(s.share_amount)
+        if (txn.amount < 0) total.expenditure += share
+        else if (txn.amount > 0) total.income += share
       }
     }
     return members
@@ -678,7 +767,7 @@ function MemberSplitSummary({
         return { ...m, ...total, net: total.income - total.expenditure }
       })
       .filter(m => m.expenditure > 0 || m.income > 0)
-  }, [transactions, members])
+  }, [transactions, members, memberTotals])
 
   if (totals.length === 0) return null
 
@@ -712,6 +801,98 @@ function MemberSplitSummary({
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+function SplitwiseCommitPanel({ projectId }: { projectId: string }) {
+  const [summary, setSummary] = useState<SplitwiseCommitSummary | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [lastRun, setLastRun] = useState<string | null>(null)
+
+  const load = () => {
+    api.previewSplitwiseCommit(projectId).then(setSummary).catch(() => setSummary(null))
+  }
+
+  useEffect(load, [projectId])
+
+  const commit = async (amend: boolean) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api.commitSplitwiseProject(projectId, amend)
+      setSummary(result)
+      const pushed = (result.created ?? 0) + (result.updated ?? 0)
+      setLastRun(
+        result.done
+          ? `All ${result.committed} committed.`
+          : `Pushed ${pushed}; ${result.pending} still queued — press again.`,
+      )
+    } catch (err: any) {
+      setError(err?.message || 'Commit failed')
+      load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Hidden entirely unless Splitwise is connected, so the integration stays optional.
+  if (!summary || summary.connected === false) return null
+
+  const blocked = summary.unmapped_members.length > 0
+  const nothingToDo = summary.pending === 0 && summary.failed.length === 0
+
+  return (
+    <div className="app-surface rounded-lg p-4 mb-5">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold">Splitwise</h3>
+        <span className="text-xs text-slate-500">
+          {summary.committed} of {summary.transactions} committed
+        </span>
+      </div>
+
+      {blocked ? (
+        <div className="mb-2 rounded border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-xs">
+          Link these people in Settings first: <strong>{summary.unmapped_members.join(', ')}</strong>
+        </div>
+      ) : null}
+
+      {summary.failed.length > 0 ? (
+        <div className="mb-2 rounded border border-rose-400/50 bg-rose-500/10 px-3 py-2 text-xs">
+          {summary.failed.length} failed. {summary.failed[0].error}
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy || blocked || nothingToDo}
+          onClick={() => void commit(false)}
+          className="app-btn-primary text-xs disabled:opacity-50"
+          title={
+            blocked ? 'Link everyone to Splitwise first'
+              : nothingToDo ? 'Nothing pending'
+              : `Commits up to ${summary.batch_size} at a time`
+          }
+        >
+          {busy ? 'Committing…' : nothingToDo ? 'Up to date' : `Commit ${Math.min(summary.pending, summary.batch_size)} of ${summary.pending}`}
+        </button>
+        {summary.committed > 0 ? (
+          <button
+            type="button"
+            disabled={busy || blocked}
+            onClick={() => void commit(true)}
+            className="app-btn-secondary text-xs disabled:opacity-50"
+            title="Re-push transactions whose shares changed since they were committed"
+          >
+            Amend changed
+          </button>
+        ) : null}
+        {lastRun ? <span className="text-[11px] text-slate-500">{lastRun}</span> : null}
+      </div>
+
+      {error ? <div className="mt-2 text-xs" style={{ color: 'var(--color-negative)' }}>{error}</div> : null}
     </div>
   )
 }

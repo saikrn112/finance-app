@@ -21,12 +21,18 @@ def record_account_value(
     observed_at: date | datetime,
     currency: str = "USD",
     provenance: str,
+    account_key: str | None = None,
+    account_name: str | None = None,
 ) -> SourceBalanceHistory:
     """Upsert one observed account value. No dates are synthesized or carried forward here."""
     observed_day = observed_at.date() if isinstance(observed_at, datetime) else observed_at
     row = (
         db.query(SourceBalanceHistory)
-        .filter(SourceBalanceHistory.source == source, SourceBalanceHistory.date == observed_day)
+        .filter(
+            SourceBalanceHistory.source == source,
+            SourceBalanceHistory.date == observed_day,
+            SourceBalanceHistory.account_key == account_key,
+        )
         .first()
     )
     created_at = observed_at if isinstance(observed_at, datetime) else datetime.combine(observed_day, datetime.min.time())
@@ -34,6 +40,8 @@ def record_account_value(
         row = SourceBalanceHistory(source=source, date=observed_day)
         db.add(row)
     row.source_key = canonical_source_key(source)
+    row.account_key = account_key
+    row.account_name = account_name
     row.account_group = account_group
     row.value = round(value, 2)
     row.currency = currency

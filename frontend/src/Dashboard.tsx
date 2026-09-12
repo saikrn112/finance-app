@@ -133,7 +133,7 @@ export function Dashboard() {
     () =>
       sidebarAccounts
         .filter((account) => account.balance !== null && account.ledger_balance === null)
-        .map((account) => ({ source: account.source, source_key: account.source_key, value: account.balance, group: account.group })),
+        .map((account) => ({ source: account.source, source_key: account.account_key || account.source_key, value: account.balance, group: account.group })),
     [sidebarAccounts],
   )
 

@@ -1,8 +1,11 @@
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
+from src.ingestion import plaid_activity
+from src.ingestion.plaid_activity import plaid_transactions_destination, reroute_account_activity_to_transactions
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
-from src.models import Transaction
+from src.models import AccountActivity, Transaction
 from src.processing.overlap_diagnostics import audit_source_overlaps
 
 
@@ -46,6 +49,42 @@ def test_apply_plaid_sync_batch_updates_modified_transactions(db_session):
     assert txn.date == date(2026, 3, 1)
     assert float(txn._amount) == -23.99
     assert txn.account_last4 == "1234"
+
+
+def test_plaid_destination_supports_explicit_policy_and_legacy_plugins(monkeypatch):
+    plugins = {
+        "cash": SimpleNamespace(label="Example Cash", domain="investments", plaid_transactions_destination="transactions"),
+        "legacy": SimpleNamespace(label="Example Brokerage", domain="investments"),
+    }
+    monkeypatch.setattr(plaid_activity, "classify_source", lambda source: "cash" if source == "Example Cash" else "legacy")
+    monkeypatch.setattr(plaid_activity, "get_all_sources", lambda: plugins)
+
+    assert plaid_transactions_destination("Example Cash") == "transactions"
+    assert plaid_transactions_destination("Example Brokerage") == "account_activity"
+
+
+def test_reroute_account_activity_moves_only_opted_in_sources(db_session, monkeypatch):
+    plugin = SimpleNamespace(
+        label="Example Cash", source_aliases=[], domain="investments",
+        plaid_transactions_destination="transactions",
+    )
+    monkeypatch.setattr(plaid_activity, "classify_source", lambda _source: "cash")
+    monkeypatch.setattr(plaid_activity, "get_all_sources", lambda: {"cash": plugin})
+    db_session.add(AccountActivity(
+        source_id="cash-transfer", source_key="cash", source="Example Cash",
+        date=date(2026, 9, 7), amount=Decimal("-100.00"),
+        description="Transfer to savings", merchant="Transfer to savings",
+        activity_type="transfer", currency="USD", pending=False,
+        raw_data={"plaid_category": "TRANSFER_OUT"},
+    ))
+    db_session.commit()
+
+    assert reroute_account_activity_to_transactions(db_session) == {"candidates": 1, "moved": 0, "recategorized": 0}
+    result = reroute_account_activity_to_transactions(db_session, apply=True)
+    assert result["candidates"] == 1
+    assert result["moved"] == 1
+    assert db_session.query(AccountActivity).count() == 0
+    assert db_session.query(Transaction).filter(Transaction.source_id == "cash-transfer").one().origin == "plaid"
 
 
 def test_apply_plaid_sync_batch_promotes_pending_transaction(db_session):

@@ -116,3 +116,21 @@ def classify_source(source_name: str) -> str:
             if alias.lower() == normalized:
                 return p.source_key
     return source_name
+
+
+def get_plaid_account_profile(source: str, account: dict[str, Any]) -> dict[str, str]:
+    """Resolve account presentation while keeping provider policy in plugins."""
+    source_key = classify_source(source)
+    plugin = _by_key().get(source_key)
+    account_type = str(account.get("type") or "")
+    default_group = (
+        "investment" if account_type == "investment"
+        else "credit_card" if account_type in {"credit", "loan"}
+        else "bank_account"
+    )
+    profile = plugin.plaid_account_profile(account) if plugin and plugin.plaid_account_profile else {}
+    return {
+        "display_name": profile.get("display_name") or str(account.get("name") or (plugin.label if plugin else source)),
+        "group": profile.get("group") or default_group,
+        "detail_view": profile.get("detail_view") or ("investments" if default_group == "investment" else ""),
+    }

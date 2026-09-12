@@ -30,7 +30,7 @@ interface Props {
   snapshotSources: SnapshotSource[]
 }
 
-type DisplaySourceRow = Omit<NetWorthSourceRow, 'group'> & { group: VisibleGroupKey }
+type DisplaySourceRow = Omit<NetWorthSourceRow, 'group'> & { group: VisibleGroupKey; source_key?: string }
 
 const GROUP_META: Record<
   VisibleGroupKey,

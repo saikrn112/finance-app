@@ -119,6 +119,34 @@ class SyncLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ConnectedAccount(Base):
+    """One financial account exposed by a connection such as a Plaid Item."""
+
+    __tablename__ = "connected_accounts"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    sync_log_id = Column(String, ForeignKey("sync_log.id"), nullable=False)
+    source_key = Column(String, nullable=False)
+    source = Column(String, nullable=False)
+    external_account_id = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    mask = Column(String(4))
+    account_type = Column(String)
+    subtype = Column(String)
+    account_group = Column(String, nullable=False)
+    detail_view = Column(String)
+    currency = Column(String(3), default="USD", nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_connected_account_external", "sync_log_id", "external_account_id", unique=True),
+        Index("ix_connected_account_source", "source_key"),
+    )
+
+
 class Balance(Base):
     __tablename__ = "balances"
 
@@ -139,6 +167,8 @@ class AccountSnapshot(Base):
 
     id = Column(String, primary_key=True, default=generate_uuid)
     source = Column(String, nullable=False)
+    account_key = Column(String)
+    account_name = Column(String)
     account_group = Column(String, nullable=False)  # bank_account, credit_card, investment, retirement
     connection_state = Column(String, nullable=False)  # plaid, manual
     _current_value = Column("current_value", Numeric(12, 2), nullable=False)
@@ -212,6 +242,8 @@ class SourceBalanceHistory(Base):
 
     id = Column(String, primary_key=True, default=generate_uuid)
     source_key = Column(String)
+    account_key = Column(String)
+    account_name = Column(String)
     source = Column(String, nullable=False)
     account_group = Column(String, nullable=False)
     date = Column(Date, nullable=False)
@@ -352,6 +384,8 @@ class Project(Base):
     budget = Column(Numeric(10, 2))
     status = Column(String, default="active")  # active, completed, archived
     notes = Column(String)
+    # One Splitwise group per project, cached after the first commit.
+    splitwise_group_id = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -369,6 +403,10 @@ class Contact(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     name = Column(String, nullable=False, unique=True)
     color = Column(String, default="#6366f1")
+    # The account owner. Splitwise needs a payer, and transactions here are implicitly
+    # paid by whoever owns the cards. Exactly one contact should carry this flag; it also
+    # avoids hardcoding a personal name anywhere in the app.
+    is_self = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -379,12 +417,95 @@ class ProjectMember(Base):
     contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
 
 
+class TransactionSplit(Base):
+    """Who owes what on a transaction. Not scoped to a project.
+
+    A split is a fact about the expense: the same $40 dinner cannot be 50/50 in one grouping
+    and 70/30 in another, because there is only one debt. Projects are a grouping, so keying
+    splits by project let the same transaction carry contradictory splits, and made a project
+    delete destroy split data that never belonged to it.
+
+    Superseded `transaction_project_splits`, which is kept for now as the migration source.
+    """
+
+    __tablename__ = "transaction_splits"
+
+    transaction_id = Column(String, primary_key=True)
+    contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
+    # NULL means "split equally". Stored in the transaction's own currency, like
+    # Transaction._amount, so it must be rate-converted on the way out.
+    _share_amount = Column("share_amount", Numeric(10, 2))
+
+    @property
+    def share_amount(self):
+        """Block direct access. Use _share_amount with a rate JOIN / rate map."""
+        raise AttributeError(
+            "Direct access to TransactionSplit.share_amount is forbidden. "
+            "Use _share_amount with currency conversion."
+        )
+
+    @share_amount.setter
+    def share_amount(self, value):
+        self._share_amount = value
+
+
 class TransactionProjectSplit(Base):
     __tablename__ = "transaction_project_splits"
 
     transaction_id = Column(String, primary_key=True)
     project_id = Column(String, primary_key=True)
     contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
+    # NULL means "split this transaction equally", which is what every row meant before
+    # unequal splits existed. Stored in the transaction's own currency, like
+    # Transaction._amount, so it must be rate-converted on the way out.
+    _share_amount = Column("share_amount", Numeric(10, 2))
+
+    @property
+    def share_amount(self):
+        """Block direct access. Use _share_amount with a rate JOIN / rate map."""
+        raise AttributeError(
+            "Direct access to TransactionProjectSplit.share_amount is forbidden. "
+            "Use _share_amount with currency conversion."
+        )
+
+    @share_amount.setter
+    def share_amount(self, value):
+        self._share_amount = value
+
+
+class ContactSplitwiseLink(Base):
+    """Optional mapping from a local contact to a Splitwise user."""
+    __tablename__ = "contact_splitwise_links"
+
+    contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
+    splitwise_user_id = Column(String, nullable=False)
+    display_name = Column(String)
+    linked_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SplitwiseCommit(Base):
+    """One row per (transaction, project) pushed to Splitwise.
+
+    Splitwise creates one expense per API call, so a project is drained in batches. This
+    table is the queue: `state` tracks progress so pressing Sync repeatedly picks up where
+    the last batch stopped, and `expense_id` lets an amend update the existing expense
+    instead of creating a duplicate.
+    """
+    __tablename__ = "splitwise_commits"
+
+    transaction_id = Column(String, primary_key=True)
+    project_id = Column(String, primary_key=True)
+    state = Column(String, nullable=False, default="pending")  # pending | committed | failed
+    expense_id = Column(String)
+    error = Column(String)
+    # Detects a share edit after a commit, so an amend is only offered when it is needed.
+    committed_fingerprint = Column(String)
+    attempted_at = Column(DateTime)
+    committed_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_splitwise_commit_project_state", "project_id", "state"),
+    )
 
 
 class Payslip(Base):

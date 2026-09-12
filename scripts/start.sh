@@ -125,7 +125,10 @@ start_prod() {
   export FINANCE_APP_DATA_DIR="/app/data"
   export FINANCE_APP_RUNTIME_DIR="/app/data/runtime/prod"
   export FINANCE_APP_DB_PATH="/app/data/runtime/prod/finances.db"
-  export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${WEB_PORT}/api/settings/vault/google/callback"
+  # Must be the API port, not the web port: this exact URI has to be registered in the
+  # Google Cloud console, and the callback is served by the backend. Pointing it at the
+  # Vite port makes Google reject the sign-in with redirect_uri_mismatch.
+  export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${API_PORT}/api/settings/vault/google/callback"
 
   COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/finances-start.XXXXXX.yml")"
   trap 'rm -f "${COMPOSE_FILE}"' EXIT

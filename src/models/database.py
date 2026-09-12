@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Session
 from pathlib import Path
@@ -11,7 +13,32 @@ class Base(DeclarativeBase):
 # Ensure data directory exists
 Path(settings.database.path).parent.mkdir(parents=True, exist_ok=True)
 
+# Long enough to ride out the background sync's write transaction, short enough that a
+# blocked request fails fast rather than pinning a pooled connection.
+SQLITE_BUSY_TIMEOUT_MS = int(os.environ.get("FINANCE_APP_SQLITE_BUSY_TIMEOUT_MS", "15000"))
+
 engine = create_engine(f"sqlite:///{settings.database.path}", echo=False)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+    """Wait briefly for the write lock instead of failing instantly.
+
+    The background auto-sync thread holds a write transaction while it talks to Plaid, and
+    SQLite's default busy timeout of 0 turns any overlapping request into an immediate
+    "database is locked" — which is how editing a category during a sync returned a 500.
+    A few seconds covers those windows.
+
+    Note: deliberately *not* WAL. The database lives on a Finch/Lima bind mount, where
+    WAL's shared-memory file is unreliable and produces "disk I/O error".
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    finally:
+        cursor.close()
+
+
 SessionLocal = sessionmaker(bind=engine)
 
 _vault_dirty_paused = False
@@ -75,12 +102,48 @@ def _ensure_transaction_columns() -> None:
         snapshot_columns = {column["name"] for column in inspector.get_columns("account_snapshots")}
         if "currency" not in snapshot_columns:
             statements.append("ALTER TABLE account_snapshots ADD COLUMN currency VARCHAR(3) NOT NULL DEFAULT 'USD'")
+        if "account_key" not in snapshot_columns:
+            statements.append("ALTER TABLE account_snapshots ADD COLUMN account_key VARCHAR")
+        if "account_name" not in snapshot_columns:
+            statements.append("ALTER TABLE account_snapshots ADD COLUMN account_name VARCHAR")
+
+    if inspector.has_table("source_balance_history"):
+        history_columns = {column["name"] for column in inspector.get_columns("source_balance_history")}
+        if "account_key" not in history_columns:
+            statements.append("ALTER TABLE source_balance_history ADD COLUMN account_key VARCHAR")
+        if "account_name" not in history_columns:
+            statements.append("ALTER TABLE source_balance_history ADD COLUMN account_name VARCHAR")
+        for index in inspector.get_indexes("source_balance_history"):
+            if index["name"] == "ix_source_balance_history_source_date" and index.get("unique"):
+                statements.append("DROP INDEX ix_source_balance_history_source_date")
+                statements.append("CREATE INDEX ix_source_balance_history_source_date ON source_balance_history (source, date)")
+        statements.append(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_source_balance_history_account_day "
+            "ON source_balance_history (account_key, date) WHERE account_key IS NOT NULL"
+        )
 
     # Investment holding snapshots currency column
     if inspector.has_table("investment_holding_snapshots"):
         inv_columns = {column["name"] for column in inspector.get_columns("investment_holding_snapshots")}
         if "currency" not in inv_columns:
             statements.append("ALTER TABLE investment_holding_snapshots ADD COLUMN currency VARCHAR(3) NOT NULL DEFAULT 'USD'")
+
+    # Unequal split shares. init_db() only creates missing *tables*, so an added column on a
+    # live table needs an explicit ALTER here.
+    if inspector.has_table("transaction_project_splits"):
+        split_columns = {column["name"] for column in inspector.get_columns("transaction_project_splits")}
+        if "share_amount" not in split_columns:
+            statements.append("ALTER TABLE transaction_project_splits ADD COLUMN share_amount NUMERIC(10, 2)")
+
+    if inspector.has_table("contacts"):
+        contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
+        if "is_self" not in contact_columns:
+            statements.append("ALTER TABLE contacts ADD COLUMN is_self BOOLEAN NOT NULL DEFAULT 0")
+
+    if inspector.has_table("projects"):
+        project_columns = {column["name"] for column in inspector.get_columns("projects")}
+        if "splitwise_group_id" not in project_columns:
+            statements.append("ALTER TABLE projects ADD COLUMN splitwise_group_id VARCHAR")
 
     if inspector.has_table("plaid_api_usage"):
         usage_columns = {column["name"] for column in inspector.get_columns("plaid_api_usage")}

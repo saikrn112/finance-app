@@ -784,7 +784,9 @@ class TestSyncAPI:
             "src.api.routes.sync.exchange_public_token",
             lambda _token: ("duplicate-token", "duplicate-item", ""),
         )
-        monkeypatch.setattr("src.api.routes.sync.remove_item", revoked.append)
+        # remove_item also takes db/institution now, for the usage audit.
+        monkeypatch.setattr("src.api.routes.sync.remove_item",
+                            lambda token, **kwargs: revoked.append(token))
 
         response = test_client.post(
             "/api/sync/plaid/exchange",
@@ -801,6 +803,41 @@ class TestSyncAPI:
         assert revoked == ["duplicate-token"]
         db = Session()
         assert db.query(SyncLog).filter(SyncLog.source == "plaid").count() == 1
+        db.close()
+
+    def test_plaid_reconnect_updates_accounts_without_exchanging_item(self, client, monkeypatch):
+        test_client, Session = client
+        db = Session()
+        log = SyncLog(
+            source="plaid", sync_type="plaid", plaid_item_id="existing-item", status="connected",
+            extra_data={
+                "access_token": "existing-token", "institution_name": "Example Bank",
+                "account_fingerprints": [{"mask": "1111", "name": "Savings"}],
+            },
+        )
+        db.add(log)
+        db.commit()
+        account_id = log.id
+        db.close()
+
+        monkeypatch.setattr(
+            "src.api.routes.sync.exchange_public_token",
+            lambda _token: pytest.fail("update mode must retain the existing Plaid Item"),
+        )
+        response = test_client.post(
+            "/api/sync/plaid/exchange",
+            params={
+                "public_token": "unused-update-token", "account_id": account_id,
+                "institution_name": "Example Bank",
+                "account_fingerprints": '[{"mask":"1111","name":"Savings"},{"mask":"2222","name":"CD"}]',
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["item_id"] == "existing-item"
+        db = Session()
+        refreshed = db.query(SyncLog).filter(SyncLog.id == account_id).one()
+        assert len(refreshed.extra_data["account_fingerprints"]) == 2
+        assert refreshed.extra_data["access_token"] == "existing-token"
         db.close()
 
     def test_disconnect_revokes_all_duplicate_items_for_institution(self, client, monkeypatch):
@@ -822,7 +859,8 @@ class TestSyncAPI:
         db.close()
 
         revoked = []
-        monkeypatch.setattr("src.api.routes.settings.remove_item", revoked.append)
+        monkeypatch.setattr("src.api.routes.settings.remove_item",
+                            lambda token, **kwargs: revoked.append(token))
         response = test_client.delete(f"/api/settings/accounts/{account_id}")
 
         assert response.status_code == 200
@@ -1018,6 +1056,138 @@ class TestSyncAPI:
         db.close()
 
 
+class TestSplitsAreTransactionScoped:
+    """A split among n people is a property of the expense, not of the grouping.
+
+    The same transaction cannot owe 50/50 in one project and 70/30 in another — there is one
+    debt. Splits used to be keyed by project, which allowed exactly that contradiction and
+    made a project delete take split data with it.
+    """
+
+    def _setup(self, test_client):
+        txn_id = test_client.get("/api/transactions?currency=USD").json()["transactions"][0]["id"]
+        contact = test_client.post("/api/contacts", json={"name": "Ravi", "color": "#22c55e"}).json()
+        return txn_id, contact
+
+    def test_the_same_split_shows_in_every_project_the_transaction_is_in(self, client_with_data):
+        test_client = client_with_data
+        txn_id, contact = self._setup(test_client)
+        a = test_client.post("/api/projects", json={"name": "A", "color": "#22c55e"}).json()
+        b = test_client.post("/api/projects", json={"name": "B", "color": "#3b82f6"}).json()
+        for proj in (a, b):
+            test_client.post(f"/api/projects/{proj['id']}/transactions",
+                             json={"transaction_ids": [txn_id]})
+
+        assert test_client.patch(
+            f"/api/projects/{a['id']}/transactions/{txn_id}/splits",
+            json={"contact_ids": [contact["id"]]},
+        ).status_code == 200
+
+        for proj in (a, b):
+            detail = test_client.get(f"/api/projects/{proj['id']}?currency=USD").json()
+            row = next(t for t in detail["transactions"] if t["id"] == txn_id)
+            assert [sp["id"] for sp in row["splits"]] == [contact["id"]], \
+                f"project {proj['name']} should report the transaction's own split"
+
+    def test_split_survives_deleting_one_of_its_projects(self, client_with_data):
+        test_client = client_with_data
+        txn_id, contact = self._setup(test_client)
+        a = test_client.post("/api/projects", json={"name": "Gone", "color": "#22c55e"}).json()
+        b = test_client.post("/api/projects", json={"name": "Stays", "color": "#3b82f6"}).json()
+        for proj in (a, b):
+            test_client.post(f"/api/projects/{proj['id']}/transactions",
+                             json={"transaction_ids": [txn_id]})
+        test_client.patch(f"/api/projects/{a['id']}/transactions/{txn_id}/splits",
+                          json={"contact_ids": [contact["id"]]})
+
+        assert test_client.delete(f"/api/projects/{a['id']}").status_code in (200, 204)
+
+        detail = test_client.get(f"/api/projects/{b['id']}?currency=USD").json()
+        row = next(t for t in detail["transactions"] if t["id"] == txn_id)
+        assert [sp["id"] for sp in row["splits"]] == [contact["id"]]
+
+    def test_removing_a_transaction_from_a_project_keeps_its_split(self, client_with_data):
+        test_client = client_with_data
+        txn_id, contact = self._setup(test_client)
+        a = test_client.post("/api/projects", json={"name": "A", "color": "#22c55e"}).json()
+        b = test_client.post("/api/projects", json={"name": "B", "color": "#3b82f6"}).json()
+        for proj in (a, b):
+            test_client.post(f"/api/projects/{proj['id']}/transactions",
+                             json={"transaction_ids": [txn_id]})
+        test_client.patch(f"/api/projects/{a['id']}/transactions/{txn_id}/splits",
+                          json={"contact_ids": [contact["id"]]})
+
+        # Un-filing a transaction does not settle the debt.
+        assert test_client.delete(
+            f"/api/projects/{a['id']}/transactions/{txn_id}").status_code in (200, 204)
+
+        detail = test_client.get(f"/api/projects/{b['id']}?currency=USD").json()
+        row = next(t for t in detail["transactions"] if t["id"] == txn_id)
+        assert [sp["id"] for sp in row["splits"]] == [contact["id"]]
+
+    def test_project_members_seed_a_split_but_never_overwrite_one(self, client_with_data):
+        test_client = client_with_data
+        txn_id, chosen = self._setup(test_client)
+        other = test_client.post("/api/contacts", json={"name": "Priya", "color": "#ef4444"}).json()
+
+        a = test_client.post("/api/projects", json={"name": "A", "color": "#22c55e"}).json()
+        test_client.post(f"/api/projects/{a['id']}/transactions", json={"transaction_ids": [txn_id]})
+        test_client.patch(f"/api/projects/{a['id']}/transactions/{txn_id}/splits",
+                          json={"contact_ids": [chosen["id"]]})
+
+        # B has a different member; adding the transaction must not re-seed the split.
+        b = test_client.post("/api/projects", json={"name": "B", "color": "#3b82f6"}).json()
+        test_client.post(f"/api/projects/{b['id']}/members", json={"contact_ids": [other["id"]]})
+        test_client.post(f"/api/projects/{b['id']}/transactions", json={"transaction_ids": [txn_id]})
+
+        detail = test_client.get(f"/api/projects/{b['id']}?currency=USD").json()
+        row = next(t for t in detail["transactions"] if t["id"] == txn_id)
+        assert [sp["id"] for sp in row["splits"]] == [chosen["id"]], \
+            "an existing split must win over the new project's members"
+
+
+class TestProjectNotesSurviveDeletion:
+    """A note belongs to the transaction; a project is only a grouping.
+
+    Notes used to live on transaction_projects.description, so deleting a project deleted
+    the notes with it — unrecoverably, since the cascade left no trace.
+    """
+
+    def _contact(self, test_client, name="Tester"):
+        return test_client.post("/api/contacts", json={"name": name, "color": "#22c55e"}).json()
+
+    def test_note_saved_on_a_transaction_outlives_its_project(self, client_with_data):
+        test_client = client_with_data
+        txn_id = test_client.get("/api/transactions?currency=USD").json()["transactions"][0]["id"]
+
+        project = test_client.post("/api/projects", json={"name": "Trip", "color": "#22c55e"}).json()
+        assert test_client.post(f"/api/projects/{project['id']}/transactions",
+                                json={"transaction_ids": [txn_id]}).status_code in (200, 201)
+
+        saved = test_client.patch(f"/api/transactions/{txn_id}?currency=USD",
+                                  json={"notes": "paid by card"})
+        assert saved.status_code == 200
+
+        assert test_client.delete(f"/api/projects/{project['id']}").status_code in (200, 204)
+
+        after = test_client.get(f"/api/transactions/{txn_id}?currency=USD").json()
+        assert after["notes"] == "paid by card", "the note must outlive the project"
+
+    def test_project_view_reports_the_transaction_note(self, client_with_data):
+        test_client = client_with_data
+        txn_id = test_client.get("/api/transactions?currency=USD").json()["transactions"][0]["id"]
+        test_client.patch(f"/api/transactions/{txn_id}?currency=USD", json={"notes": "shared taxi"})
+
+        project = test_client.post("/api/projects", json={"name": "Trip2", "color": "#3b82f6"}).json()
+        test_client.post(f"/api/projects/{project['id']}/transactions",
+                         json={"transaction_ids": [txn_id]})
+
+        detail = test_client.get(f"/api/projects/{project['id']}?currency=USD").json()
+        row = next(t for t in detail["transactions"] if t["id"] == txn_id)
+        # Caveat #2: this field only reaches the client if it is on the Pydantic model too.
+        assert row["notes"] == "shared taxi"
+
+
 class TestProjectsAndSplits:
     """Covers project assignment, per-project notes, contacts and splits.
 
@@ -1186,3 +1356,141 @@ class TestProjectsAndSplits:
 
         # And it is immediately listable, which is what the popup refresh depends on.
         assert "Fresh" in {p["name"] for p in test_client.get("/api/projects/?currency=USD").json()}
+
+    # --- unequal splits ---------------------------------------------------------------
+
+    def _project_with_two_members(self, test_client):
+        """A project with two members and one -50.00 transaction attached to the split."""
+        a = test_client.post("/api/contacts/", json={"name": "Ada"}).json()["id"]
+        b = test_client.post("/api/contacts/", json={"name": "Grace"}).json()["id"]
+        project_id = test_client.post("/api/projects/", json={"name": "Shares"}).json()["id"]
+        test_client.post(f"/api/projects/{project_id}/members", json={"contact_ids": [a, b]})
+        txn_id = next(
+            t["id"] for t in test_client.get(
+                "/api/transactions/?start_date=2026-02-01&end_date=2026-02-28&currency=USD"
+            ).json()["transactions"] if t["amount"] == -50.0
+        )
+        test_client.post(f"/api/projects/{project_id}/transactions", json={"transaction_ids": [txn_id]})
+        return project_id, txn_id, a, b
+
+    def test_equal_split_reports_no_shares(self, client_with_data):
+        """The default must be untouched: no share amounts, mode "equal"."""
+        test_client = client_with_data
+        project_id, txn_id, _, _ = self._project_with_two_members(test_client)
+
+        txn = next(
+            t for t in test_client.get(f"/api/projects/{project_id}?currency=USD").json()["transactions"]
+            if t["id"] == txn_id
+        )
+        assert txn["split_mode"] == "equal"
+        assert [s["share_amount"] for s in txn["splits"]] == [None, None]
+
+    def test_unequal_shares_round_trip(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+
+        resp = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 40.0, b: 10.0}},
+        )
+        assert resp.status_code == 200
+
+        txn = next(
+            t for t in test_client.get(f"/api/projects/{project_id}?currency=USD").json()["transactions"]
+            if t["id"] == txn_id
+        )
+        assert txn["split_mode"] == "unequal"
+        assert {s["name"]: s["share_amount"] for s in txn["splits"]} == {"Ada": 40.0, "Grace": 10.0}
+
+    def test_shares_must_add_up_to_the_amount(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+        resp = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 40.0, b: 5.0}},
+        )
+        assert resp.status_code == 422
+        assert "add up" in resp.json()["detail"]
+
+    def test_negative_share_rejected(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+        resp = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 60.0, b: -10.0}},
+        )
+        assert resp.status_code == 422
+        assert "negative" in resp.json()["detail"]
+
+    def test_share_for_contact_outside_the_split_rejected(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+        outsider = test_client.post("/api/contacts/", json={"name": "Alan"}).json()["id"]
+        resp = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 20.0, b: 20.0, outsider: 10.0}},
+        )
+        assert resp.status_code == 422
+        assert "not in the split" in resp.json()["detail"]
+
+    def test_partial_shares_rejected(self, client_with_data):
+        """Either everyone has a share or nobody does; a half-filled map is a bug."""
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+        resp = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 50.0}},
+        )
+        assert resp.status_code == 422
+        assert "needs a share" in resp.json()["detail"]
+
+    def test_switching_back_to_equal_clears_shares(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+        test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 40.0, b: 10.0}},
+        )
+        test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b]},
+        )
+        txn = next(
+            t for t in test_client.get(f"/api/projects/{project_id}?currency=USD").json()["transactions"]
+            if t["id"] == txn_id
+        )
+        assert txn["split_mode"] == "equal"
+        assert [s["share_amount"] for s in txn["splits"]] == [None, None]
+
+    def test_member_totals_use_shares_when_present(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+
+        equal = {m["name"]: m["expenditure"] for m in
+                 test_client.get(f"/api/projects/{project_id}?currency=USD").json()["member_totals"]}
+        assert equal == {"Ada": 25.0, "Grace": 25.0}
+
+        test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 40.0, b: 10.0}},
+        )
+        unequal = {m["name"]: m["expenditure"] for m in
+                   test_client.get(f"/api/projects/{project_id}?currency=USD").json()["member_totals"]}
+        assert unequal == {"Ada": 40.0, "Grace": 10.0}
+
+    def test_removing_a_person_from_the_split_drops_their_share(self, client_with_data):
+        test_client = client_with_data
+        project_id, txn_id, a, b = self._project_with_two_members(test_client)
+        test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a, b], "share_amounts": {a: 40.0, b: 10.0}},
+        )
+        # Drop Grace; Ada now carries the whole amount.
+        resp = test_client.patch(
+            f"/api/projects/{project_id}/transactions/{txn_id}/splits",
+            json={"contact_ids": [a], "share_amounts": {a: 50.0}},
+        )
+        assert resp.status_code == 200
+        totals = {m["name"]: m["expenditure"] for m in
+                  test_client.get(f"/api/projects/{project_id}?currency=USD").json()["member_totals"]}
+        assert totals == {"Ada": 50.0, "Grace": 0.0}

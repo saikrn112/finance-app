@@ -2,6 +2,11 @@
 import pytest
 import tempfile
 import os
+
+# Must be set before anything imports the app: the auto-task worker starts a Plaid sync as
+# soon as the app starts up and holds the shared job lock while it runs, which races the
+# requests the tests make.
+os.environ.setdefault("FINANCE_APP_DISABLE_AUTO_TASKS", "1")
 from pathlib import Path
 from datetime import date
 from decimal import Decimal

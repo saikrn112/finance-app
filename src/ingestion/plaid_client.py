@@ -1,7 +1,10 @@
+import logging
+
 import plaid
 from plaid.api import plaid_api
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
+from plaid.model.link_token_create_request_update import LinkTokenCreateRequestUpdate
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 from plaid.model.item_remove_request import ItemRemoveRequest
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
@@ -39,16 +42,21 @@ def create_link_token(user_id: str = "user-1", products: list[str] = None, acces
     """Create a link token for Plaid Link initialization."""
     client = get_plaid_client()
     
-    prods = [Products(p) for p in (products or ["transactions"])]
     request_kwargs = dict(
-        products=prods,
         client_name="Finance App",
         country_codes=[CountryCode("US")],
         language="en",
         user=LinkTokenCreateRequestUser(client_user_id=user_id),
     )
     if access_token:
+        # Update mode (re-authenticating an existing Item). Plaid rejects `products` here:
+        # the Item keeps the products it was created with, and naming them again asks for
+        # consent the user has not granted, surfacing as ADDITIONAL_CONSENT_REQUIRED and
+        # leaving the Item stuck in ITEM_LOGIN_REQUIRED.
         request_kwargs["access_token"] = access_token
+        request_kwargs["update"] = LinkTokenCreateRequestUpdate(account_selection_enabled=True)
+    else:
+        request_kwargs["products"] = [Products(p) for p in (products or ["transactions"])]
     request = LinkTokenCreateRequest(
         **request_kwargs,
     )
@@ -70,10 +78,22 @@ def exchange_public_token(public_token: str, metadata: dict = None) -> tuple[str
     return response.access_token, response.item_id, institution_name
 
 
-def remove_item(access_token: str) -> None:
-    """Revoke a Plaid Item so a local disconnect also stops remote access."""
+def remove_item(access_token: str, db=None, institution: str | None = None) -> None:
+    """Revoke a Plaid Item so a local disconnect also stops remote access.
+
+    Recorded in the usage audit when a session is available: this is the only Plaid call
+    that destroys state, and an unlogged removal is indistinguishable from the provider
+    revoking access on its own — which made a real incident impossible to explain.
+    """
     client = get_plaid_client()
     client.item_remove(ItemRemoveRequest(access_token=access_token))
+    if db is None:
+        return
+    try:
+        from src.ingestion.plaid_usage import record_plaid_usage
+        record_plaid_usage(db, endpoint="item_remove", institution=institution or "")
+    except Exception:
+        logger.warning("Could not record item_remove in the usage audit", exc_info=True)
 
 
 def sync_transactions(access_token: str, cursor: str | None = None) -> dict:
@@ -164,6 +184,8 @@ def get_investment_holdings(access_token: str) -> dict:
             "type": account.get("type"),
             "subtype": account.get("subtype"),
             "balance": float(balances["current"]) if balances.get("current") is not None else None,
+            "mask": account.get("mask"),
+            "currency": balances.get("iso_currency_code") or "USD",
         })
     
     return {"holdings": holdings, "accounts": accounts}
@@ -246,5 +268,9 @@ def get_account_balances(access_token: str) -> list[dict]:
              "mask": getattr(a, "mask", None),
              "type": a.type.value if a.type else None,
              "subtype": a.subtype.value if a.subtype else None,
-             "current": float(a.balances.current) if a.balances.current is not None else None}
+             "current": float(a.balances.current) if a.balances.current is not None else None,
+             "currency": getattr(a.balances, "iso_currency_code", None) or "USD"}
             for a in response.accounts]
+
+
+logger = logging.getLogger(__name__)
