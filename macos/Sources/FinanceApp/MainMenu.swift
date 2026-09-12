@@ -48,6 +48,13 @@ enum MainMenu {
         if let settings = commandItem(AppCommands.settingsItem) {
             menu.addItem(settings)
         }
+        // Shell-local: a filesystem path needs a real folder picker, and the backend reads it at
+        // launch, so changing it restarts the child.
+        menu.addItem(
+            withTitle: "Private Plugins Folder…",
+            action: #selector(AppDelegate.choosePluginsFolder(_:)),
+            keyEquivalent: ""
+        )
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Hide \(applicationName)",

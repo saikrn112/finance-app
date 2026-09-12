@@ -454,3 +454,62 @@ now handles `onMouseDown` with `preventDefault`, so focus never moves.
 "Attach another image" had the same hazard and cannot use the same fix — `preventDefault` on a
 file-input label stops the picker opening — so attaching is no longer gated on editing at all.
 Removing still is, so a stray click in the list cannot destroy an image.
+
+---
+
+## Private plugins
+
+The app points at the plugins repository **in place**, via `FINANCE_PLUGINS_DIR`, exactly as the
+container flow does. Choose the folder from *FinanceApp → Private Plugins Folder…*, or the "Choose…"
+button on the diagnostics row. The path is remembered in `UserDefaults`; the folder itself is never
+copied and never bundled.
+
+Verified against the real repository: **4 registered sources with the bundled templates alone, 14
+with the folder set** — the Amazon/Nokia/Quidient payslip parsers, Fidelity HSA and 401k,
+Transamerica, Robinhood, Marcus, Apple Card, Discover.
+
+### Why in place, not copied
+
+The directory is not read-only input. `rules/categories.yaml` is **appended to at runtime** every
+time a merchant is categorised from the uncategorised review, and those learned rules belong in the
+repository so they can be committed. Copying the folder into Application Support would fork them:
+the app would learn rules the repository never sees, and the repository would gain rules the app
+never applies.
+
+### Why it is a shell concern rather than a page in the web Settings
+
+It is a filesystem path, it wants a real folder picker, and the backend imports plugins **once at
+startup** from its environment — so changing it has to restart the child process, which only the
+shell can do. Choosing a folder therefore relaunches the backend rather than telling the user to.
+
+### What is validated, and why each check exists
+
+`PluginDirectory.diagnose` refuses a folder up front rather than letting it fail later somewhere
+unrelated:
+
+| Check | The symptom it prevents |
+| --- | --- |
+| exists / is a directory | — |
+| contains a non-underscore `*.py` | The likeliest wrong pick is the repository's *parent*, which exists and is writable, so it would be accepted and then parse nothing |
+| `rules/` exists, or can be created | The backend does not create it; a missing one surfaces as an opaque 500 from the review's Apply button (`AGENTS.md` caveat #4) |
+| writable | Same opaque 500, from a read-only checkout |
+
+Status is re-derived from disk on every read, never cached: the folder is a git working copy the
+owner edits outside this app, so it can be moved, renamed or made read-only between launches and a
+remembered "ready" would be a lie. Anything unusable is reported *and* withheld from the backend, so
+the app never claims a folder is in use while silently running on the templates.
+
+### Not configured is a real state
+
+With no folder set, the app loads only the bundled public templates — generic CSV and a few
+statement examples. It cannot parse the owner's payslips or investment statements. That is the
+correct default: silently falling back to templates would look like working software that
+mis-parses real money.
+
+### Left open
+
+- **Trust boundary.** Plugins are arbitrary Python imported into the backend process. That is fine
+  for the owner's own repository and is how the container already works, but it means "choose a
+  folder" is "choose code to run". Worth remembering before this app is ever handed to anyone else.
+- **A second machine.** The path is per-machine in `UserDefaults`, so a restored database does not
+  drag a path that does not exist. Nothing clones the repository for you.

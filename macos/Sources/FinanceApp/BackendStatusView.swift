@@ -128,6 +128,49 @@ struct BackendStatusView: View {
             pathRow("Database", layout.databaseURL)
             pathRow("Backend log", layout.backendLogURL)
             pathRow("Settings file", layout.configURL)
+            pluginRow
+        }
+    }
+
+    /// The private plugin repository, and why it is not being used if it is not.
+    ///
+    /// Shown here because "my statement will not parse" and "the uncategorised review returns an
+    /// error" are both symptoms of this one setting, and neither points at it.
+    private var pluginRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Plugins")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+            switch PluginDirectory.status() {
+            case .notConfigured:
+                Text("Not set — only the bundled templates are loaded")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .ready(let url):
+                Text(url.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            case .unusable(let url, let problem):
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(url.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(problem.explanation)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 4)
+            Button("Choose…") {
+                NSApp.sendAction(#selector(AppDelegate.choosePluginsFolder(_:)), to: nil, from: nil)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
         }
     }
 

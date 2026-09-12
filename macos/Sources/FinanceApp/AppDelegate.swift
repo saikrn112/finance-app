@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var sweepTimer: Timer?
     private let signalHandler = TerminationSignalHandler()
     private var appearanceObserver: NSKeyValueObservation?
+    /// Read once at launch from the environment; see the note where it is set.
+    private var privacyMask = false
 
     private let layout = BundleLayout.forRunningApplication()
     private lazy var log = ShellLog(url: layout.shellLogURL)
@@ -70,16 +72,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             (ProcessInfo.processInfo.environment["FINANCE_APP_PRIVACY_MASK"] ?? "").lowercased()
         )
         if privacyMask { log.write("privacy mask ON: API values are fake") }
-        let supervisor = BackendSupervisor(
-            layout: layout,
-            environment: BackendEnvironment(layout: layout, privacyMask: privacyMask)
-        )
-        self.supervisor = supervisor
+        self.privacyMask = privacyMask
 
-        showWindow(for: supervisor)
+        startSupervisorAndWindow()
         observeAppearanceChanges()
         observeSleepWake()
         startPeriodicSweep()
+    }
+
+    /// Create the supervisor and its window, and start the backend.
+    ///
+    /// Separate from `applicationDidFinishLaunching` so choosing a different plugins folder can
+    /// redo it: the backend imports plugins once at startup and reads the directory from its
+    /// environment, so a new folder means a new child process.
+    private func startSupervisorAndWindow() {
+        let pluginStatus = PluginDirectory.status()
+        switch pluginStatus {
+        case .notConfigured:
+            log.write("private plugins: not configured; only the bundled templates will load")
+        case .ready(let url):
+            log.write("private plugins: \(url.lastPathComponent)")
+        case .unusable(_, let problem):
+            // Loud, because the symptom otherwise appears much later and somewhere else: a
+            // statement that will not parse, or an opaque 500 from the uncategorised review.
+            log.write("private plugins UNUSABLE: \(problem.explanation)")
+        }
+
+        let supervisor = BackendSupervisor(
+            layout: layout,
+            environment: BackendEnvironment(
+                layout: layout,
+                privatePluginsDirectory: pluginStatus.usableDirectory,
+                privacyMask: privacyMask
+            )
+        )
+        self.supervisor = supervisor
+        showWindow(for: supervisor)
         supervisor.start()
     }
 
@@ -177,6 +205,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func restartBackend(_ sender: Any?) {
         supervisor?.stop()
         supervisor?.start()
+    }
+
+    /// Pick the private plugin repository.
+    ///
+    /// A shell concern rather than a page in the web Settings: it is a filesystem path, it needs a
+    /// real folder picker, and the backend reads it from the environment at *launch*, so changing
+    /// it has to restart the child process.
+    @objc func choosePluginsFolder(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose your private plugins folder"
+        panel.message =
+            "The repository holding your statement parsers and categorisation rules. The app reads "
+            + "it in place and appends learned rules to its rules/categories.yaml, so it must be "
+            + "your working copy rather than a copy."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = PluginDirectory.remembered()
+        panel.prompt = "Use Folder"
+
+        guard panel.runModal() == .OK, let chosen = panel.url else { return }
+
+        if let problem = PluginDirectory.diagnose(chosen) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "That folder cannot be used"
+            alert.informativeText = problem.explanation
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        PluginDirectory.remember(chosen)
+        log.write("private plugins set to \(chosen.lastPathComponent); restarting the backend")
+        // Plugins are imported once at startup, so a new folder only takes effect on a restart.
+        // Doing it here rather than telling the user to do it: the alternative is an app that
+        // silently keeps using the old folder.
+        rebuildSupervisor()
+    }
+
+    /// Recreate the supervisor so the child is launched with a fresh environment.
+    private func rebuildSupervisor() {
+        supervisor?.stopSynchronously()
+        supervisor = nil
+        rootController = nil
+        window?.close()
+        window = nil
+        startSupervisorAndWindow()
     }
 
     /// The single action behind every bus-backed menu item. The command name travels in
