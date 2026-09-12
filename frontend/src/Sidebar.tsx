@@ -83,7 +83,7 @@ function accountAction(
   onShowRetirement: (source?: string) => void,
 ) {
   if (account.group === 'investment') {
-    return () => onShowInvestments(account.source)
+    return () => onShowInvestments(account.account_key || account.source)
   }
   if (account.group === 'retirement') return () => onShowRetirement(account.source_key || account.source)
   if (account.filter_source) return () => onToggleAccount(account.filter_source!)
@@ -217,14 +217,16 @@ export function Sidebar({
                     account.ledger_balance !== null && account.snapshot_balance !== null
                       ? Math.abs(account.ledger_balance - account.snapshot_balance)
                       : null
-                  const primaryBalance = account.ledger_balance ?? account.balance
+                  const primaryBalance = account.group === 'investment' || account.group === 'retirement'
+                    ? account.balance
+                    : account.ledger_balance ?? account.balance
                   const secondaryBalance =
-                    account.ledger_balance !== null && account.snapshot_balance !== null
+                    account.group !== 'investment' && account.group !== 'retirement' && account.ledger_balance !== null && account.snapshot_balance !== null
                       ? account.snapshot_balance
                       : null
                   return (
                     <button
-                      key={`${group}:${account.source}`}
+                      key={account.account_key || `${group}:${account.source}`}
                       onClick={action}
                       className={`flex items-center gap-2 w-full rounded px-2 py-1.5 text-xs transition-colors ${
                         active ? 'app-selected' : 'sidebar-hover'

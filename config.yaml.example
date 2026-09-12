@@ -26,3 +26,16 @@ google_drive:
   # redirect_uri auto-derives from server.port: http://localhost:{port}/api/settings/vault/google/callback
   appdata_manifest_prefix: "finance-app-vault"
   folder_name: "Finance Vault"
+
+splitwise:
+  # Optional. Prefer entering these in the app (Settings → Splitwise): they are then
+  # stored in the database, which is gitignored, so there is no risk of committing them.
+  # Only set them here if you would rather keep credentials in a file.
+  # Register an app at https://secure.splitwise.com/apps to get a Client ID and Secret,
+  # or paste a personal API key in the app instead to skip OAuth entirely.
+  client_id: ""
+  client_secret: ""
+  # redirect_uri defaults to http://localhost:{server.port}/api/splitwise/callback
+  redirect_uri: ""
+  # Expenses pushed per Commit press. Splitwise creates one expense per API call.
+  commit_batch_size: 4

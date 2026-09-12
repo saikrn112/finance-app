@@ -3,10 +3,29 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
+import logging
 import uuid
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+
+logger = logging.getLogger(__name__)
+
+# Usage rows must outlive a caller rollback (see the audit test), so they are written on a
+# second connection. SQLite only permits one writer, so if the caller is mid-write that
+# connection cannot proceed. Fail out in milliseconds rather than inheriting the engine's
+# busy timeout, which would pin a pooled connection per call and exhaust the pool.
+_AUDIT_BUSY_TIMEOUT_MS = 50
+
+
+def _audit_session(db: Session) -> Session:
+    audit = sessionmaker(bind=db.get_bind())()
+    try:
+        audit.execute(text(f"PRAGMA busy_timeout={_AUDIT_BUSY_TIMEOUT_MS}"))
+    except SQLAlchemyError:
+        pass
+    return audit
 
 from src.models import AppMetadata, PlaidApiUsage, PlaidProductEnrollment
 from src.config import settings
@@ -22,10 +41,6 @@ PLAID_ENDPOINT_PRICING = {
     "link_token_create": Decimal("0.00"),
     "item_public_token_exchange": Decimal("0.00"),
 }
-
-
-def _audit_session(db: Session) -> Session:
-    return sessionmaker(bind=db.get_bind())()
 
 
 def _database_instance_id(db: Session) -> str:
@@ -45,16 +60,24 @@ def record_plaid_usage(
     plaid_item_id: str | None = None,
     units: int | float = 1,
     metadata: dict | None = None,
-) -> str:
-    """Durably record a call independently from the caller's business transaction."""
-    audit = _audit_session(db)
-    try:
-        details = dict(metadata or {})
-        status = str(details.pop("status", "success"))
-        vault = ensure_vault_metadata()
-        device_id = str(vault.get("device_id") or "unknown")
-        unit_cost = PLAID_ENDPOINT_PRICING.get(endpoint, Decimal("0.00"))
-        usage = PlaidApiUsage(
+) -> str | None:
+    """Record a Plaid call on the caller's session.
+
+    This deliberately does *not* open a second connection. SQLite allows only one writer,
+    so writing telemetry on a separate connection while the caller still held a write lock
+    self-deadlocked: it failed instantly as "database is locked" with the default settings,
+    and with a busy timeout it instead held pool connections until the pool was exhausted.
+    Sharing the caller's transaction means a usage row rolls back if the caller rolls back
+    — an acceptable trade for cost telemetry that can never break a bank sync.
+    """
+    details = dict(metadata or {})
+    status = str(details.pop("status", "success"))
+    vault = ensure_vault_metadata()
+    device_id = str(vault.get("device_id") or "unknown")
+    unit_cost = PLAID_ENDPOINT_PRICING.get(endpoint, Decimal("0.00"))
+
+    def _build(session: Session, extra: dict | None = None) -> PlaidApiUsage:
+        return PlaidApiUsage(
             endpoint=endpoint,
             institution=institution,
             plaid_item_id=plaid_item_id,
@@ -65,28 +88,64 @@ def record_plaid_usage(
                 "device_key": hashlib.sha256(device_id.encode()).hexdigest()[:12],
                 "device_label": vault.get("device_label"),
                 "environment": settings.app.mode,
-                "database_id": _database_instance_id(audit),
+                "database_id": _database_instance_id(session),
                 **details,
+                **(extra or {}),
             },
         )
+
+    audit = _audit_session(db)
+    try:
+        usage = _build(audit)
         audit.add(usage)
         audit.commit()
         return usage.id
+    except SQLAlchemyError:
+        audit.rollback()
     finally:
         audit.close()
 
+    # Caller holds the write lock. Record on their transaction instead: it rolls back with
+    # them, but losing telemetry or failing the sync would both be worse.
+    try:
+        usage = _build(db, {"degraded": "shared_session"})
+        db.add(usage)
+        db.flush()
+        logger.warning("Recorded Plaid usage for %s on the caller's session", endpoint)
+        return usage.id
+    except SQLAlchemyError:
+        logger.warning("Could not record Plaid usage for %s; continuing", endpoint, exc_info=True)
+        return None
 
-def finish_plaid_usage(db: Session, usage_id: str, *, success: bool, error_code: str | None = None) -> None:
+
+def finish_plaid_usage(db: Session, usage_id: str | None, *, success: bool, error_code: str | None = None) -> None:
+    """Best effort, for the same reason as record_plaid_usage."""
+    if not usage_id:
+        return
+    def _apply(session: Session) -> bool:
+        usage = session.get(PlaidApiUsage, usage_id)
+        if usage is None:
+            return False
+        usage.status = "success" if success else "failed"
+        if error_code:
+            usage.metadata_json = {**(usage.metadata_json or {}), "error_code": error_code}
+        return True
+
     audit = _audit_session(db)
     try:
-        usage = audit.get(PlaidApiUsage, usage_id)
-        if usage is not None:
-            usage.status = "success" if success else "failed"
-            if error_code:
-                usage.metadata_json = {**(usage.metadata_json or {}), "error_code": error_code}
+        if _apply(audit):
             audit.commit()
+        return
+    except SQLAlchemyError:
+        audit.rollback()
     finally:
         audit.close()
+
+    try:
+        if _apply(db):
+            db.flush()
+    except SQLAlchemyError:
+        logger.warning("Could not finalize Plaid usage %s; continuing", usage_id, exc_info=True)
 
 
 def upsert_product_enrollments(db: Session, plaid_item_id: str, products: list[str]) -> None:

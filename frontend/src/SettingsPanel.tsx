@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, Trash2 } from 'lucide-react'
-import { api, type Contact, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
+import { api, type Contact, type SplitwiseContactLink, type SplitwiseCredentialsInfo, type SplitwiseFriend, type SplitwiseStatus, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
 import { GETTING_STARTED_DASHBOARD_KEY, GETTING_STARTED_DONE_KEY } from './GettingStartedGuide'
 import { PlaidLinkButton } from './PlaidLink'
 import { SUPPORTED_CURRENCIES } from './currency'
@@ -42,6 +42,8 @@ interface SettingsData {
       display_message?: string | null
       documentation_url?: string | null
     } | null
+    // Item no longer exists at Plaid; Reconnect cannot repair it.
+    item_gone?: boolean
   }>
 }
 
@@ -470,21 +472,29 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
                 <li key={a.id} className="flex justify-between items-center gap-3 p-2 bg-[var(--app-surface-2)] dark:bg-gray-700 rounded">
                   <div className="min-w-0 text-sm">
                     <div>
-                      {a.source} ({a.status})
+                      {a.source} ({a.item_gone ? 'link required' : a.last_sync_error?.code === 'ITEM_LOGIN_REQUIRED' ? 'login required' : a.last_sync_error ? 'sync incomplete' : a.status})
                       {a.last_sync ? <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">last sync {new Date(a.last_sync).toLocaleDateString('en-US')}</span> : null}
                     </div>
-                    {a.last_sync_error ? (
+                    {a.item_gone ? (
+                      <div className="mt-1 text-xs text-rose-500 dark:text-rose-400">
+                        This connection was removed at Plaid, so it can't be reconnected.
+                        Use Link again to replace it while keeping your stored history.
+                      </div>
+                    ) : a.last_sync_error ? (
                       <div className="mt-1 text-xs text-rose-500 dark:text-rose-400">
                         {a.last_sync_error.code || 'Sync error'}: {a.last_sync_error.display_message || a.last_sync_error.message}
                       </div>
                     ) : null}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {a.last_sync_error ? (
-                      <PlaidLinkButton onSuccess={refreshSettings} accountId={a.id} label="Reconnect" />
-                    ) : null}
-                    <button 
+                    {/* Reconnect is update mode, which needs a live Item. Offering it on a
+                        dead one only produces a confusing Plaid error. */}
+                    {a.item_gone || !a.last_sync_error || a.last_sync_error.code === 'ITEM_LOGIN_REQUIRED' ? (
+                      <PlaidLinkButton onSuccess={refreshSettings} accountId={a.id} label={a.item_gone ? 'Link again' : 'Reconnect'} />
+                    ) : <span className="text-xs text-gray-500">Will retry on a later sync</span>}
+                    <button
                       onClick={() => handleDisconnect(a.id)}
+                      title={a.item_gone ? 'Remove this dead connection' : 'Disconnect'}
                       className="text-red-500 hover:text-red-600 p-1"
                     >
                       <Trash2 size={16} />
@@ -550,6 +560,9 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
 
         {/* Members */}
         <ContactsManager />
+
+        {/* Splitwise (optional) */}
+        <SplitwiseManager />
 
         {/* Danger Zone */}
         <div className="border-t dark:border-gray-700 pt-4">
@@ -726,6 +739,286 @@ function ContactsManager() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function SplitwiseManager() {
+  const [status, setStatus] = useState<SplitwiseStatus | null>(null)
+  const [links, setLinks] = useState<SplitwiseContactLink[]>([])
+  const [friends, setFriends] = useState<SplitwiseFriend[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = () => {
+    api.getSplitwiseStatus().then(setStatus).catch(() => setStatus(null))
+    api.getSplitwiseLinks().then(r => setLinks(r.contacts)).catch(() => setLinks([]))
+  }
+
+  useEffect(load, [])
+
+  // The OAuth popup posts back when it finishes, same as the Google Drive flow.
+  useEffect(() => {
+    const listener = (event: MessageEvent) => {
+      if (event.data?.type === 'splitwise-connected') load()
+    }
+    window.addEventListener('message', listener)
+    return () => window.removeEventListener('message', listener)
+  }, [])
+
+  useEffect(() => {
+    if (!status?.connected) { setFriends([]); return }
+    api.getSplitwiseFriends().then(r => setFriends(r.friends)).catch(() => setFriends([]))
+  }, [status?.connected])
+
+  const connect = () => {
+    const popup = window.open(api.startSplitwiseConnect(), 'splitwise-connect', 'width=560,height=720')
+    if (!popup) return
+    const timer = window.setInterval(() => {
+      if (popup.closed) { window.clearInterval(timer); load() }
+    }, 750)
+  }
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+      load()
+    } catch (err: any) {
+      setError(err?.message || 'Splitwise request failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!status) return null
+
+  const unlinked = links.filter(c => !c.splitwise_user_id)
+
+  return (
+    <div className="border-t dark:border-gray-700 pt-4">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h3 className="font-medium">Splitwise</h3>
+        {status.connected ? (
+          <button onClick={() => void run(api.disconnectSplitwise)} disabled={busy}
+            className="text-xs text-red-400 hover:underline disabled:opacity-60">Disconnect</button>
+        ) : (
+          <button onClick={connect} disabled={!status.configured}
+            title={status.configured ? 'Sign in to Splitwise' : 'Add your Client ID and Secret first'}
+            className="text-xs text-blue-500 hover:underline disabled:opacity-50">Connect</button>
+        )}
+      </div>
+
+      <SplitwiseCredentialsForm
+        info={status.credentials}
+        onSaved={load}
+        startOpen={!status.configured}
+      />
+
+      {status.connected ? (
+        <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Connected as {status.account_name || status.account_email} · commits {status.batch_size} at a time
+        </p>
+      ) : (
+        <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          Not connected. Projects still work; only pushing to Splitwise is unavailable.
+        </p>
+      )}
+
+      {status.connected ? (
+        <>
+          {!status.self_contact ? (
+            <div className="mb-3 rounded border border-amber-400/50 bg-amber-500/10 p-2 text-xs">
+              Pick which person is you — Splitwise records you as the payer on every expense.
+            </div>
+          ) : null}
+          {unlinked.length > 0 ? (
+            <div className="mb-3 rounded border border-amber-400/50 bg-amber-500/10 p-2 text-xs">
+              {unlinked.length} {unlinked.length === 1 ? 'person is' : 'people are'} not linked yet.
+              A commit is blocked until everyone on that project is linked.
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+            {links.map(c => (
+              <div key={c.id} className="flex items-center gap-2 text-sm">
+                <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: c.color }} />
+                <span className="min-w-0 flex-1 truncate">
+                  {c.name}
+                  {c.is_self ? <span className="ml-1 text-[10px] text-blue-400">(you)</span> : null}
+                </span>
+                <select
+                  className="app-input max-w-[190px] px-2 py-1 text-xs rounded"
+                  value={c.splitwise_user_id ?? ''}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    if (!value) return void run(() => api.unlinkSplitwiseContact(c.id))
+                    const friend = friends.find(f => f.id === value)
+                    void run(() => api.linkSplitwiseContact(c.id, value, friend?.name))
+                  }}
+                >
+                  <option value="">Not linked</option>
+                  {/* Keep the current link selectable even if it is not in the friends list. */}
+                  {c.splitwise_user_id && !friends.some(f => f.id === c.splitwise_user_id) ? (
+                    <option value={c.splitwise_user_id}>{c.splitwise_name || c.splitwise_user_id}</option>
+                  ) : null}
+                  {friends.map(f => (
+                    <option key={f.id} value={f.id}>{f.name}</option>
+                  ))}
+                </select>
+                {!c.is_self ? (
+                  <button
+                    onClick={() => void run(() => api.setSelfContact(c.id))}
+                    disabled={busy}
+                    className="shrink-0 text-[10px] text-slate-400 hover:text-blue-400 disabled:opacity-60"
+                    title="Mark as yourself"
+                  >
+                    set as me
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+
+      {error ? <div className="mt-2 text-xs text-red-400">{error}</div> : null}
+    </div>
+  )
+}
+
+function SplitwiseCredentialsForm({
+  info,
+  onSaved,
+  startOpen,
+}: {
+  info: SplitwiseCredentialsInfo
+  onSaved: () => void
+  startOpen: boolean
+}) {
+  const [open, setOpen] = useState(startOpen)
+  // Re-open if the credentials get cleared, so the section never sits collapsed with
+  // nothing behind it. `useState(startOpen)` alone only applies on first mount.
+  useEffect(() => { if (!info.usable) setOpen(true) }, [info.usable])
+  const [clientId, setClientId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const save = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      // Only send what was typed, so blanks don't wipe an already-stored secret.
+      const body: Record<string, string> = {}
+      if (clientId.trim()) body.client_id = clientId.trim()
+      if (clientSecret.trim()) body.client_secret = clientSecret.trim()
+      if (apiKey.trim()) body.api_key = apiKey.trim()
+      if (Object.keys(body).length === 0) { setOpen(false); return }
+      await api.saveSplitwiseCredentials(body)
+      setClientId(''); setClientSecret(''); setApiKey('')
+      setOpen(false)
+      onSaved()
+    } catch (err: any) {
+      setError(err?.message || 'Could not save credentials')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const forget = async () => {
+    if (!confirm('Remove the stored Splitwise credentials?')) return
+    setBusy(true)
+    try {
+      await api.clearSplitwiseCredentials()
+      onSaved()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const stored = info.client_id_present || info.api_key_present
+
+  if (!open) {
+    return (
+      <div className="mb-3 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+        <span>
+          {info.auth_mode === 'api_key'
+            ? 'Using a personal API key'
+            : info.client_id_present
+              ? `App credentials set${info.client_id_hint ? ` (…${info.client_id_hint})` : ''}`
+              : 'No credentials yet'}
+          {info.client_id_source === 'config' ? ' from config.yaml' : ''}
+        </span>
+        <button onClick={() => setOpen(true)} className="text-blue-500 hover:underline">Edit</button>
+        {info.client_id_source === 'app' || info.api_key_source === 'app' ? (
+          <button onClick={() => void forget()} disabled={busy} className="text-red-400 hover:underline disabled:opacity-60">
+            Forget
+          </button>
+        ) : null}
+      </div>
+    )
+  }
+
+  return (
+    <div className="mb-3 rounded border border-[var(--app-border-soft)] p-3 dark:border-slate-700">
+      <p className="mb-2 text-xs text-gray-500 dark:text-gray-400">
+        Register an app on Splitwise to get these. Stored in the local database, not in
+        config.yaml, so they never end up in the repo.
+      </p>
+
+      <label className="mb-2 block text-xs">
+        <span className="text-gray-500 dark:text-gray-400">Personal API key — simplest for one user</span>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder={info.api_key_present ? '•••••••• (stored)' : 'paste API key'}
+          className="app-input mt-1 w-full rounded px-2 py-1 text-sm"
+          autoComplete="off"
+        />
+      </label>
+
+      <div className="my-2 text-[10px] uppercase tracking-wide text-slate-400">or OAuth app</div>
+
+      <label className="mb-2 block text-xs">
+        <span className="text-gray-500 dark:text-gray-400">Client ID</span>
+        <input
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+          placeholder={info.client_id_present ? `•••••${info.client_id_hint ?? ''} (stored)` : 'Client ID'}
+          className="app-input mt-1 w-full rounded px-2 py-1 text-sm"
+          autoComplete="off"
+        />
+      </label>
+      <label className="mb-2 block text-xs">
+        <span className="text-gray-500 dark:text-gray-400">Client Secret</span>
+        <input
+          type="password"
+          value={clientSecret}
+          onChange={(e) => setClientSecret(e.target.value)}
+          placeholder={info.client_secret_present ? '•••••••• (stored)' : 'Client Secret'}
+          className="app-input mt-1 w-full rounded px-2 py-1 text-sm"
+          autoComplete="off"
+        />
+      </label>
+      <p className="mb-2 text-[11px] text-gray-500 dark:text-gray-400">
+        Set the app's redirect URI to <code>{info.redirect_uri}</code>
+      </p>
+
+      <div className="flex items-center gap-2">
+        <button onClick={() => void save()} disabled={busy}
+          className="app-btn-primary text-xs disabled:opacity-60">
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+        {stored ? (
+          <button onClick={() => setOpen(false)} disabled={busy} className="app-btn-secondary text-xs">Cancel</button>
+        ) : null}
+      </div>
+      {error ? <div className="mt-2 text-xs text-red-400">{error}</div> : null}
     </div>
   )
 }

@@ -4,6 +4,7 @@ import { useFilterStore } from './store'
 import { formatCount, formatCurrency, formatPercent, formatPlainNumber } from './privacy'
 
 interface Holding {
+  account_key?: string
   ticker: string
   name: string
   quantity: number
@@ -15,6 +16,8 @@ interface Holding {
 }
 
 interface InvestmentHistoryPoint {
+  account_key?: string
+  account_name?: string
   synced_at: string
   source: string
   value: number
@@ -65,17 +68,17 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
     staleTime: 60_000,
   })
 
-  const sourceHoldingsRaw = visibleSource ? (data?.holdings || []).filter((h) => h.source === visibleSource) : (data?.holdings || [])
+  const sourceHoldingsRaw = visibleSource ? (data?.holdings || []).filter((h) => (h.account_key || h.source) === visibleSource || h.source === visibleSource) : (data?.holdings || [])
   const holdings = sourceHoldingsRaw.filter(h => h.ticker !== 'CUR:USD').sort((a, b) => (b.value || 0) - (a.value || 0))
   const cash = sourceHoldingsRaw.find(h => h.ticker === 'CUR:USD')
   const holdingsValue = holdings.reduce((s, h) => s + (h.value || 0), 0) + (cash?.value || 0)
   const totalCost = holdings.reduce((s, h) => s + (h.cost_basis || 0), 0)
-  const history = (historyData?.history || []).filter((row) => !visibleSource || row.source === visibleSource)
+  const history = (historyData?.history || []).filter((row) => !visibleSource || row.account_key === visibleSource || row.source === visibleSource)
   const latestHistory = history.length ? history[history.length - 1] : null
   const totalValue = visibleSource && latestHistory ? latestHistory.value : holdingsValue
   const totalGL = holdingsValue - totalCost - (cash?.value || 0)
   const totalPct = totalCost > 0 ? totalGL / totalCost : 0
-  const title = visibleSource || 'Investments'
+  const title = latestHistory?.account_name || visibleSource || 'Investments'
   const monthlyHistory = [...history].sort((a, b) => a.synced_at.localeCompare(b.synced_at)).slice(-12)
   const activity = activityData?.activity || []
 

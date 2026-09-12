@@ -31,7 +31,8 @@ def _parse_dates(start_date: Optional[str], end_date: Optional[str]) -> tuple[da
 def _apply_source_filter(query, source: Optional[str]):
     if source:
         sources = [s.strip() for s in source.split(',')]
-        query = query.filter(Transaction.source.in_(sources))
+        from src.services.account_filters import transaction_account_filter
+        query = query.filter(transaction_account_filter(sources))
     return query
 
 
@@ -546,10 +547,18 @@ def _compute_net_worth(
 
     source_events: dict[str, list[tuple[date, float, str, str]]] = defaultdict(list)
     source_info: dict[str, dict] = {}
+    account_start: dict[str, date] = {}
+    for row in history_rows:
+        if row.account_key:
+            provider = classify_source(row.source_key or row.source)
+            account_start[provider] = min(account_start.get(provider, row.date), row.date)
 
     for row in history_rows:
         raw_key = row.source_key or row.source
-        source_key = classify_source(raw_key) or raw_key
+        provider_key = classify_source(raw_key) or raw_key
+        source_key = row.account_key or provider_key
+        if not row.account_key and provider_key in account_start and row.date >= account_start[provider_key]:
+            continue
         event_day = row.date
         group = _normalize_history_group(row.source, row.account_group)
         row_currency = getattr(row, "currency", "USD") or "USD"
@@ -560,7 +569,7 @@ def _compute_net_worth(
             source_events[source_key].append((event_day, value, group, row_currency))
         source_info[source_key] = {
             "key": source_key,
-            "label": get_source_label(row.source),
+            "label": row.account_name or get_source_label(row.source),
             "group": group,
             "current": value,
             "currency": row_currency,
@@ -575,7 +584,10 @@ def _compute_net_worth(
     )
 
     for row in snapshot_rows:
-        source_key = classify_source(row.source) or row.source
+        provider_key = classify_source(row.source) or row.source
+        source_key = row.account_key or provider_key
+        if not row.account_key and provider_key in account_start:
+            continue
         event_day = row.synced_at.date()
         group = _classify_snapshot_group(row.source, row.account_group)
         if source_key in source_info or any(
@@ -591,7 +603,7 @@ def _compute_net_worth(
             source_events[source_key].append((event_day, value, group, row_currency))
         source_info[source_key] = {
             "key": source_key,
-            "label": get_source_label(row.source),
+            "label": row.account_name or get_source_label(row.source),
             "group": group,
             "current": value,
             "currency": row_currency,
@@ -629,6 +641,8 @@ def _compute_net_worth(
                 idx += 1
             event_idx[source] = idx
             if source in running:
+                if source in account_start and day >= account_start[source]:
+                    continue
                 value, group, cur = running[source]
                 if group in group_totals:
                     group_totals[group] += _convert(value, cur)
@@ -656,6 +670,7 @@ def _compute_net_worth(
                 "history_mode": info["history_mode"],
             }
             for source, info in source_info.items()
+            if source not in account_start or end < account_start[source]
         ],
         key=lambda item: abs(item["current"]),
         reverse=True,

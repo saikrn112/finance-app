@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import timedelta
 
@@ -57,6 +58,12 @@ def _worker_loop(stop_event: threading.Event) -> None:
 def start_auto_tasks() -> None:
     global _worker_thread, _stop_event
     if settings.is_demo:
+        return
+    if os.environ.get("FINANCE_APP_DISABLE_AUTO_TASKS") == "1":
+        # The worker syncs immediately on startup and holds the shared job lock while it
+        # does. Under test that races whatever the test itself is asking the API to do, so
+        # a manual sync intermittently comes back "already_running". Tests opt out.
+        logger.info("auto-tasks disabled by FINANCE_APP_DISABLE_AUTO_TASKS")
         return
     if _worker_thread and _worker_thread.is_alive():
         return

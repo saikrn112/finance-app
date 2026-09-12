@@ -49,3 +49,10 @@ class ParserPlugin:
     icon_url: str = ""
     source_aliases: list[str] = field(default_factory=list)
     filename_patterns: list[str] = field(default_factory=list)
+    # Destination for Plaid Transactions Sync rows. Investment Transactions API rows
+    # always remain account activity. None preserves the domain-based default.
+    plaid_transactions_destination: str | None = None
+    # Optional provider-owned presentation policy for individual Plaid accounts.
+    # Receives Plaid's normalized account dict and returns any of display_name,
+    # group, or detail_view. Generic defaults apply when omitted.
+    plaid_account_profile: Callable[[dict[str, Any]], dict[str, str]] | None = None

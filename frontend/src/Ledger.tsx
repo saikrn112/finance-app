@@ -7,6 +7,7 @@ import { getCategoryColor } from './colors'
 import { CATEGORY_ORDER } from './colors'
 import { useFilterStore } from './store'
 import { useProjects } from './hooks'
+import { sortByRecentActivity } from './projectSort'
 import { getGridTheme } from './gridTheme'
 import { api } from './api'
 import type { ProjectDetail, Transaction, TransactionCategoryOption } from './api'
@@ -177,6 +178,40 @@ export function Ledger({
   const { data: allProjects } = useProjects()
   const qc = useQueryClient()
   const [projectMenu, setProjectMenu] = useState<{ txnId: string; anchor: DOMRect; mode: 'edit' } | null>(null)
+
+  // Split popup lives here, not in the cell renderer: it holds amount inputs, and form
+  // state in a cell renderer's deps remounts the input on every keystroke.
+  const [splitMenu, setSplitMenu] = useState<{ txnId: string; anchor: DOMRect } | null>(null)
+  const [splitMode, setSplitMode] = useState<'equal' | 'unequal'>('equal')
+  const [splitDraft, setSplitDraft] = useState<Record<string, string>>({})
+  const [splitSaving, setSplitSaving] = useState(false)
+  const [splitError, setSplitError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!splitMenu) return
+    const handler = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('[data-split-menu]') || target?.closest('[data-split-trigger]')) return
+      setSplitMenu(null)
+    }
+    document.addEventListener('pointerdown', handler)
+    return () => document.removeEventListener('pointerdown', handler)
+  }, [splitMenu])
+
+  const splitTxn = splitMenu ? transactions.find(t => t.id === splitMenu.txnId) ?? null : null
+
+  // Seed the draft from whatever the transaction currently has whenever the popup opens.
+  useEffect(() => {
+    if (!splitTxn) return
+    const mode = splitTxn.split_mode === 'unequal' ? 'unequal' : 'equal'
+    setSplitMode(mode)
+    setSplitError(null)
+    const seeded: Record<string, string> = {}
+    for (const sp of splitTxn.splits || []) {
+      if (sp.share_amount != null) seeded[sp.id] = sp.share_amount.toFixed(2)
+    }
+    setSplitDraft(seeded)
+  }, [splitMenu?.txnId])
 
   const [categoryEditor, setCategoryEditor] = useState<{
     txnId: string
@@ -504,10 +539,107 @@ export function Ledger({
   // it in the cell renderer meant every keystroke in the "new project" field changed
   // ProjectCell's identity -> colDefs changed -> ag-grid rebuilt columns -> the input
   // remounted and lost focus. It also died whenever the row scrolled out of view.
+  // --- Split popup behaviour -------------------------------------------------------
+  const splitAssigned = splitTxn?.splits ?? []
+  const splitTotal = Math.abs(splitTxn?.amount ?? 0)
+  const splitAssignedSum = splitAssigned.reduce(
+    (sum, sp) => sum + (parseFloat(splitDraft[sp.id] ?? '') || 0), 0,
+  )
+  const splitRemainder = Math.round((splitTotal - splitAssignedSum) * 100) / 100
+  const splitBalanced = Math.abs(splitRemainder) < 0.005
+
+  const refreshSplitRow = useCallback((txnId: string) => {
+    const node = gridRef.current?.api?.getRowNode?.(txnId)
+    if (node) gridRef.current?.api?.refreshCells({ rowNodes: [node], force: true })
+  }, [])
+
+  // Equal mode: toggling a person saves immediately, exactly as before.
+  const toggleSplitMember = useCallback(async (contactId: string) => {
+    if (!projectId || !splitTxn) return
+    const current = splitTxn.splits || []
+    const has = current.some(sp => sp.id === contactId)
+    const member = (members || []).find(m => m.id === contactId)
+    if (!has && !member) return
+    const next = has
+      ? current.filter(sp => sp.id !== contactId)
+      : [...current, { ...member!, share_amount: null }]
+    try {
+      await api.updateTransactionSplits(projectId, splitTxn.id, next.map(sp => sp.id))
+      splitTxn.splits = next
+      splitTxn.split_mode = 'equal'
+      setSplitDraft(prev => {
+        const copy = { ...prev }
+        delete copy[contactId]
+        return copy
+      })
+      refreshSplitRow(splitTxn.id)
+    } catch (err) {
+      setSplitError(err instanceof Error ? err.message : 'Could not update split')
+    }
+  }, [projectId, splitTxn, members, refreshSplitRow])
+
+  const saveUnequalSplit = useCallback(async () => {
+    if (!projectId || !splitTxn || !splitBalanced) return
+    setSplitSaving(true)
+    setSplitError(null)
+    try {
+      const ids = splitAssigned.map(sp => sp.id)
+      const amounts: Record<string, number> = {}
+      for (const id of ids) amounts[id] = parseFloat(splitDraft[id] ?? '') || 0
+      await api.updateTransactionSplits(projectId, splitTxn.id, ids, amounts)
+      splitTxn.splits = splitAssigned.map(sp => ({ ...sp, share_amount: amounts[sp.id] }))
+      splitTxn.split_mode = 'unequal'
+      refreshSplitRow(splitTxn.id)
+      setSplitMenu(null)
+      qc.invalidateQueries({ queryKey: ['project'] })
+    } catch (err) {
+      setSplitError(err instanceof Error ? err.message : 'Could not save split')
+    } finally {
+      setSplitSaving(false)
+    }
+  }, [projectId, splitTxn, splitAssigned, splitDraft, splitBalanced, refreshSplitRow, qc])
+
+  const revertToEqualSplit = useCallback(async () => {
+    if (!projectId || !splitTxn) return
+    setSplitSaving(true)
+    setSplitError(null)
+    try {
+      const ids = splitAssigned.map(sp => sp.id)
+      await api.updateTransactionSplits(projectId, splitTxn.id, ids)
+      splitTxn.splits = splitAssigned.map(sp => ({ ...sp, share_amount: null }))
+      splitTxn.split_mode = 'equal'
+      refreshSplitRow(splitTxn.id)
+      setSplitMode('equal')
+      setSplitDraft({})
+      qc.invalidateQueries({ queryKey: ['project'] })
+    } catch (err) {
+      setSplitError(err instanceof Error ? err.message : 'Could not reset split')
+    } finally {
+      setSplitSaving(false)
+    }
+  }, [projectId, splitTxn, splitAssigned, refreshSplitRow, qc])
+
+  const fillSplitEvenly = useCallback(() => {
+    if (!splitAssigned.length) return
+    const each = splitTotal / splitAssigned.length
+    const seeded: Record<string, string> = {}
+    splitAssigned.forEach((sp, index) => {
+      // Put any rounding remainder on the first person so the total lands exactly.
+      const value = index === 0
+        ? splitTotal - Number((each).toFixed(2)) * (splitAssigned.length - 1)
+        : each
+      seeded[sp.id] = value.toFixed(2)
+    })
+    setSplitDraft(seeded)
+  }, [splitAssigned, splitTotal])
+
   const projectMenuTxn = projectMenu ? transactions.find((t) => t.id === projectMenu.txnId) ?? null : null
   const projectMenuAssigned = projectMenuTxn?.projects ?? []
-  const projectMenuUnassigned = (allProjects || []).filter(
-    (project) => !projectMenuAssigned.some((current) => current.id === project.id),
+  // Same order as the Projects sidebar: most recent activity first.
+  const projectMenuUnassigned = sortByRecentActivity(
+    (allProjects || []).filter(
+      (project) => !projectMenuAssigned.some((current) => current.id === project.id),
+    ),
   )
   const menuLeft = projectMenu ? Math.max(12, Math.min(projectMenu.anchor.left, window.innerWidth - 236)) : 0
   const menuTop = projectMenu ? Math.min(projectMenu.anchor.bottom + 8, Math.max(16, window.innerHeight - 320)) : 0
@@ -532,27 +664,24 @@ export function Ledger({
   const [splitFilterIds, setSplitFilterIds] = useState<string[]>([])
   const [descDraft, setDescDraft] = useState('')
 
-  // Merchant cell with an attached note. In a project the note is per-project
-  // (transaction_projects.description); on the main ledger it's the transaction's own
-  // notes field. Empty notes stay hidden until row hover so the table isn't noisy.
+  // Merchant cell with an attached note. The note lives on the transaction in both views:
+  // a project is only a grouping, so a note must survive the project being deleted. Empty
+  // notes stay hidden until row hover so the table isn't noisy.
   const NoteMerchantCell = useCallback((props: ICellRendererParams) => {
     const txn = props.data as Transaction | undefined
     if (!txn) return null
     const label = props.value || txn.merchant_clean || txn.merchant_raw || 'Unknown merchant'
-    const inProject = !!projectId
-    const note = (inProject ? txn.description : txn.notes) || ''
+    // `description` is the legacy per-project note; fall back to it so older rows still
+    // render until they are migrated.
+    const note = (txn.notes ?? txn.description) || ''
     const isEditing = editingDesc === txn.id
 
     const save = async (value: string) => {
       const trimmed = value.trim()
       try {
-        if (inProject) {
-          await api.updateTransactionProject(projectId!, txn.id, { description: trimmed })
-          txn.description = trimmed || undefined
-        } else {
-          await api.updateTransaction(txn.id, { notes: trimmed || null }, displayCurrency)
-          txn.notes = trimmed || null
-        }
+        await api.updateTransaction(txn.id, { notes: trimmed || null }, displayCurrency)
+        txn.notes = trimmed || null
+        txn.description = undefined
       } catch (err) {
         console.error('Failed to save note:', err)
       }
@@ -616,37 +745,19 @@ export function Ledger({
     )
   }, [projectId, editingDesc, descDraft, displayCurrency])
 
+  // Triggers only. The popup itself is rendered from the Ledger body: it carries amount
+  // inputs, and form state in a cell renderer's dependency array remounts the input on
+  // every keystroke (and row virtualization unmounts the popup outright).
   const SplitCell = useCallback((props: ICellRendererParams) => {
-    const txn = props.data as Transaction
+    const txn = props.data as Transaction | undefined
+    if (!txn) return null
     const splits = txn.splits || []
-    const [menuOpen, setMenuOpen] = useState(false)
-    const [menuPos, setMenuPos] = useState({ left: 0, top: 0 })
+    const unequal = txn.split_mode === 'unequal'
 
-    // Dismiss on any click outside the popup or its trigger.
-    useEffect(() => {
-      if (!menuOpen) return
-      const handler = (event: PointerEvent) => {
-        const target = event.target as HTMLElement | null
-        if (target?.closest('[data-split-menu]') || target?.closest('[data-split-trigger]')) return
-        setMenuOpen(false)
-      }
-      document.addEventListener('pointerdown', handler)
-      return () => document.removeEventListener('pointerdown', handler)
-    }, [menuOpen])
-
-    const toggleMember = async (contactId: string) => {
-      if (!projectId) return
-      const current = txn.splits || []
-      const has = current.some(s => s.id === contactId)
-      const next = has ? current.filter(s => s.id !== contactId) : [...current, (members || []).find(m => m.id === contactId)!]
-      await api.updateTransactionSplits(projectId, txn.id, next.map(s => s.id))
-      txn.splits = next
-      props.api.refreshCells({ rowNodes: [props.node], force: true })
+    const open = (element: HTMLElement) => {
+      const anchor = element.getBoundingClientRect()
+      setSplitMenu(splitMenu?.txnId === txn.id ? null : { txnId: txn.id, anchor })
     }
-
-    // Pull the popup up if the trigger sits low, so it always has room to show a few
-    // rows rather than collapsing to a sliver.
-    const splitMenuTop = Math.min(menuPos.top, Math.max(16, window.innerHeight - 240))
 
     return (
       <div className="flex h-full w-full items-center gap-1 overflow-hidden">
@@ -654,10 +765,10 @@ export function Ledger({
           <button
             type="button"
             data-split-trigger="true"
-            title={splits.map(s => s.name).join(', ')}
+            title={`${splits.map(s => s.name).join(', ')}${unequal ? ' (unequal)' : ''}`}
             className="min-w-0 self-center flex-1 inline-flex items-center justify-start gap-1 rounded-md border px-2 py-1"
             style={{ borderColor: 'var(--border-default)', background: 'var(--surface-secondary)' }}
-            onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenuPos({ left: r.left, top: r.bottom + 8 }); setMenuOpen(!menuOpen) }}
+            onClick={(e) => { e.stopPropagation(); open(e.currentTarget as HTMLElement) }}
           >
             <span className="flex shrink-0 items-center gap-1">
               {splits.slice(0, 4).map(s => (
@@ -665,6 +776,19 @@ export function Ledger({
               ))}
             </span>
             {splits.length > 4 ? <span className="ml-1 text-[10px] font-semibold" style={{ color: 'var(--text-secondary)' }}>+{splits.length - 4}</span> : null}
+            {/* Marker for an uneven split. Sized and line-height-pinned to match the dots:
+                a bare glyph carries a full line box, which grew the button past the row
+                height and painted outside the cell (it has overflow: visible). */}
+            {unequal ? (
+              <span
+                aria-label="Unequal split"
+                title="Unequal split"
+                className="ml-0.5 flex h-3 w-3 shrink-0 items-center justify-center rounded-sm text-[9px] font-bold leading-none text-blue-400"
+                style={{ lineHeight: 1, background: 'color-mix(in srgb, var(--surface-secondary) 60%, transparent)' }}
+              >
+                ≠
+              </span>
+            ) : null}
           </button>
         ) : null}
         {!splits.length && members && members.length > 0 ? (
@@ -672,42 +796,12 @@ export function Ledger({
             data-split-trigger="true"
             className="h-5 w-5 shrink-0 self-center flex items-center justify-center rounded-full border border-dashed cursor-pointer hover:border-blue-500 hover:text-blue-500 text-sm leading-none"
             style={{ borderColor: 'var(--border-default)', color: 'var(--text-muted)' }}
-            onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenuPos({ left: r.left, top: r.bottom + 8 }); setMenuOpen(true) }}
+            onClick={(e) => { e.stopPropagation(); open(e.currentTarget as HTMLElement) }}
           >+</span>
         ) : null}
-        {menuOpen && members && createPortal(
-          <div
-            data-split-menu="true"
-            className="fixed z-[1200] flex min-w-[200px] flex-col rounded-lg p-2 shadow-lg app-elevated"
-            style={{
-              left: Math.min(menuPos.left, window.innerWidth - 220),
-              top: splitMenuTop,
-              maxHeight: `calc(100vh - ${splitMenuTop + 16}px)`,
-            }}
-          >
-            <div className="mb-1 shrink-0 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Split with</div>
-            <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain">
-              {members.map(m => {
-                const active = splits.some(s => s.id === m.id)
-                return (
-                  <button
-                    key={m.id}
-                    className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs ${active ? 'app-selected' : 'app-hover'}`}
-                    onClick={() => void toggleMember(m.id)}
-                  >
-                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: m.color }} />
-                    <span className="truncate flex-1 text-left">{m.name}</span>
-                    {active ? <span className="text-blue-500">✓</span> : null}
-                  </button>
-                )
-              })}
-            </div>
-          </div>,
-          document.body,
-        )}
       </div>
     )
-  }, [projectId, members])
+  }, [members, splitMenu])
 
   const colDefs = useMemo(() => ([
     {
@@ -852,6 +946,108 @@ export function Ledger({
           ensureDomOrder={true}
         />
       </div>
+      {splitMenu && splitTxn && members && members.length > 0 && createPortal(
+        (() => {
+          const top = Math.min(splitMenu.anchor.bottom + 8, Math.max(16, window.innerHeight - 300))
+          return (
+            <div
+              data-split-menu="true"
+              className="fixed z-[1200] flex min-w-[240px] flex-col rounded-lg p-2 shadow-lg app-elevated"
+              style={{
+                left: Math.min(splitMenu.anchor.left, window.innerWidth - 260),
+                top,
+                maxHeight: `calc(100vh - ${top + 16}px)`,
+              }}
+            >
+              <div className="mb-1 flex shrink-0 items-center justify-between gap-2 px-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Split with</span>
+                <div className="flex overflow-hidden rounded border" style={{ borderColor: 'var(--border-default)' }}>
+                  <button
+                    type="button"
+                    className={`px-1.5 py-0.5 text-[10px] ${splitMode === 'equal' ? 'bg-blue-500/20 text-blue-400' : 'text-slate-400'}`}
+                    onClick={() => { if (splitMode !== 'equal') void revertToEqualSplit() }}
+                  >
+                    Equal
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-1.5 py-0.5 text-[10px] ${splitMode === 'unequal' ? 'bg-blue-500/20 text-blue-400' : 'text-slate-400'}`}
+                    onClick={() => {
+                      setSplitMode('unequal')
+                      // Start from the current even division so the boxes are never blank.
+                      if (Object.keys(splitDraft).length === 0) fillSplitEvenly()
+                    }}
+                  >
+                    Unequal
+                  </button>
+                </div>
+              </div>
+
+              <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain">
+                {members.map(m => {
+                  const active = splitAssigned.some(sp => sp.id === m.id)
+                  return (
+                    <div key={m.id} className={`flex items-center gap-2 rounded px-2 py-1.5 text-xs ${active ? 'app-selected' : ''}`}>
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        onClick={() => void toggleSplitMember(m.id)}
+                        title={active ? 'Remove from split' : 'Add to split'}
+                      >
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: m.color }} />
+                        <span className="truncate flex-1">{m.name}</span>
+                        {active && splitMode === 'equal' ? <span className="text-blue-500">✓</span> : null}
+                      </button>
+                      {splitMode === 'unequal' && active ? (
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={splitDraft[m.id] ?? ''}
+                          onChange={(e) => setSplitDraft(prev => ({ ...prev, [m.id]: e.target.value }))}
+                          className="app-input w-20 shrink-0 rounded px-1.5 py-0.5 text-right text-[11px]"
+                          placeholder="0.00"
+                        />
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+
+              {splitMode === 'unequal' ? (
+                <div className="mt-1 shrink-0 border-t pt-1" style={{ borderColor: 'var(--border-default)' }}>
+                  <div className="flex items-center justify-between px-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    <span>assigned {formatCurrency(splitAssignedSum, false, { currency: displayCurrency })}</span>
+                    <span style={{ color: splitBalanced ? 'var(--color-positive)' : 'var(--color-negative)' }}>
+                      {splitBalanced ? 'balanced' : `left ${formatCurrency(splitRemainder, false, { currency: displayCurrency })}`}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between gap-2 px-1">
+                    <button type="button" onClick={fillSplitEvenly} className="text-[10px] text-slate-400 hover:text-blue-400">
+                      Split evenly
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!splitBalanced || splitSaving || splitAssigned.length === 0}
+                      onClick={() => void saveUnequalSplit()}
+                      className="text-[11px] text-blue-500 hover:underline disabled:opacity-50"
+                      title={splitBalanced ? 'Save shares' : 'Shares must add up to the transaction amount'}
+                    >
+                      {splitSaving ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                  {splitError ? (
+                    <div className="px-1 pt-1 text-[10px]" style={{ color: 'var(--color-negative)' }}>{splitError}</div>
+                  ) : null}
+                </div>
+              ) : splitError ? (
+                <div className="mt-1 px-1 text-[10px]" style={{ color: 'var(--color-negative)' }}>{splitError}</div>
+              ) : null}
+            </div>
+          )
+        })(),
+        document.body,
+      )}
       {projectMenu && allProjects && projectMenuTxn && createPortal(
         <div
           data-project-menu="true"

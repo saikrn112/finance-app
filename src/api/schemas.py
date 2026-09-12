@@ -151,10 +151,22 @@ class TransactionProjectItem(BaseModel):
     color: Optional[str] = None
 
 
+class MemberTotalItem(BaseModel):
+    id: str
+    name: str
+    color: Optional[str] = None
+    expenditure: float = 0
+    income: float = 0
+    net: float = 0
+
+
 class ContactItem(BaseModel):
     id: str
     name: str
     color: Optional[str] = None
+    # Present on transaction splits: this person's explicit share, in the response
+    # currency. None means the transaction divides equally.
+    share_amount: Optional[float] = None
 
 
 class TransactionItem(BaseModel):
@@ -176,6 +188,7 @@ class TransactionItem(BaseModel):
     projects: list[TransactionProjectItem] = []
     description: Optional[str] = None
     splits: list[ContactItem] = []
+    split_mode: Optional[str] = None  # "equal" | "unequal"
 
 
 class TransactionListResponse(FinancialResponse):
@@ -344,6 +357,7 @@ class ProjectDetailResponse(ProjectItem):
     categories: list[ProjectCategoryItem] = []
     transactions: list[TransactionItem] = []
     members: list[ContactItem] = []
+    member_totals: list[MemberTotalItem] = []
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +509,8 @@ class RecurringDetailResponse(FinancialResponse):
 
 class SidebarAccountItem(BaseModel):
     source: str
+    account_key: Optional[str] = None
+    provider_source: Optional[str] = None
     source_key: Optional[str] = None
     group: str
     connection_state: Optional[str] = None
@@ -552,6 +568,8 @@ class InvestmentHoldingsResponse(FinancialResponse):
 
 
 class InvestmentHistoryItem(BaseModel):
+    account_key: Optional[str] = None
+    account_name: Optional[str] = None
     synced_at: Optional[str] = None
     source: Optional[str] = None
     value: float = 0

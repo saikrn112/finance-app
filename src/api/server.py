@@ -3,7 +3,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 from src.models import init_db, get_db
-from src.api.routes import transactions, analytics, sync, settings, reconciliation, projects, retirement, payslips, imports, recurring
+from src.api.routes import transactions, analytics, sync, settings, reconciliation, projects, retirement, payslips, imports, recurring, splitwise
 from src.config import settings as app_settings
 from src.ingestion.import_service import migrate_import_artifact_paths
 from src.plugins.loader import load_plugins
@@ -65,6 +65,7 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(reconciliation.router, prefix="/api/reconciliation", tags=["reconciliation"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(projects.contacts_router, prefix="/api/contacts", tags=["contacts"])
+app.include_router(splitwise.router, prefix="/api/splitwise", tags=["splitwise"])
 app.include_router(retirement.router, prefix="/api/retirement", tags=["retirement"])
 app.include_router(payslips.router, prefix="/api/payslips", tags=["payslips"])
 

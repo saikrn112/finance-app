@@ -5,8 +5,9 @@ from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
+from decimal import Decimal
 
-from src.models import get_db, Project, TransactionProject, Transaction, ExchangeRate, Contact, ProjectMember, TransactionProjectSplit
+from src.models import get_db, Project, TransactionProject, Transaction, ExchangeRate, Contact, ProjectMember, TransactionSplit
 from src.services.exchange_rates import latest_rate_subquery, ensure_rates_fresh
 from src.api.schemas import ProjectItem, ProjectDetailResponse
 
@@ -86,11 +87,71 @@ def _serialize_transaction(
         "is_recurring": txn.is_recurring,
         "tags": txn.tags or [],
         "projects": projects or [],
+        # Notes belong to the transaction, not to the project. A project is a grouping, so
+        # deleting one must not take the note with it — which is exactly what happened when
+        # this lived on transaction_projects.description.
+        "notes": txn.notes,
     }
     if description is not None:
         result["description"] = description
     if splits is not None:
-        result["splits"] = splits
+        # Shares are stored in the transaction's currency, so convert them with the same
+        # rate used for `amount` or a multi-currency project reports inconsistent numbers.
+        rate = 1.0
+        if rate_map is not None:
+            rate = rate_map.get(getattr(txn, "currency", None) or "USD", 1.0)
+        converted_splits = []
+        has_share = False
+        for split in splits:
+            raw = split.get("_raw_share")
+            entry = {k: v for k, v in split.items() if k != "_raw_share"}
+            if raw is None:
+                entry["share_amount"] = None
+            else:
+                entry["share_amount"] = round(raw * rate, 2)
+                has_share = True
+            converted_splits.append(entry)
+        result["splits"] = converted_splits
+        result["split_mode"] = "unequal" if has_share else "equal"
+    return result
+
+
+def _member_totals(members: list, serialized_txns: list[dict]) -> list[dict]:
+    """Per-person owed totals, in the response currency.
+
+    Single source of truth for "who owes what": the frontend renders this rather than
+    re-deriving it, and the future Splitwise commit reads the same numbers. A split with
+    explicit share_amounts uses them; otherwise the transaction divides equally, which is
+    the long-standing default.
+    """
+    totals = {m.id: {"expenditure": 0.0, "income": 0.0} for m in members}
+    for txn in serialized_txns:
+        splits = txn.get("splits") or []
+        if not splits:
+            continue
+        amount = txn.get("amount") or 0
+        equal_share = abs(amount) / len(splits)
+        for split in splits:
+            bucket = totals.get(split["id"])
+            if bucket is None:
+                continue  # split with someone no longer on the project
+            share = split.get("share_amount")
+            share = equal_share if share is None else abs(share)
+            if amount < 0:
+                bucket["expenditure"] += share
+            elif amount > 0:
+                bucket["income"] += share
+    result = []
+    for m in members:
+        bucket = totals[m.id]
+        result.append({
+            "id": m.id,
+            "name": m.name,
+            "color": m.color,
+            "expenditure": round(bucket["expenditure"], 2),
+            "income": round(bucket["income"], 2),
+            "net": round(bucket["income"] - bucket["expenditure"], 2),
+        })
     return result
 
 
@@ -209,19 +270,26 @@ def get_project(project_id: str, db: Session = Depends(get_db), currency: str = 
                 descriptions_by_txn[txn_id] = desc
 
         split_rows = (
-            db.query(TransactionProjectSplit.transaction_id, Contact.id, Contact.name, Contact.color)
-            .join(Contact, Contact.id == TransactionProjectSplit.contact_id)
-            .filter(
-                TransactionProjectSplit.project_id == project_id,
-                TransactionProjectSplit.transaction_id.in_(txn_ids),
+            db.query(
+                TransactionSplit.transaction_id,
+                Contact.id,
+                Contact.name,
+                Contact.color,
+                TransactionSplit._share_amount,
             )
+            .join(Contact, Contact.id == TransactionSplit.contact_id)
+            # No project filter: the split is the transaction's, and the same split shows
+            # wherever the transaction appears.
+            .filter(TransactionSplit.transaction_id.in_(txn_ids))
             .all()
         )
-        for txn_id, contact_id, contact_name, contact_color in split_rows:
+        for txn_id, contact_id, contact_name, contact_color, share in split_rows:
             splits_by_txn.setdefault(txn_id, []).append({
                 "id": contact_id,
                 "name": contact_name,
                 "color": contact_color,
+                # Raw, in the transaction's currency. Converted in _serialize_transaction.
+                "_raw_share": float(share) if share is not None else None,
             })
 
     # Category breakdown with top-level + subcategory grouping (converted amounts)
@@ -251,6 +319,17 @@ def get_project(project_id: str, db: Session = Depends(get_db), currency: str = 
         .all()
     )
 
+    serialized_txns = [
+        _serialize_transaction(
+            t,
+            projects_by_txn.get(t.id, []),
+            rate_map=rate_map,
+            description=descriptions_by_txn.get(t.id),
+            splits=splits_by_txn.get(t.id, []),
+        )
+        for t in txns
+    ]
+
     return {
         **_serialize_project(p, spent, len(txns)),
         "currency": currency,
@@ -268,16 +347,8 @@ def get_project(project_id: str, db: Session = Depends(get_db), currency: str = 
             }
             for value in sorted(cats.values(), key=lambda item: item["total"], reverse=True)
         ],
-        "transactions": [
-            _serialize_transaction(
-                t,
-                projects_by_txn.get(t.id, []),
-                rate_map=rate_map,
-                description=descriptions_by_txn.get(t.id),
-                splits=splits_by_txn.get(t.id, []),
-            )
-            for t in txns
-        ],
+        "transactions": serialized_txns,
+        "member_totals": _member_totals(members, serialized_txns),
     }
 
 
@@ -328,12 +399,23 @@ def add_transactions(project_id: str, body: ProjectTransactionsUpdate, db: Sessi
         row[0] for row in
         db.query(ProjectMember.contact_id).filter(ProjectMember.project_id == project_id).all()
     ]
+    # Project members are the *default* for a transaction that has no split yet. They must
+    # not overwrite an existing split: that split is the transaction's own, and filing the
+    # transaction under another project does not change who owes what.
+    already_split = {
+        row[0] for row in
+        db.query(TransactionSplit.transaction_id)
+        .filter(TransactionSplit.transaction_id.in_(ids))
+        .distinct()
+        .all()
+    } if ids else set()
     added = 0
     for tid in ids:
         if tid not in existing_ids:
             db.add(TransactionProject(transaction_id=tid, project_id=project_id))
-            for contact_id in member_ids:
-                db.add(TransactionProjectSplit(transaction_id=tid, project_id=project_id, contact_id=contact_id))
+            if tid not in already_split:
+                for contact_id in member_ids:
+                    db.add(TransactionSplit(transaction_id=tid, contact_id=contact_id))
             added += 1
     db.commit()
     return {"added": added}
@@ -341,7 +423,8 @@ def add_transactions(project_id: str, body: ProjectTransactionsUpdate, db: Sessi
 
 @router.delete("/{project_id}/transactions/{txn_id}")
 def remove_transaction(project_id: str, txn_id: str, db: Session = Depends(get_db)):
-    db.query(TransactionProjectSplit).filter_by(transaction_id=txn_id, project_id=project_id).delete()
+    # Deliberately leaves the split alone. Taking a transaction out of a grouping does not
+    # settle the debt, and deleting it here is how split data used to disappear silently.
     r = db.query(TransactionProject).filter_by(transaction_id=txn_id, project_id=project_id).first()
     if r:
         db.delete(r)
@@ -366,6 +449,13 @@ def update_transaction_project(project_id: str, txn_id: str, body: TransactionPa
 
 class SplitsUpdateBody(BaseModel):
     contact_ids: list[str]
+    # contact_id -> share, in the transaction's own currency. Omit entirely for an equal
+    # split, which stays the default. Partial maps are rejected rather than silently mixed.
+    share_amounts: dict[str, float] | None = None
+
+
+# Shares are entered by hand, so allow a cent of float/rounding slack against the total.
+_SHARE_TOLERANCE = Decimal("0.01")
 
 
 @router.patch("/{project_id}/transactions/{txn_id}/splits")
@@ -373,9 +463,37 @@ def update_transaction_splits(project_id: str, txn_id: str, body: SplitsUpdateBo
     link = db.query(TransactionProject).filter_by(transaction_id=txn_id, project_id=project_id).first()
     if not link:
         raise HTTPException(404, "Transaction not in this project")
-    db.query(TransactionProjectSplit).filter_by(transaction_id=txn_id, project_id=project_id).delete()
+
+    shares = body.share_amounts or None
+    if shares:
+        contact_ids = set(body.contact_ids)
+        unknown = sorted(set(shares) - contact_ids)
+        if unknown:
+            raise HTTPException(422, f"Share given for contacts not in the split: {', '.join(unknown)}")
+        missing = sorted(contact_ids - set(shares))
+        if missing:
+            raise HTTPException(422, f"Every person in an unequal split needs a share; missing: {', '.join(missing)}")
+        if any(value < 0 for value in shares.values()):
+            raise HTTPException(422, "Shares cannot be negative")
+
+        txn = db.query(Transaction).filter(Transaction.id == txn_id).first()
+        if not txn:
+            raise HTTPException(404, "Transaction not found")
+        # Compare in the transaction's own currency, which is how shares are stored.
+        total = abs(Decimal(str(txn._amount or 0)))
+        assigned = sum((Decimal(str(v)) for v in shares.values()), Decimal("0"))
+        if abs(assigned - total) > _SHARE_TOLERANCE:
+            raise HTTPException(
+                422,
+                f"Shares must add up to {total}; got {assigned}",
+            )
+
+    db.query(TransactionSplit).filter_by(transaction_id=txn_id).delete()
     for contact_id in body.contact_ids:
-        db.add(TransactionProjectSplit(transaction_id=txn_id, project_id=project_id, contact_id=contact_id))
+        row = TransactionSplit(transaction_id=txn_id, contact_id=contact_id)
+        if shares:
+            row.share_amount = Decimal(str(shares[contact_id]))
+        db.add(row)
     db.commit()
     return {"ok": True}
 
@@ -465,14 +583,14 @@ def update_contact(contact_id: str, body: ContactUpdateBody, db: Session = Depen
 
 @contacts_router.get("/{contact_id}/usage")
 def contact_usage(contact_id: str, db: Session = Depends(get_db)):
-    split_count = db.query(TransactionProjectSplit).filter_by(contact_id=contact_id).count()
+    split_count = db.query(TransactionSplit).filter_by(contact_id=contact_id).count()
     project_count = db.query(ProjectMember).filter_by(contact_id=contact_id).count()
     return {"split_count": split_count, "project_count": project_count}
 
 
 @contacts_router.delete("/{contact_id}")
 def delete_contact(contact_id: str, db: Session = Depends(get_db)):
-    db.query(TransactionProjectSplit).filter_by(contact_id=contact_id).delete()
+    db.query(TransactionSplit).filter_by(contact_id=contact_id).delete()
     db.query(ProjectMember).filter_by(contact_id=contact_id).delete()
     c = db.query(Contact).filter(Contact.id == contact_id).first()
     if c:

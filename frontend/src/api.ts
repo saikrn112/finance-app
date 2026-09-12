@@ -91,7 +91,8 @@ export interface Transaction {
   notes?: string | null
   projects: { id: string; name: string; color: string }[]
   description?: string
-  splits?: { id: string; name: string; color: string }[]
+  splits?: TransactionSplit[]
+  split_mode?: 'equal' | 'unequal'
 }
 
 export interface TransactionCategoryOption {
@@ -308,6 +309,79 @@ export interface ProjectCategoryBreakdown {
   subcategories: { name: string; total: number }[]
 }
 
+export interface TransactionSplit {
+  id: string
+  name: string
+  color: string
+  /** This person's explicit share in the display currency. null = split equally. */
+  share_amount?: number | null
+}
+
+export interface MemberTotal {
+  id: string
+  name: string
+  color: string
+  expenditure: number
+  income: number
+  net: number
+}
+
+export interface SplitwiseCredentialsInfo {
+  usable: boolean
+  auth_mode: 'api_key' | 'oauth' | null
+  client_id_present: boolean
+  client_id_hint: string | null
+  client_secret_present: boolean
+  api_key_present: boolean
+  redirect_uri: string
+  client_id_source: 'app' | 'config' | null
+  client_secret_source: 'app' | 'config' | null
+  api_key_source: 'app' | null
+}
+
+export interface SplitwiseStatus {
+  configured: boolean
+  credentials: SplitwiseCredentialsInfo
+  connected: boolean
+  account_name: string | null
+  account_email: string | null
+  self_contact: { id: string; name: string } | null
+  batch_size: number
+}
+
+export interface SplitwiseFriend {
+  id: string
+  name: string
+  email: string | null
+  already_linked: boolean
+}
+
+export interface SplitwiseContactLink {
+  id: string
+  name: string
+  color: string
+  is_self: boolean
+  splitwise_user_id: string | null
+  splitwise_name: string | null
+}
+
+export interface SplitwiseCommitSummary {
+  project_id: string
+  transactions: number
+  committed: number
+  pending: number
+  failed: { transaction_id: string; error: string }[]
+  batch_size: number
+  unmapped_members: string[]
+  connected?: boolean
+  created?: number
+  updated?: number
+  skipped?: number
+  batch_failures?: { transaction_id: string; error: string }[]
+  group_id?: string | null
+  done?: boolean
+}
+
 export interface Contact {
   id: string
   name: string
@@ -318,6 +392,8 @@ export interface ProjectDetail extends ProjectSummary {
   categories: ProjectCategoryBreakdown[]
   transactions: Transaction[]
   members: Contact[]
+  /** Server-computed per-person totals; authoritative over any local recomputation. */
+  member_totals?: MemberTotal[]
 }
 
 export interface NetWorthHistoryPoint {
@@ -349,6 +425,8 @@ export interface NetWorthTrackedHistory {
 
 export interface SidebarAccount {
   source: string
+  account_key?: string
+  provider_source?: string
   source_key?: string
   group: 'bank_account' | 'credit_card' | 'investment' | 'retirement'
   connection_state: 'plaid' | 'manual'
@@ -697,10 +775,27 @@ export const api = {
   addToProject: (projectId: string, txnIds: string[]) => request<{ added: number }>(`/projects/${projectId}/transactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transaction_ids: txnIds }) }),
   removeFromProject: (projectId: string, txnId: string) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}`, { method: 'DELETE' }),
   updateTransactionProject: (projectId: string, txnId: string, data: { description?: string }) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
-  updateTransactionSplits: (projectId: string, txnId: string, contactIds: string[]) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}/splits`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contact_ids: contactIds }) }),
+  updateTransactionSplits: (projectId: string, txnId: string, contactIds: string[], shareAmounts?: Record<string, number> | null) => request<{ ok: true }>(`/projects/${projectId}/transactions/${txnId}/splits`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contact_ids: contactIds, ...(shareAmounts ? { share_amounts: shareAmounts } : {}) }) }),
   // Project members
   addProjectMembers: (projectId: string, contactIds: string[]) => request<{ added: number }>(`/projects/${projectId}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contact_ids: contactIds }) }),
   removeProjectMember: (projectId: string, contactId: string) => request<{ ok: true }>(`/projects/${projectId}/members/${contactId}`, { method: 'DELETE' }),
+  // Splitwise (optional integration)
+  getSplitwiseStatus: () => fetchJson<SplitwiseStatus>(`/splitwise/status`),
+  startSplitwiseConnect: () => `${API_BASE}/splitwise/start`,
+  saveSplitwiseCredentials: (body: { client_id?: string; client_secret?: string; redirect_uri?: string; api_key?: string }) =>
+    request<SplitwiseCredentialsInfo>(`/splitwise/credentials`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  clearSplitwiseCredentials: () => request<SplitwiseCredentialsInfo>(`/splitwise/credentials`, { method: 'DELETE' }),
+  disconnectSplitwise: () => request<{ ok: true }>(`/splitwise/disconnect`, { method: 'POST' }),
+  getSplitwiseFriends: () => fetchJson<{ friends: SplitwiseFriend[] }>(`/splitwise/friends`),
+  getSplitwiseLinks: () => fetchJson<{ contacts: SplitwiseContactLink[] }>(`/splitwise/links`),
+  linkSplitwiseContact: (contactId: string, splitwiseUserId: string, displayName?: string) =>
+    request<{ ok: true }>(`/splitwise/links/${contactId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ splitwise_user_id: splitwiseUserId, display_name: displayName }) }),
+  unlinkSplitwiseContact: (contactId: string) => request<{ ok: true }>(`/splitwise/links/${contactId}`, { method: 'DELETE' }),
+  setSelfContact: (contactId: string) => request<{ ok: true }>(`/splitwise/self/${contactId}`, { method: 'PUT' }),
+  previewSplitwiseCommit: (projectId: string) => fetchJson<SplitwiseCommitSummary>(`/splitwise/projects/${projectId}/preview`),
+  commitSplitwiseProject: (projectId: string, amend = false) =>
+    request<SplitwiseCommitSummary>(`/splitwise/projects/${projectId}/commit?amend=${amend}`, { method: 'POST' }),
+  resetSplitwiseProject: (projectId: string) => request<{ ok: true; cleared: number }>(`/splitwise/projects/${projectId}/reset`, { method: 'POST' }),
   // Contacts
   getContacts: () => fetchJson<Contact[]>(`/contacts/`),
   createContact: (name: string, color?: string) => request<Contact>(`/contacts/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, color }) }),

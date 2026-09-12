@@ -153,7 +153,10 @@ esac
 export FINANCE_APP_PORT="${API_PORT}"
 export VITE_PORT="${WEB_PORT}"
 export VITE_API_PROXY_TARGET="http://127.0.0.1:${API_PORT}"
-export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${WEB_PORT}/api/settings/vault/google/callback"
+# Must be the API port, not the web port: this exact URI has to be registered in the
+# Google Cloud console, and the callback is served by the backend. Pointing it at the
+# Vite port makes Google reject the sign-in with redirect_uri_mismatch.
+export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${API_PORT}/api/settings/vault/google/callback"
 
 mkdir -p "${FINANCE_APP_RUNTIME_DIR}"
 

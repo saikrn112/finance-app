@@ -209,6 +209,11 @@ def _copy_app_data(dest: Path) -> None:
             continue
         if runtime_rel in rel_path.parents and ".oauth" in rel_path.parts:
             continue
+        # Skip WAL/shared-memory sidecars. _snapshot_sqlite() uses the sqlite3 backup API,
+        # which yields a fully checkpointed standalone database; shipping a stale -wal
+        # alongside it would let SQLite replay outdated pages over the snapshot on restore.
+        if file_path.name.endswith(("-wal", "-shm", "-journal")):
+            continue
         target = dest / rel_path
         if file_path.suffix == ".db":
             _snapshot_sqlite(file_path, target)

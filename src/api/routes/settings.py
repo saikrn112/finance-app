@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
+from src.services import job_lock
 from src.models import (
     get_db,
     Transaction,
@@ -335,6 +336,12 @@ def get_settings(db: Session = Depends(get_db)):
                 "records_synced": int(account.record_count) if account.record_count else 0,
                 "institution_name": (account.extra_data or {}).get("institution_name", ""),
                 "last_sync_error": (account.extra_data or {}).get("last_sync_error"),
+                # The Item no longer exists at Plaid, so Reconnect (update mode) cannot fix
+                # it. Set either by a sync that saw ITEM_NOT_FOUND or by a failed reconnect.
+                "item_gone": bool(
+                    (account.extra_data or {}).get("item_gone")
+                    or ((account.extra_data or {}).get("last_sync_error") or {}).get("code") == "ITEM_NOT_FOUND"
+                ),
             }
             for account in accounts
         ],
@@ -361,7 +368,7 @@ def disconnect_account(account_id: str, db: Session = Depends(get_db)):
                 if not access_token:
                     continue
                 try:
-                    remove_item(access_token)
+                    remove_item(access_token, db=db, institution=_plaid_institution_key(item))
                 except Exception as exc:
                     raise HTTPException(status_code=502, detail=f"Plaid disconnect failed: {exc}") from exc
             delete_ids = [
@@ -499,6 +506,11 @@ def _perform_google_drive_backup(db: Session, *, job_id: str | None = None):
             )
 
     log, access_token, updated_extra = _google_access(db)
+    # _google_access refreshes the OAuth token, leaving a pending write on this session.
+    # Commit it now: what follows is a full database snapshot and a network upload, and
+    # holding SQLite's single write lock across them starves sync and ordinary requests
+    # ("database is locked").
+    db.commit()
     update("preparing", 10, "Preparing vault bundle")
     archive_path, manifest = build_backup_bundle()
     vault_id = manifest["vault_id"]
@@ -587,6 +599,23 @@ def _perform_google_drive_backup(db: Session, *, job_id: str | None = None):
 
 
 def _run_backup_job(job_id: str):
+    with job_lock.try_acquire("vault backup") as acquired:
+        if not acquired:
+            _set_backup_job(
+                job_id,
+                status="error",
+                stage="error",
+                progress=0,
+                message=f"Busy: {job_lock.current_holder() or 'another job'} is running",
+                error="Another long-running job is in progress; try again shortly",
+                finished_at=datetime.utcnow().isoformat(),
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            return
+        _run_backup_job_locked(job_id)
+
+
+def _run_backup_job_locked(job_id: str):
     db = SessionLocal()
     try:
         result = _perform_google_drive_backup(db, job_id=job_id)
@@ -617,7 +646,15 @@ def _run_backup_job(job_id: str):
 
 @router.post("/vault/google/backup")
 def backup_vault_to_google_drive(db: Session = Depends(get_db)):
-    return _perform_google_drive_backup(db)
+    # Synchronous entry point, also used by the auto-task thread. Shares the job lock so it
+    # cannot overlap a sync or a queued backup.
+    with job_lock.try_acquire("vault backup") as acquired:
+        if not acquired:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Busy: {job_lock.current_holder() or 'another job'} is running",
+            )
+        return _perform_google_drive_backup(db)
 
 
 @router.post("/vault/google/backup/start")

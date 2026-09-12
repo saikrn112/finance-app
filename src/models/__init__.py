@@ -4,6 +4,7 @@ from src.models.transaction import (
     Subscription,
     Rule,
     SyncLog,
+    ConnectedAccount,
     Balance,
     AccountSnapshot,
     InvestmentHoldingSnapshot,
@@ -17,7 +18,10 @@ from src.models.transaction import (
     TransactionProject,
     Contact,
     ProjectMember,
+    TransactionSplit,
     TransactionProjectSplit,
+    ContactSplitwiseLink,
+    SplitwiseCommit,
     ExchangeRate,
     Payslip,
     PayslipLineItem,
@@ -27,10 +31,11 @@ from src.models.transaction import (
 
 __all__ = [
     "Base", "engine", "get_db", "init_db", "SessionLocal",
-    "Transaction", "Subscription", "Rule", "SyncLog", "Balance",
+    "Transaction", "Subscription", "Rule", "SyncLog", "ConnectedAccount", "Balance",
     "AccountSnapshot", "InvestmentHoldingSnapshot", "SourceBalanceHistory", "InvestmentPeriodFact",
     "AccountActivity", "PlaidApiUsage", "PlaidProductEnrollment", "AppMetadata",
     "Project", "TransactionProject", "Contact", "ProjectMember", "TransactionProjectSplit",
+    "ContactSplitwiseLink", "SplitwiseCommit",
     "ExchangeRate",
     "Payslip", "PayslipLineItem", "RetirementTransaction", "RetirementStatement",
 ]
