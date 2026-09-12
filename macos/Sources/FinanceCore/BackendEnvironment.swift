@@ -72,6 +72,11 @@ public struct BackendEnvironment: Sendable {
             // google_drive.oauth_client_type defaults to, so a per-launch port is fine.
             "FINANCE_APP_GOOGLE_REDIRECT_URI":
                 "http://localhost:\(port)/api/settings/vault/google/callback",
+            // Splitwise needs the same treatment for the same reason. Added when Splitwise
+            // landed; without it the browser would return to whatever port config.yaml names,
+            // and the sign-in would appear to succeed while nothing connected.
+            "FINANCE_APP_SPLITWISE_REDIRECT_URI":
+                "http://localhost:\(port)/api/splitwise/callback",
         ]
         // Only when the built frontend is actually present. Pointing the backend at a
         // missing directory would make it serve 404s for the app shell, which reads as

@@ -127,19 +127,15 @@ final class AppWebViewController: NSViewController {
                 self.dispatch(command: "set:appearance", argument: dark ? "dark" : "light")
             }
         }
-        navigationHandler.onOAuthStart = { [weak self] url in
-            self?.oauthBridge.begin(startURL: url)
+        navigationHandler.onOAuthStart = { [weak self] url, provider in
+            self?.oauthBridge.begin(startURL: url, provider: provider)
         }
-        oauthBridge.onConnected = { [weak self] in
-            // Two commands, tried in order, because the right thing to do depends on what
-            // is on screen. The onboarding gate owns a whole post-connect flow (discover
-            // backups, offer a restore) that must not be skipped; if the gate is not open,
-            // refetching settings is all that is needed. Each name has exactly one owner,
-            // so neither can silently overwrite the other in the bus.
-            self?.dispatchFirstHandled(commands: [
-                "onboarding:provider-returned",
-                "refresh:settings",
-            ])
+        oauthBridge.onConnected = { [weak self] commands in
+            // Tried in order, because the right thing to do depends on what is on screen: the
+            // onboarding gate owns a post-connect flow that must not be skipped, while a
+            // connection made from Settings only needs a refetch. Each name has one owner, so
+            // neither can silently overwrite the other in the bus.
+            self?.dispatchFirstHandled(commands: commands)
         }
         webView.load(URLRequest(url: endpoint.baseURL))
     }
@@ -428,7 +424,7 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
     /// Called after each successful load, so the controller can run its self-check.
     var onLoadFinished: (() -> Void)?
     /// Called when the page tries to reach a provider OAuth start endpoint.
-    var onOAuthStart: ((URL) -> Void)?
+    var onOAuthStart: ((URL, OAuthBridge.Provider) -> Void)?
 
     init(allowedPort: UInt16, log: ShellLog) {
         self.allowedPort = allowedPort
@@ -453,11 +449,11 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
     ) {
         let url = navigationAction.request.url
 
-        // An OAuth start endpoint is a redirect to a provider. It cannot be loaded here:
-        // a navigation carries no session token, so it 401s, and the provider's consent
-        // page must not run in this origin regardless.
-        if isLocalApp(url), let url, OAuthBridge.isStart(url) {
-            onOAuthStart?(url)
+        // An OAuth start endpoint is a redirect to a provider. It cannot be loaded here: a
+        // navigation carries no session token, so it 401s, and the provider's consent page must
+        // not run in this origin regardless.
+        if isLocalApp(url), let url, let provider = OAuthBridge.provider(for: url) {
+            onOAuthStart?(url, provider)
             decisionHandler(.cancel)
             return
         }
@@ -531,10 +527,10 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
         guard let url = navigationAction.request.url else { return nil }
 
         // `window.open` on an OAuth start endpoint: the whole reason this method needed
-        // rewriting. It used to load the popup's URL into the *main* webview, which
-        // replaced the running app with `{"detail":"unauthorized"}`.
-        if OAuthBridge.isStart(url) {
-            onOAuthStart?(url)
+        // rewriting. It used to load the popup's URL into the *main* webview, which replaced the
+        // running app with `{"detail":"unauthorized"}`.
+        if let provider = OAuthBridge.provider(for: url) {
+            onOAuthStart?(url, provider)
             return nil
         }
         if !isLocalApp(url) {

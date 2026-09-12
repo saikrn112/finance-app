@@ -34,6 +34,9 @@ _EXEMPT_EXACT = frozenset(
         "/",
         "/api/health",
         "/api/settings/vault/google/callback",
+        # Splitwise returns here the same way Google does: the provider redirects the *system
+        # browser* back to loopback, and that request carries neither our header nor our cookie.
+        "/api/splitwise/callback",
     }
 )
 

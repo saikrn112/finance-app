@@ -44,6 +44,10 @@ def _app_with_gate(monkeypatch, token=TOKEN):
     def google_callback():
         return {"callback": True}
 
+    @app.get("/api/splitwise/callback")
+    def splitwise_callback():
+        return {"callback": True}
+
     return app, installed
 
 
@@ -114,7 +118,13 @@ class TestExemptPaths:
 
     @pytest.mark.parametrize(
         "path",
-        ["/api/health", "/", "/api/settings/vault/google/callback", "/assets/app.js"],
+        [
+            "/api/health",
+            "/",
+            "/api/settings/vault/google/callback",
+            "/api/splitwise/callback",
+            "/assets/app.js",
+        ],
     )
     def test_exempt_paths_reachable_without_token(self, monkeypatch, path):
         app, _ = _app_with_gate(monkeypatch)
@@ -127,6 +137,11 @@ class TestExemptPaths:
         assert local_auth._is_exempt("/api/healthz") is False
         assert local_auth._is_exempt("/api/settings/vault/google/callback") is True
         assert local_auth._is_exempt("/api/settings/vault/google/callback/steal") is False
+        assert local_auth._is_exempt("/api/splitwise/callback") is True
+        assert local_auth._is_exempt("/api/splitwise/callback/steal") is False
+        # The rest of the Splitwise API is not exempt just because its callback is.
+        assert local_auth._is_exempt("/api/splitwise/status") is False
+        assert local_auth._is_exempt("/api/splitwise/friends") is False
         assert local_auth._is_exempt("/api/transactions") is False
 
     def test_non_api_paths_are_exempt(self):

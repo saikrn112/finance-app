@@ -6,34 +6,74 @@ import Foundation
 ///
 /// ## Why this has to exist
 ///
-/// The frontend starts the Google Drive connection with
-/// `window.open('/api/settings/vault/google/start')`, expecting a popup it can watch and a
-/// `postMessage` from `window.opener`. Inside the shell neither holds:
+/// The frontend starts a connection with `window.open('/api/…/start')`, expecting a popup it can
+/// watch and a `postMessage` from `window.opener`. Inside the shell none of that holds:
 ///
-/// * A same-origin *navigation* cannot carry the session token. The shell's user script
-///   patches `fetch` and `XMLHttpRequest`, not the navigation loader — so loading that URL
-///   in the webview produced a window containing the literal text
-///   `{"detail":"unauthorized"}`, with the whole app gone. Observed, not theorised.
-/// * Google's consent page must not render in the app's own origin. That origin holds the
-///   session token for the entire financial API, and Google refuses embedded webviews for
-///   OAuth anyway.
-/// * A popup that opens in Safari has no `window.opener` back into the app, so the
-///   frontend's "did the popup close?" poll never fires.
+///  * A same-origin *navigation* cannot carry the session token. The user script patches `fetch`
+///    and `XMLHttpRequest`, not the navigation loader — so loading that URL in the webview
+///    produced a window containing the literal text `{"detail":"unauthorized"}`, with the whole
+///    app gone. Observed, not theorised.
+///  * The provider's consent page must not render in the app's own origin. That origin holds the
+///    session token for the entire financial API, and Google refuses embedded webviews anyway.
+///  * A popup that opens in Safari has no `window.opener` back into the app, so the frontend's
+///    "did the popup close?" poll never fires.
 ///
-/// So the shell does the three steps the page cannot: resolve the provider URL *with* the
-/// token, open it in the browser, and tell the page when the connection has landed.
+/// So the shell does the three steps the page cannot: resolve the provider URL *with* the token,
+/// open it in the browser, and tell the page when the connection has landed.
+///
+/// ## Why it is a table
+///
+/// It began as Google-only, with the path, the status probe and the completion hardcoded. Splitwise
+/// then arrived using the identical `window.open` pattern, and would have hit the navigation guard
+/// and failed with an alert. Adding a provider is now one entry.
 @MainActor
 final class OAuthBridge {
-    /// Paths whose sole job is to redirect to a provider. Exact matches, so a future
-    /// `/start-something-else` is not swept in by accident.
-    static let startPaths: Set<String> = ["/api/settings/vault/google/start"]
+    /// A provider whose sign-in has to leave the app and come back.
+    struct Provider {
+        /// The backend path that redirects to the provider. Matched exactly, so a future
+        /// `/start-something-else` is not swept in by accident.
+        let startPath: String
+        /// Polled until it reports connected. Necessary because the callback is served by the
+        /// *backend* — the shell never sees it.
+        let statusPath: String
+        /// Keys to walk in the status JSON to reach a Bool meaning "connected".
+        let connectedKeyPath: [String]
+        /// Bus commands to try in order once connected; the first one the frontend handles wins.
+        let completionCommands: [String]
+        /// For the log and the failure alert.
+        let label: String
+    }
+
+    static let providers: [Provider] = [
+        Provider(
+            startPath: "/api/settings/vault/google/start",
+            statusPath: "api/settings/",
+            connectedKeyPath: ["vault", "connected"],
+            // The onboarding gate owns a post-connect flow (discover backups, offer a restore)
+            // that must not be skipped. If the gate is not open, refetching settings is enough.
+            completionCommands: ["onboarding:provider-returned", "refresh:settings"],
+            label: "Google"
+        ),
+        Provider(
+            startPath: "/api/splitwise/start",
+            statusPath: "api/splitwise/status",
+            connectedKeyPath: ["connected"],
+            completionCommands: ["refresh:settings"],
+            label: "Splitwise"
+        ),
+    ]
+
+    static func provider(for url: URL?) -> Provider? {
+        guard let url else { return nil }
+        return providers.first { $0.startPath == url.path }
+    }
 
     private let endpoint: BackendEndpoint
     private let log: ShellLog
     private var pollTask: Task<Void, Never>?
 
-    /// Called when the vault reports itself connected, so the page can refresh.
-    var onConnected: (() -> Void)?
+    /// Called with the bus commands to dispatch once a provider reports itself connected.
+    var onConnected: (([String]) -> Void)?
 
     init(endpoint: BackendEndpoint, log: ShellLog) {
         self.endpoint = endpoint
@@ -44,48 +84,39 @@ final class OAuthBridge {
         pollTask?.cancel()
     }
 
-    static func isStart(_ url: URL?) -> Bool {
-        guard let url else { return false }
-        return startPaths.contains(url.path)
-    }
-
     /// Resolve the provider's URL and hand it to the system browser.
-    func begin(startURL: URL) {
-        log.write("oauth: resolving the provider URL for \(startURL.path)")
+    func begin(startURL: URL, provider: Provider) {
+        log.write("oauth: resolving the \(provider.label) sign-in URL")
         Task { [weak self] in
             guard let self else { return }
             guard let providerURL = await self.resolveRedirect(from: startURL) else {
-                self.log.write("oauth: the backend did not return a provider redirect")
-                self.presentFailure()
+                self.log.write("oauth: \(provider.label) did not return a redirect")
+                self.presentFailure(provider: provider)
                 return
             }
             self.log.write("oauth: opening \(ShellLog.safeOrigin(providerURL)) in the browser")
             NSWorkspace.shared.open(providerURL)
-            self.startPollingForConnection()
+            self.startPolling(provider: provider)
         }
     }
 
     /// Follow exactly one redirect, with the token attached, and return its `Location`.
     ///
-    /// Deliberately does not follow further: the next hop is the provider's, and fetching
-    /// it here would both be pointless and send our request to a third party.
+    /// Deliberately does not follow further: the next hop is the provider's, and fetching it here
+    /// would both be pointless and send our request to a third party.
     private func resolveRedirect(from startURL: URL) async -> URL? {
         var request = URLRequest(url: startURL)
         request.setValue(endpoint.token.value, forHTTPHeaderField: "x-finance-token")
         request.httpMethod = "GET"
 
         let delegate = SingleRedirectBlocker()
-        let session = URLSession(
-            configuration: .ephemeral, delegate: delegate, delegateQueue: nil
-        )
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
 
         do {
             let (_, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return nil }
             if let location = delegate.blockedLocation { return location }
-            // Some backends return the URL in the body rather than as a redirect.
-            if http.statusCode == 401 {
+            if (response as? HTTPURLResponse)?.statusCode == 401 {
                 log.write("oauth: the start endpoint refused our token")
             }
             return nil
@@ -95,53 +126,52 @@ final class OAuthBridge {
         }
     }
 
-    /// Poll `/api/settings` until the vault reports connected.
+    /// Poll the provider's status until it reports connected.
     ///
-    /// Polling rather than waiting for the callback, because the callback is served by the
-    /// *backend* — the shell never sees it. Bounded, so a user who abandons the flow in the
-    /// browser does not leave a task running for the life of the app.
-    private func startPollingForConnection() {
+    /// Bounded, so a user who abandons the flow in the browser does not leave a task running for
+    /// the life of the app.
+    private func startPolling(provider: Provider) {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             guard let self else { return }
             let deadline = Date().addingTimeInterval(5 * 60)
             while !Task.isCancelled, Date() < deadline {
                 try? await Task.sleep(for: .seconds(2))
-                if await self.vaultIsConnected() {
-                    self.log.write("oauth: the vault is connected; refreshing the app")
-                    self.onConnected?()
+                if await self.isConnected(provider: provider) {
+                    self.log.write("oauth: \(provider.label) is connected; refreshing the app")
+                    self.onConnected?(provider.completionCommands)
                     return
                 }
             }
-            self.log.write("oauth: gave up waiting for the connection to land")
+            self.log.write("oauth: gave up waiting for \(provider.label)")
         }
     }
 
-    private func vaultIsConnected() async -> Bool {
-        var request = URLRequest(
-            url: endpoint.baseURL.appending(path: "api/settings/")
-        )
+    private func isConnected(provider: Provider) async -> Bool {
+        var request = URLRequest(url: endpoint.baseURL.appending(path: provider.statusPath))
         request.setValue(endpoint.token.value, forHTTPHeaderField: "x-finance-token")
         do {
             let (data, _) = try await URLSession(configuration: .ephemeral).data(for: request)
-            // Read only the one field we need. Decoding the whole settings payload here
-            // would make the shell care about a schema it has no business knowing.
-            guard
-                let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let vault = root["vault"] as? [String: Any],
-                let connected = vault["connected"] as? Bool
-            else { return false }
-            return connected
+            // Walk only the keys we were given. Decoding the whole payload would make the shell
+            // care about a schema it has no business knowing, and would break whenever it changed.
+            var node = try JSONSerialization.jsonObject(with: data)
+            for key in provider.connectedKeyPath {
+                guard let dictionary = node as? [String: Any], let next = dictionary[key] else {
+                    return false
+                }
+                node = next
+            }
+            return node as? Bool ?? false
         } catch {
-            // A transient failure is not "not connected forever" — keep polling.
+            // A transient failure is not "not connected forever" -- keep polling.
             return false
         }
     }
 
-    private func presentFailure() {
+    private func presentFailure(provider: Provider) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Could not start the Google connection"
+        alert.messageText = "Could not start the \(provider.label) connection"
         alert.informativeText =
             "The app could not reach its own backend to begin the sign-in flow. "
             + "Check the log at ~/Library/Logs/FinanceApp/ and try again."
@@ -152,8 +182,8 @@ final class OAuthBridge {
 
 /// Captures the first redirect instead of following it.
 ///
-/// `@unchecked Sendable` with a lock rather than an actor: URLSession calls its delegate on
-/// its own queue, and the mutable capture is a single URL written once.
+/// `@unchecked Sendable` with a lock rather than an actor: URLSession calls its delegate on its own
+/// queue, and the mutable capture is a single URL written once.
 private final class SingleRedirectBlocker: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var storedLocation: URL?
