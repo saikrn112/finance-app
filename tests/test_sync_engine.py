@@ -256,29 +256,77 @@ class TestDeviceRegistry:
             session.close()
 
 
-class TestWatermarks:
-    def test_the_second_publish_only_carries_what_changed(self, transport, mac):
-        mac.add_transaction("old", updated_at=T0)
-        mac.sync(transport)
+class TestPublishesFullState:
+    """`run_sync` publishes everything, every time. That is a correctness requirement, not laziness.
 
-        mac.add_transaction("new", updated_at=T0 + timedelta(days=1))
-        mac.sync(transport)
+    The obvious optimisation -- publish only rows newer than the last publish -- is wrong, and an
+    earlier version of this file asserted the broken behaviour. A row merged from a peer carries
+    *that peer's* `updated_at`, and peer clocks are independent, so a freshly-learned row often has a
+    timestamp older than this device's own high-water mark. It is then never republished and never
+    relayed, so a third device silently never receives it. The randomised soak test found this as
+    devices holding different *sets* of transactions.
 
+    Fixing it properly needs a local monotonic marker bumped by merges as well as edits, which
+    `updated_at` cannot be because it deliberately carries the originating device's time.
+    """
+
+    def test_every_publish_carries_the_whole_history(self, transport, mac):
         import json
 
-        payload = json.loads((transport.root / payload_name("mac")).read_text())
-        assert [r["source_id"] for r in payload["records"]["transactions"]] == ["new"]
-
-    def test_full_republishes_everything(self, transport, mac):
         mac.add_transaction("old", updated_at=T0)
         mac.sync(transport)
         mac.add_transaction("new", updated_at=T0 + timedelta(days=1))
-        mac.sync(transport, full=True)
-
-        import json
+        mac.sync(transport)
 
         payload = json.loads((transport.root / payload_name("mac")).read_text())
         assert sorted(r["source_id"] for r in payload["records"]["transactions"]) == ["new", "old"]
+
+    def test_a_row_learned_from_a_peer_is_relayed_onward(self, transport, mac, phone, tmp_path):
+        """The exact failure the watermark caused. The phone's row is timestamped *older* than
+        anything the Mac has published, which is what made the Mac drop it from its own payload."""
+        mac.add_transaction("mac-new", updated_at=T0 + timedelta(days=10))
+        mac.sync(transport)
+
+        phone.add_transaction("phone-old", updated_at=T0)
+        phone.sync(transport)
+
+        mac.sync(transport)  # learns phone-old, and must republish it
+
+        import json
+
+        payload = json.loads((transport.root / payload_name("mac")).read_text())
+        assert sorted(r["source_id"] for r in payload["records"]["transactions"]) == [
+            "mac-new",
+            "phone-old",
+        ]
+
+        # And a device that can only see the Mac's file still gets everything.
+        tablet = Device(tmp_path, "tablet")
+        (transport.root / payload_name("phone")).unlink()
+        tablet.sync(transport)
+        session = tablet.session()
+        try:
+            assert sorted(t.source_id for t in session.query(Transaction).all()) == [
+                "mac-new",
+                "phone-old",
+            ]
+        finally:
+            session.close()
+
+    def test_build_payload_still_supports_since_for_callers_that_want_it(self, transport, mac):
+        """The primitive is fine; using it for publishing is what was wrong."""
+        from src.sync.payload import build_payload
+
+        mac.add_transaction("old", updated_at=T0)
+        mac.add_transaction("new", updated_at=T0 + timedelta(days=1))
+        session = mac.session()
+        try:
+            payload = build_payload(
+                session, device_id="mac", since=T0 + timedelta(hours=1)
+            )
+        finally:
+            session.close()
+        assert [r["source_id"] for r in payload["records"]["transactions"]] == ["new"]
 
 
 class TestPlaidEconomy:
