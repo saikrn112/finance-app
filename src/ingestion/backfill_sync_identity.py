@@ -59,6 +59,16 @@ _UID_TABLES = [
     ("subscriptions", "subscription", ["merchant", "frequency", "source"], "created_at"),
 ]
 
+# Tables that already have a natural key and need no uid, but whose `updated_at` may be NULL on old
+# rows. Seeding it matters more than it looks: a NULL age means the receiving device has nothing to
+# stamp the row with, and the model default then claims the row was edited *now* -- which wins every
+# later comparison and can overwrite a genuine annotation on another device with a stale one.
+# Measured on the real database: 2427 transactions had a NULL updated_at.
+_TIMESTAMP_ONLY_TABLES = [
+    ("transactions", "created_at"),
+    ("account_activity", "created_at"),
+]
+
 # Link tables: updated_at only, inherited from the parent named here.
 _LINK_TABLES = [
     ("transaction_projects", "transactions", "transaction_id"),
@@ -97,6 +107,15 @@ def preview_backfill(db: Session) -> dict:
             ).scalar_one()
         if entry:
             counts[table] = entry
+
+    for table, _source in _TIMESTAMP_ONLY_TABLES:
+        if not _table_exists(db, table) or "updated_at" not in _columns(db, table):
+            continue
+        pending = db.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE updated_at IS NULL")
+        ).scalar_one()
+        if pending:
+            counts[table] = {"updated_at": pending}
 
     for table, _parent, _fk in _LINK_TABLES + [("contact_splitwise_links", "", "")]:
         if not _table_exists(db, table) or "updated_at" not in _columns(db, table):
@@ -160,6 +179,22 @@ def run_backfill(db: Session) -> dict:
 
         if entry:
             written[table] = entry
+
+    for table, source_column in _TIMESTAMP_ONLY_TABLES:
+        if not _table_exists(db, table):
+            continue
+        cols = _columns(db, table)
+        if "updated_at" not in cols or source_column not in cols:
+            continue
+        result = db.execute(
+            text(
+                f"UPDATE {table} SET updated_at = COALESCE({source_column}, :epoch) "
+                "WHERE updated_at IS NULL"
+            ),
+            {"epoch": _EPOCH},
+        )
+        if result.rowcount:
+            written[table] = {"updated_at": result.rowcount}
 
     for table, parent, fk in _LINK_TABLES:
         if not _table_exists(db, table) or "updated_at" not in _columns(db, table):

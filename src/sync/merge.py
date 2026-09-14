@@ -301,6 +301,12 @@ def _apply_mutable(
     if not spec.mutable:
         return False
     local_at = getattr(existing, "updated_at", None)
+    if local_at is None:
+        # An undated local row: normalise it to the same deterministic "unknown" the insert path uses,
+        # so the two devices hold an identical value rather than NULL on one and the epoch on the
+        # other. Behaviourally equivalent either way, but convergence is a property worth having
+        # exactly -- and it cannot be assumed that a peer has run the backfill that removes NULLs.
+        existing.updated_at = local_at = UNKNOWN_AGE
     if local_at is not None and incoming_at is not None:
         if incoming_at < local_at:
             return False
@@ -475,9 +481,7 @@ def _construct(spec: schema.TableSpec, record: dict[str, Any], *, include_immuta
     for field_spec in fields:
         if field_spec.name in record:
             setattr(instance, field_spec.attribute, field_spec.from_wire(record[field_spec.name]))
-    incoming_at = coding.datetime_from_wire(record.get("updated_at"))
-    if incoming_at is not None:
-        instance.updated_at = incoming_at
+    _stamp(instance, record)
     return instance
 
 
@@ -494,7 +498,25 @@ def _construct_link(db: Session, spec: schema.TableSpec, record: dict[str, Any],
     for field_spec in spec.mutable:
         if field_spec.name in record:
             setattr(instance, field_spec.attribute, field_spec.from_wire(record[field_spec.name]))
-    incoming_at = coding.datetime_from_wire(record.get("updated_at"))
-    if incoming_at is not None:
-        instance.updated_at = incoming_at
+    _stamp(instance, record)
     return instance
+
+
+#: "Unknown, and older than any real edit." Deterministic, so two devices inserting the same
+#: undated row agree on its age.
+UNKNOWN_AGE = datetime(1970, 1, 1)
+
+
+def _stamp(instance, record: dict[str, Any]) -> None:
+    """Set `updated_at` on a newly constructed row -- explicitly, including when it is unknown.
+
+    Leaving it unset is the trap: the models declare `default=datetime.utcnow`, so an inserted row
+    with no incoming timestamp is stamped **now**. That silently claims the row was edited this
+    second, which then wins every future last-write-wins comparison against a peer holding the real,
+    older value -- so a genuine annotation elsewhere gets overwritten by a stale one.
+
+    Found on real data: 2427 transactions had a NULL `updated_at`, and merging them fabricated a
+    fresh timestamp for every one.
+    """
+    incoming_at = coding.datetime_from_wire(record.get("updated_at"))
+    instance.updated_at = incoming_at if incoming_at is not None else UNKNOWN_AGE

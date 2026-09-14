@@ -103,12 +103,33 @@ def _backup_due(db, *, now: datetime) -> bool:
     return _is_due(max(candidates) if candidates else None, now=now)
 
 
-def _run_plaid_sync(db, *, trigger: str) -> None:
+def _run_plaid_sync(db, *, trigger: str, force: bool = False) -> None:
+    """Pull from Plaid, unless another device already did it recently.
+
+    Plaid bills per call, and a transaction fetched on the Mac is the same transaction on the phone,
+    so the question is "has *anybody* pulled recently", not "have I". That is what keeps a second or
+    third device from multiplying the bill.
+
+    Skipping is safe in both directions: if the peer's report turns out to be stale the next poll
+    pulls anyway, and if two devices pull simultaneously the `(source, source_id)` unique index makes
+    that wasteful rather than wrong.
+    """
     from src.api.routes.sync import sync_plaid
+    from src.sync.engine import plaid_pull_is_needed, record_plaid_pull
+
+    if not force:
+        needed, reason = plaid_pull_is_needed(db, interval=AUTO_SYNC_INTERVAL, now=_utc_now().replace(tzinfo=None))
+        if not needed:
+            logger.info("auto-task plaid sync skipped", extra={"trigger": trigger, "reason": reason})
+            # The local clock still moves, or this device would re-evaluate on every single poll.
+            _write_timestamp(db, LAST_SYNC_KEY, _utc_now())
+            return
 
     result = sync_plaid(db=db)
     logger.info("auto-task plaid sync completed", extra={"trigger": trigger, "result": result})
     _write_timestamp(db, LAST_SYNC_KEY, _utc_now())
+    # Tell peers, so they can skip their own pull.
+    record_plaid_pull(db)
 
 
 def _run_vault_backup(db, *, trigger: str) -> None:

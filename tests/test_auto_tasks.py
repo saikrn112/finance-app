@@ -222,3 +222,62 @@ def _stub_tasks(monkeypatch, *, sync_raises: Exception | None = None) -> dict:
     monkeypatch.setattr(auto_tasks, "_run_plaid_sync", fake_sync)
     monkeypatch.setattr(auto_tasks, "_run_vault_backup", fake_backup)
     return calls
+
+
+class TestPlaidEconomy:
+    """The auto-task must not spend a Plaid call another device already spent."""
+
+    def test_a_peers_recent_pull_skips_this_devices_call(self, db, monkeypatch):
+        from src.sync.engine import record_plaid_pull
+
+        called = []
+        monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: called.append(1))
+        record_plaid_pull(db, _now().replace(tzinfo=None) - timedelta(hours=1))
+
+        auto_tasks._run_plaid_sync(db, trigger="test")
+
+        assert called == [], "a Plaid call was made despite a recent pull elsewhere"
+
+    def test_an_old_pull_still_makes_the_call(self, db, monkeypatch):
+        from src.sync.engine import record_plaid_pull
+
+        called = []
+        monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: called.append(1))
+        record_plaid_pull(db, _now().replace(tzinfo=None) - timedelta(days=3))
+
+        auto_tasks._run_plaid_sync(db, trigger="test")
+
+        assert called == [1]
+
+    def test_a_successful_pull_is_reported_for_peers_to_see(self, db, monkeypatch):
+        from src.sync.engine import last_plaid_pull_anywhere
+
+        monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: {"ok": True})
+        assert last_plaid_pull_anywhere(db) is None
+
+        auto_tasks._run_plaid_sync(db, trigger="test")
+
+        assert last_plaid_pull_anywhere(db) is not None
+
+    def test_force_overrides_the_skip(self, db, monkeypatch):
+        """A manual sync from the UI must always reach Plaid."""
+        from src.sync.engine import record_plaid_pull
+
+        called = []
+        monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: called.append(1))
+        record_plaid_pull(db, _now().replace(tzinfo=None))
+
+        auto_tasks._run_plaid_sync(db, trigger="test", force=True)
+
+        assert called == [1]
+
+    def test_a_skip_still_advances_the_local_clock(self, db, monkeypatch):
+        """Otherwise this device re-evaluates the decision on every 15-minute poll forever."""
+        from src.sync.engine import record_plaid_pull
+
+        monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: None)
+        record_plaid_pull(db, _now().replace(tzinfo=None) - timedelta(hours=1))
+
+        auto_tasks._run_plaid_sync(db, trigger="test")
+
+        assert auto_tasks._read_timestamp(db, auto_tasks.LAST_SYNC_KEY) is not None

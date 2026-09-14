@@ -143,8 +143,11 @@ worse than reacting late.
 - **B — change tracking.** Maintain `updated_at` on write, record tombstones on delete.
 - **C — payload and merge engine**, with convergence tested as a property: merging two payloads in
   either order must reach the same state.
-- **D — transport.** Per-device `device-<id>.json` in the Drive appData folder, reusing the existing
-  Drive client. Secrets excluded per §4.
+- **D — transport.** Per-device `device-<id>.json` in a `devices/` subfolder of the app's existing
+  Drive folder, reusing the existing Drive client. **Not** the appData folder: that needs the
+  `drive.appdata` scope, and this app is authorised for `drive.file` only, so using it would force
+  every existing user back through Google consent. `drive.file` covers files the app created, which
+  is exactly what these are. Secrets excluded per §4.
 - **E — the one-syncer claim.**
 - **F — device registry UI**, showing which devices participate and when each was last seen.
 
