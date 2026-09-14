@@ -165,8 +165,67 @@ def _ensure_transaction_columns() -> None:
             "CREATE UNIQUE INDEX ix_rate_lookup ON exchange_rates (date, from_currency, to_currency)"
         )
 
+    statements.extend(_sync_identity_statements(inspector))
+
     if not statements:
         return
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))
+
+
+# Tables gaining multi-device sync identity, and which columns each needs.
+#
+# `uid` only where there is no natural key to merge on. `projects` and `contacts` have unique names
+# and are merged by name, but keep a uid so a rename can be followed; the link tables get neither,
+# because they are identified by their parents' natural keys. See docs/multi_device_sync.md.
+_SYNC_IDENTITY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "projects": ("uid", "updated_at"),
+    "contacts": ("uid", "updated_at"),
+    "subscriptions": ("uid", "updated_at"),
+    "rules": ("uid", "updated_at"),
+    "transaction_projects": ("updated_at",),
+    "project_members": ("updated_at",),
+    "transaction_splits": ("updated_at",),
+    "transaction_project_splits": ("updated_at",),
+    "contact_splitwise_links": ("updated_at",),
+}
+
+
+def _sync_identity_statements(inspector) -> list[str]:
+    """ALTERs for the sync identity columns. Adding columns only -- never writing rows.
+
+    `create_all` creates missing *tables* (so `tombstones` and `sync_devices` appear on their own)
+    but will not add a column to a table that already exists, which is caveat #1 in AGENTS.md.
+
+    Every column is nullable with no default, for two reasons. SQLite cannot add a column with a
+    non-constant default, and more importantly a NULL here is meaningful: it means "not yet minted",
+    which is what lets `backfill-sync-identity` run incrementally and be re-run safely. Populating
+    them is that CLI's job, deliberately not this function's -- rewriting rows of real financial
+    history on every boot is exactly what startup backfill was removed for.
+    """
+    statements: list[str] = []
+    for table, columns in _SYNC_IDENTITY_COLUMNS.items():
+        if not inspector.has_table(table):
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        for column in columns:
+            if column in existing:
+                continue
+            column_type = "VARCHAR" if column == "uid" else "DATETIME"
+            statements.append(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+        # Checked for absence rather than relying on IF NOT EXISTS alone: an unconditional statement
+        # would make `statements` non-empty on every boot, so init_db would open a write transaction
+        # each start with nothing to do -- and that transaction contends with the startup sync.
+        index_name = f"ix_{table}_uid"
+        if "uid" in columns and not any(
+            index["name"] == index_name for index in inspector.get_indexes(table)
+        ):
+            # Partial, so the rows still awaiting a backfill do not collide with each other.
+            # (SQLite treats NULLs as distinct in a plain unique index too; the WHERE clause states
+            # the intent and keeps the index small.)
+            statements.append(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table} (uid) "
+                "WHERE uid IS NOT NULL"
+            )
+    return statements
