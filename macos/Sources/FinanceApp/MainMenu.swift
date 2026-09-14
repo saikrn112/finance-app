@@ -55,6 +55,11 @@ enum MainMenu {
             action: #selector(AppDelegate.choosePluginsFolder(_:)),
             keyEquivalent: ""
         )
+        menu.addItem(
+            withTitle: "Data Folder…",
+            action: #selector(AppDelegate.chooseDataFolder(_:)),
+            keyEquivalent: ""
+        )
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Hide \(applicationName)",

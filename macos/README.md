@@ -513,3 +513,44 @@ mis-parses real money.
   folder" is "choose code to run". Worth remembering before this app is ever handed to anyone else.
 - **A second machine.** The path is per-machine in `UserDefaults`, so a restored database does not
   drag a path that does not exist. Nothing clones the repository for you.
+
+---
+
+## The data folder, and why it is a setting
+
+The app started with its own copy of `data/` in Application Support. That was fine to get going and
+wrong to keep. Five days later the two had drifted **in both directions**:
+
+| | app's copy | container's |
+| --- | --- | --- |
+| transactions | 3734 | 3731 |
+| `transaction_projects` | 218 | 248 |
+| `transaction_splits` | 0 | 306 |
+| transactions with notes | 0 | 22 |
+| Robinhood Plaid item | `item_gone`, old access token | healthy |
+
+Neither was a subset of the other, and nothing warned. It surfaced as three separate-looking
+complaints — "don't see projects imported", "don't see tags added recently", and "Robinhood is not
+connected in the macOS app" — all one cause. The Robinhood one is worth keeping in mind: the app was
+*correctly* reporting a dead Plaid Item, because its copy still held the access token from before the
+re-link. main's new `item_gone` handling was working exactly as designed on stale data.
+
+*FinanceApp → Data Folder…* points the app at any `data/` directory. It moves **only the pointer**:
+nothing is copied, merged or deleted, because two written SQLite databases cannot be reconciled
+without inventing an answer for every differing row, and that is a decision about real financial
+history. The confirmation states whether the target already holds a database and how large it is —
+pointing at an empty folder starts a new database, which looks exactly like losing everything.
+
+Logs, `config.yaml`, the instance lock and the remembered port stay with the app: they are properties
+of this installation, not of the data.
+
+### Do not run both apps against one folder
+
+Verified the hard way: with the container running, its Finch VM holds the same file through a bind
+mount. SQLite allows a single writer, `job_lock` is in-process only, and advisory locking across a
+Lima/Finch bind mount is not something to rely on — that risks corruption, not merely
+"database is locked". Stop one before pointing the other at it.
+
+This is also why WAL stays off. The container disables it because the shared-memory file is
+unreliable on that mount, and as long as the same folder can be opened from inside the VM, that
+reasoning applies to the bundle too.

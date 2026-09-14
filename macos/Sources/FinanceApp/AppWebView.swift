@@ -449,6 +449,19 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
     ) {
         let url = navigationAction.request.url
 
+        // Every rule below is about the *main frame* — about what the window becomes.
+        //
+        // Subframes are a different question and were getting the same answer, which broke Plaid.
+        // `react-plaid-link` renders Plaid's hosted flow in an iframe on cdn.plaid.com, so each of
+        // those loads was treated as off-origin navigation and opened in the browser: opening
+        // Settings, which mounts the Plaid button, spat out a dozen Safari tabs and no working
+        // Link. An iframe cannot replace the app, so third-party frames are simply allowed.
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        guard isMainFrame else {
+            decisionHandler(.allow)
+            return
+        }
+
         // An OAuth start endpoint is a redirect to a provider. It cannot be loaded here: a
         // navigation carries no session token, so it 401s, and the provider's consent page must
         // not run in this origin regardless.
@@ -458,13 +471,12 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
             return
         }
 
-        // Nothing else under /api may become the window either. The app is a single page
-        // that talks to the API with fetch; a top-level navigation to an API URL is always
-        // a mistake, and the failure mode is severe -- the entire app is replaced by a JSON
-        // body, with no way back but Reload. That is exactly what happened with the Google
-        // popup before this check existed.
+        // Nothing else under /api may become the window either. The app is a single page that
+        // talks to the API with fetch; a main-frame navigation to an API URL is always a mistake,
+        // and the failure mode is severe -- the entire app replaced by a JSON body, with no way
+        // back but Reload. That is exactly what happened with the Google popup before this check.
         if isLocalApp(url), let url, url.path.hasPrefix("/api/") {
-            log.write("blocked a top-level navigation to an API path")
+            log.write("blocked a main-frame navigation to an API path")
             decisionHandler(.cancel)
             return
         }
@@ -473,8 +485,8 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
             decisionHandler(.allow)
             return
         }
-        // Anything off-origin opens in the user's browser, where it has an address bar
-        // and none of our cookies.
+        // A main-frame navigation off-origin opens in the user's browser, where it has an address
+        // bar and none of our cookies.
         log.write("navigation to \(ShellLog.safeOrigin(url)) sent to the system browser")
         if let url, url.scheme == "http" || url.scheme == "https" {
             NSWorkspace.shared.open(url)

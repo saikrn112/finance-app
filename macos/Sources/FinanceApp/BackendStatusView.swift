@@ -125,10 +125,44 @@ struct BackendStatusView: View {
 
     private var pathRows: some View {
         VStack(alignment: .leading, spacing: 8) {
-            pathRow("Database", layout.databaseURL)
+            databaseRow
             pathRow("Backend log", layout.backendLogURL)
             pathRow("Settings file", layout.configURL)
             pluginRow
+        }
+    }
+
+    /// Which database is open, and whether it is the app's own copy or a shared folder.
+    ///
+    /// Worth its own row because a copy that drifts from the container app's is invisible from
+    /// inside: it presented as missing projects, missing splits, and a Plaid connection that
+    /// reported itself dead because this copy still held the old access token.
+    private var databaseRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Database")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(layout.databaseURL.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Text(
+                    layout.dataDirectoryOverride == nil
+                        ? "The app's own copy — it will drift from any other app using its own."
+                        : "Shared folder. Do not run another app against it at the same time."
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            Button("Change…") {
+                NSApp.sendAction(#selector(AppDelegate.chooseDataFolder(_:)), to: nil, from: nil)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
         }
     }
 

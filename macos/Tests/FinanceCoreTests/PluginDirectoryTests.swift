@@ -156,3 +156,142 @@ struct PluginDirectoryTests {
         }
     }
 }
+
+/// The data directory, whose whole reason for existing is that two copies drifted apart.
+@Suite("DataDirectory", .serialized)
+struct DataDirectoryTests {
+    private func isolatedDefaults() -> UserDefaults {
+        let suite = "DataDirectoryTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    /// A directory shaped like the app's `data/`.
+    private func makeDataDir(withDatabase bytes: Int? = nil, withRuntime: Bool = true) -> URL {
+        let url = FileManager.default.temporaryDirectory.appending(path: "data-\(UUID().uuidString)")
+        let runtime = url.appending(path: "runtime/prod")
+        try? FileManager.default.createDirectory(
+            at: withRuntime ? runtime : url, withIntermediateDirectories: true
+        )
+        if let bytes {
+            try? Data(repeating: 0, count: bytes)
+                .write(to: runtime.appending(path: "finances.db"))
+        }
+        return url
+    }
+
+    @Test("a real data folder validates")
+    func acceptsDataDir() {
+        let url = makeDataDir()
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(DataDirectory.diagnose(url) == nil)
+    }
+
+    @Test("a missing folder is reported")
+    func rejectsMissing() {
+        let url = FileManager.default.temporaryDirectory.appending(path: "gone-\(UUID().uuidString)")
+        #expect(DataDirectory.diagnose(url) == .missing)
+    }
+
+    @Test("runtime/prod is created when absent")
+    func createsRuntime() {
+        let url = makeDataDir(withRuntime: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(DataDirectory.diagnose(url) == nil)
+        #expect(FileManager.default.fileExists(atPath: url.appending(path: "runtime/prod").path))
+    }
+
+    @Test("a read-only folder is refused")
+    func rejectsReadOnly() throws {
+        let url = makeDataDir()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            try? FileManager.default.removeItem(at: url)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: url.path)
+        #expect(DataDirectory.diagnose(url) == .notWritable)
+    }
+
+    @Test("an existing database is reported with its size, and an absent one as empty")
+    func contentsDistinguishEmptyFromPopulated() {
+        // Pointing at a folder with no database starts an empty one, which looks exactly like
+        // losing everything — so the confirmation has to be able to say which case it is.
+        let populated = makeDataDir(withDatabase: 2 * 1_048_576)
+        let empty = makeDataDir()
+        defer {
+            try? FileManager.default.removeItem(at: populated)
+            try? FileManager.default.removeItem(at: empty)
+        }
+
+        let full = DataDirectory.contents(of: populated)
+        #expect(full.databaseExists)
+        #expect(full.summary.contains("2.0 MB"))
+
+        let blank = DataDirectory.contents(of: empty)
+        #expect(!blank.databaseExists)
+        #expect(blank.summary.contains("empty"))
+    }
+
+    @Test("nothing chosen resolves to the app's own folder")
+    func resolvesToDefault() {
+        let fallback = URL(filePath: "/tmp/app-owned-data")
+        let resolved = DataDirectory.resolved(default: fallback, defaults: isolatedDefaults())
+        #expect(resolved.url == fallback)
+        #expect(resolved.problem == nil)
+    }
+
+    @Test("a chosen folder wins")
+    func resolvesToChoice() {
+        let defaults = isolatedDefaults()
+        let url = makeDataDir()
+        defer { try? FileManager.default.removeItem(at: url) }
+        DataDirectory.remember(url, defaults: defaults)
+        let resolved = DataDirectory.resolved(default: URL(filePath: "/tmp/x"), defaults: defaults)
+        #expect(resolved.url == url)
+        #expect(resolved.problem == nil)
+    }
+
+    @Test("a chosen folder that has moved falls back rather than failing to launch")
+    func fallsBackWhenChoiceDisappears() {
+        // An external volume that is not mounted, or a repository that was moved. Refusing to start
+        // would be a worse answer than opening the app's own database and saying so.
+        let defaults = isolatedDefaults()
+        let url = makeDataDir()
+        DataDirectory.remember(url, defaults: defaults)
+        try? FileManager.default.removeItem(at: url)
+
+        let fallback = URL(filePath: "/tmp/app-owned-data")
+        let resolved = DataDirectory.resolved(default: fallback, defaults: defaults)
+        #expect(resolved.url == fallback)
+        #expect(resolved.problem == .missing)
+    }
+}
+
+@Suite("BundleLayout: data directory override")
+struct BundleLayoutOverrideTests {
+    private let base = BundleLayout(
+        resourcesDirectory: URL(filePath: "/tmp/FinanceApp.app/Contents/Resources"),
+        supportDirectory: URL(filePath: "/tmp/support"),
+        logDirectory: URL(filePath: "/tmp/logs")
+    )
+
+    @Test("without an override the app owns its data")
+    func defaultsToSupport() {
+        #expect(base.dataDirectory.path == "/tmp/support/data")
+        #expect(base.databaseURL.path == "/tmp/support/data/runtime/prod/finances.db")
+    }
+
+    @Test("an override moves the database and the runtime directory, and nothing else")
+    func overrideMovesOnlyData() {
+        let moved = base.withDataDirectory(URL(filePath: "/elsewhere/data"))
+        #expect(moved.databaseURL.path == "/elsewhere/data/runtime/prod/finances.db")
+        #expect(moved.runtimeDirectory.path == "/elsewhere/data/runtime/prod")
+        // Logs, the config, the instance lock and the port memory stay with the app: they are
+        // properties of this installation, not of the financial data.
+        #expect(moved.backendLogURL == base.backendLogURL)
+        #expect(moved.configURL == base.configURL)
+        #expect(moved.instanceLockURL == base.instanceLockURL)
+        #expect(moved.portMemoryURL == base.portMemoryURL)
+    }
+}

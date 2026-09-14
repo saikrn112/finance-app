@@ -14,6 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var appearanceObserver: NSKeyValueObservation?
     /// Read once at launch from the environment; see the note where it is set.
     private var privacyMask = false
+    /// `layout`, with any chosen data folder applied. What the backend actually gets.
+    private lazy var activeLayout = layout
 
     private let layout = BundleLayout.forRunningApplication()
     private lazy var log = ShellLog(url: layout.shellLogURL)
@@ -86,6 +88,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// redo it: the backend imports plugins once at startup and reads the directory from its
     /// environment, so a new folder means a new child process.
     private func startSupervisorAndWindow() {
+        // Where the database lives. Resolved every launch, and it falls back to the app's own copy
+        // rather than refusing to start if a chosen folder has moved -- with the reason logged, and
+        // the folder actually in use shown in the diagnostics row.
+        let resolved = DataDirectory.resolved(default: layout.dataDirectory)
+        if let problem = resolved.problem {
+            log.write("data folder unusable, using the app's own copy: \(problem.explanation)")
+        }
+        activeLayout = layout.withDataDirectory(
+            DataDirectory.remembered() != nil && resolved.problem == nil ? resolved.url : nil
+        )
+        log.write("database: \(activeLayout.databaseURL.path)")
+
         let pluginStatus = PluginDirectory.status()
         switch pluginStatus {
         case .notConfigured:
@@ -99,9 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
 
         let supervisor = BackendSupervisor(
-            layout: layout,
+            layout: activeLayout,
             environment: BackendEnvironment(
-                layout: layout,
+                layout: activeLayout,
                 privatePluginsDirectory: pluginStatus.usableDirectory,
                 privacyMask: privacyMask
             )
@@ -109,6 +123,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.supervisor = supervisor
         showWindow(for: supervisor)
         supervisor.start()
+    }
+
+    /// Pick the `data/` directory.
+    ///
+    /// Deliberately only moves the *pointer*. Two SQLite databases that have both been written
+    /// cannot be reconciled without inventing an answer for every differing row, and that is a
+    /// decision about real financial history — so nothing here copies, merges or deletes data.
+    @objc func chooseDataFolder(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose the data folder"
+        panel.message =
+            "The folder containing runtime/prod/finances.db. Point this at the same folder the "
+            + "container app uses and the two stop drifting apart. Nothing is copied or merged — "
+            + "only which database the app opens.\n\nDo not run both apps against it at once: "
+            + "SQLite allows one writer, and the second one fails with \"database is locked\"."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = DataDirectory.remembered() ?? layout.dataDirectory
+        panel.prompt = "Use Folder"
+
+        guard panel.runModal() == .OK, let chosen = panel.url else { return }
+
+        if let problem = DataDirectory.diagnose(chosen) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "That folder cannot be used"
+            alert.informativeText = problem.explanation
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        // Say what is there before switching. Pointing at a folder with no database starts an empty
+        // one, which looks exactly like losing everything.
+        let contents = DataDirectory.contents(of: chosen)
+        let confirm = NSAlert()
+        confirm.alertStyle = contents.databaseExists ? .informational : .warning
+        confirm.messageText = "Use this data folder?"
+        confirm.informativeText =
+            "\(chosen.path)\n\n\(contents.summary)\n\n"
+            + "The app will restart its backend and open that database. Your current one is left "
+            + "untouched at \(layout.dataDirectory.path)."
+        confirm.addButton(withTitle: "Use It")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+
+        DataDirectory.remember(chosen)
+        log.write("data folder set to \(chosen.path); restarting the backend")
+        rebuildSupervisor()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -17,11 +17,32 @@ public struct BundleLayout: Sendable {
     public let supportDirectory: URL
     /// `~/Library/Logs/FinanceApp`
     public let logDirectory: URL
+    /// A `data/` directory somewhere else, if the owner has chosen one.
+    ///
+    /// Exists so the desktop app and the container app can share one database instead of each
+    /// keeping a copy that drifts. See `DataDirectory` for what went wrong without it.
+    public let dataDirectoryOverride: URL?
 
-    public init(resourcesDirectory: URL, supportDirectory: URL, logDirectory: URL) {
+    public init(
+        resourcesDirectory: URL,
+        supportDirectory: URL,
+        logDirectory: URL,
+        dataDirectoryOverride: URL? = nil
+    ) {
         self.resourcesDirectory = resourcesDirectory
         self.supportDirectory = supportDirectory
         self.logDirectory = logDirectory
+        self.dataDirectoryOverride = dataDirectoryOverride
+    }
+
+    /// The same layout pointed at a different `data/`.
+    public func withDataDirectory(_ url: URL?) -> BundleLayout {
+        BundleLayout(
+            resourcesDirectory: resourcesDirectory,
+            supportDirectory: supportDirectory,
+            logDirectory: logDirectory,
+            dataDirectoryOverride: url
+        )
     }
 
     // MARK: - Payload (read-only, inside the bundle)
@@ -39,7 +60,9 @@ public struct BundleLayout: Sendable {
 
     /// Mirrors the container layout so an existing `data/` directory can be pointed
     /// at directly rather than migrated.
-    public var dataDirectory: URL { supportDirectory.appending(path: "data") }
+    public var dataDirectory: URL {
+        dataDirectoryOverride ?? supportDirectory.appending(path: "data")
+    }
     public var runtimeDirectory: URL { dataDirectory.appending(path: "runtime/prod") }
     public var databaseURL: URL { runtimeDirectory.appending(path: "finances.db") }
     /// Plaid and Google client secrets. Mode 0600; see `SecretsFile`.
