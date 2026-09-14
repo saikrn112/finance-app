@@ -756,3 +756,81 @@ class TestUnsyncableRows:
             assert find_unsyncable(a) == {}
         finally:
             a.close()
+
+
+class TestUnknownAge:
+    """A row with no `updated_at` must not be stamped with the receiving device's clock.
+
+    Found on real data, where 2427 transactions had a NULL updated_at. The models declare
+    `default=datetime.utcnow`, so inserting such a row without an explicit stamp claimed it had just
+    been edited -- and that fabricated timestamp then beats a peer's real, older value, silently
+    overwriting a genuine annotation with a stale one.
+    """
+
+    def test_an_undated_row_is_inserted_as_unknown_age_not_as_now(self, device_a, device_b):
+        from src.sync.merge import UNKNOWN_AGE
+
+        a = device_a()
+        try:
+            _add_transaction(a)
+            a.execute(text("UPDATE transactions SET updated_at = NULL"))
+            a.commit()
+        finally:
+            a.close()
+
+        _sync(device_a, device_b)
+
+        b = device_b()
+        try:
+            assert b.query(Transaction).one().updated_at == UNKNOWN_AGE
+        finally:
+            b.close()
+
+    def test_a_real_edit_elsewhere_beats_an_undated_row(self, device_a, device_b):
+        """The consequence that matters: the fabricated timestamp used to win this."""
+        a = device_a()
+        try:
+            _add_transaction(a, category="Real annotation", updated_at=T0)
+            a.close()
+        except Exception:
+            a.close()
+            raise
+
+        # B receives it as undated, as an old database would hold it.
+        b = device_b()
+        try:
+            _add_transaction(b, category="Stale")
+            b.execute(text("UPDATE transactions SET updated_at = NULL"))
+            b.commit()
+        finally:
+            b.close()
+
+        _sync(device_b, device_a, device_id="dev-b")
+
+        a = device_a()
+        try:
+            assert a.query(Transaction).one().category == "Real annotation"
+        finally:
+            a.close()
+
+    def test_both_devices_agree_on_the_age_of_an_undated_row(self, device_a, device_b):
+        """Deterministic, so neither device wins spuriously."""
+        a = device_a()
+        try:
+            _add_transaction(a)
+            a.execute(text("UPDATE transactions SET updated_at = NULL"))
+            a.commit()
+        finally:
+            a.close()
+
+        _sync(device_a, device_b, device_id="dev-a")
+        _sync(device_b, device_a, device_id="dev-b")
+
+        def stamp(factory):
+            session = factory()
+            try:
+                return session.query(Transaction).one().updated_at
+            finally:
+                session.close()
+
+        assert stamp(device_a) == stamp(device_b)
