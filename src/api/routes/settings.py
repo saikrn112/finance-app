@@ -395,6 +395,11 @@ def clear_transactions(source: str = None, db: Session = Depends(get_db)):
     query = db.query(Transaction)
     if source:
         query = query.filter(Transaction.source == source)
+    # Deliberately a raw bulk delete, so this does NOT produce tombstones and does NOT propagate.
+    # Clearing transactions is a local repair before re-importing, not an assertion that the
+    # history never existed. Propagating it would let a re-import on one device wipe another, and
+    # the failure is benign either way: re-importing recreates the same natural keys, and if you
+    # do not re-import, the next merge restores the rows from a peer.
     count = query.delete()
     db.commit()
     return {"deleted": count}
