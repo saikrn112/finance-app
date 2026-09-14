@@ -554,3 +554,44 @@ Lima/Finch bind mount is not something to rely on — that risks corruption, not
 This is also why WAL stays off. The container disables it because the shared-memory file is
 unreliable on that mount, and as long as the same folder can be opened from inside the VM, that
 reasoning applies to the bundle too.
+
+### Keeping the copy fresh until cutover
+
+Until the desktop app becomes the source of truth, the container app is, and the two copies drift
+apart the moment either is used. `macos/scripts/refresh_data_from_webapp.sh` makes that one-way
+refresh repeatable:
+
+```bash
+macos/scripts/refresh_data_from_webapp.sh --check   # compare only, writes nothing
+macos/scripts/refresh_data_from_webapp.sh          # replace, then relaunch
+```
+
+It quits the app first (nothing may hold the database open while it is replaced), backs the current
+copy up to `/tmp/`, snapshots the container's database with SQLite's **online backup API** rather
+than `cp` — the container is usually running, and a plain copy can catch a half-written transaction
+— and carries across every table the app has that the container does not, plus the `feedback*` keys
+in `app_metadata`. That list is derived rather than hard-coded, so a table added to the app later is
+carried instead of destroyed by the next refresh.
+
+Anything written only in the desktop app is lost, most plausibly a Plaid sync it ran itself; Plaid
+re-fetches, and the before/after counts are printed either way.
+
+Two traps found while building it, both of which produce a valid SQLite file that
+`integrity_check` calls `ok`:
+
+- **`$REPO_ROOT` is the wrong source.** This branch is normally checked out as a git *worktree*, and
+  a worktree has its own untracked, empty `data/`. The first `--check` reported the container's
+  database as zero rows of everything; a real run would have replaced five years of history with an
+  empty database and reported success. The source is now the **main** worktree
+  (`git worktree list`), overridable with `FINANCE_WEBAPP_ROOT`.
+- **So a shrinking refresh is refused.** Zero transactions in the source, or fewer than the app
+  already has, aborts before anything is written (`--force` overrides). This is the only check that
+  catches pointing at the wrong database, because every wrong database is still a valid one.
+
+The guard is mutation-verified: with it removed, the same sandbox run installs the empty database.
+Note that the *first* attempt to mutation-test it was invalid — the mutant was written to `/tmp`,
+where its `source .../common.sh` failed silently, so `log` resolved to macOS's `/usr/bin/log` and the
+"mutant" was never the same program. A mutant has to live beside `common.sh`.
+
+**After cutover, stop running this** — it would overwrite the newer database with the older one.
+Delete it, or move the app to a shared folder so there is only one copy.
