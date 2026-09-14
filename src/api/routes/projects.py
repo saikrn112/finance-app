@@ -10,6 +10,7 @@ from decimal import Decimal
 from src.models import get_db, Project, TransactionProject, Transaction, ExchangeRate, Contact, ProjectMember, TransactionSplit
 from src.services.exchange_rates import latest_rate_subquery, ensure_rates_fresh
 from src.api.schemas import ProjectItem, ProjectDetailResponse
+from src.sync.tracking import bulk_delete
 
 router = APIRouter()
 
@@ -375,7 +376,9 @@ def delete_project(project_id: str, db: Session = Depends(get_db)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
-    db.query(TransactionProject).filter(TransactionProject.project_id == project_id).delete()
+    # bulk_delete, not query.delete(): a raw DELETE never loads the rows, so the tombstone hook
+    # cannot see them and the links would come back on the next merge.
+    bulk_delete(db, TransactionProject, project_id=project_id)
     db.delete(p)
     db.commit()
     return {"ok": True}
@@ -488,7 +491,7 @@ def update_transaction_splits(project_id: str, txn_id: str, body: SplitsUpdateBo
                 f"Shares must add up to {total}; got {assigned}",
             )
 
-    db.query(TransactionSplit).filter_by(transaction_id=txn_id).delete()
+    bulk_delete(db, TransactionSplit, transaction_id=txn_id)
     for contact_id in body.contact_ids:
         row = TransactionSplit(transaction_id=txn_id, contact_id=contact_id)
         if shares:
@@ -524,7 +527,7 @@ def add_project_members(project_id: str, body: MembersUpdateBody, db: Session = 
 
 @router.delete("/{project_id}/members/{contact_id}")
 def remove_project_member(project_id: str, contact_id: str, db: Session = Depends(get_db)):
-    db.query(ProjectMember).filter_by(project_id=project_id, contact_id=contact_id).delete()
+    bulk_delete(db, ProjectMember, project_id=project_id, contact_id=contact_id)
     db.commit()
     return {"ok": True}
 
@@ -590,8 +593,9 @@ def contact_usage(contact_id: str, db: Session = Depends(get_db)):
 
 @contacts_router.delete("/{contact_id}")
 def delete_contact(contact_id: str, db: Session = Depends(get_db)):
-    db.query(TransactionSplit).filter_by(contact_id=contact_id).delete()
-    db.query(ProjectMember).filter_by(contact_id=contact_id).delete()
+    # Children first, so the contact's name is still readable when the tombstone hook names them.
+    bulk_delete(db, TransactionSplit, contact_id=contact_id)
+    bulk_delete(db, ProjectMember, contact_id=contact_id)
     c = db.query(Contact).filter(Contact.id == contact_id).first()
     if c:
         db.delete(c)
