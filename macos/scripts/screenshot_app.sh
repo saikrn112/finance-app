@@ -4,8 +4,20 @@
 # Usage: screenshot_app.sh [output.png]
 #
 # Needs one TCC grant for the terminal running this, which only a human can give:
-# **Screen Recording** (System Settings -> Privacy & Security). Without it screencapture
-# returns a black rectangle rather than failing, so this checks the result.
+# **Screen Recording** (System Settings -> Privacy & Security).
+#
+# How the denial actually presents, because it is misleading in both directions:
+#   * `-l <window-id>` and `-R <rect>` fail outright, with "could not create image from
+#     window" / "from rect" -- which reads like a broken window id or a macOS version
+#     problem, not a permissions one. The window id resolves fine either way.
+#   * a plain whole-screen `screencapture -x` *succeeds* and writes a perfectly valid PNG
+#     of the desktop with no windows in it (~100KB). So neither the exit status nor the
+#     file size tells you the grant is missing.
+# The only reliable check is content: capture, hide the window, capture again, and compare
+# hashes. Identical bytes mean windows are not being captured at all.
+#
+# The grant is per-host-application and is lost when that application changes, so a tour
+# that worked last week can fail today with nothing in this repo having changed.
 #
 # Deliberately does *not* need Accessibility. Reading a window's bounds through System
 # Events is UI scripting and requires it; asking CoreGraphics for the window list does
