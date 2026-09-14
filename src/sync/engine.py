@@ -113,7 +113,8 @@ def run_sync(
             db.rollback()
 
     try:
-        since = None if full else _own_watermark(db, device_id)
+        # Full state, always. See _own_watermark for why the obvious optimisation is wrong.
+        since = None
         payload = build_payload(
             db,
             device_id=device_id,
@@ -158,11 +159,25 @@ _OWN_WATERMARK_KEY = "sync_own_published_watermark"
 
 
 def _own_watermark(db: Session, device_id: str) -> datetime | None:
-    """The newest row this device has already published.
+    """The newest row this device has published. **Not used to filter publishing** -- see below.
 
-    Kept in `app_metadata` rather than in `sync_devices`, because it is about *this* device's own
-    publishing, not about a peer. Republishing everything every time is what makes Timeslice's
-    payloads grow without bound.
+    Publishing only rows newer than this is the obvious way to stop payloads growing without bound,
+    and it is wrong. A row merged from a peer carries *that peer's* `updated_at`, and peer clocks are
+    independent, so a freshly-learned row routinely has a timestamp older than this device's own
+    watermark. It is then excluded from the next publish and never relayed onward -- so a third
+    device, or one that only ever reads this device's file, silently never receives it.
+
+    The randomised soak test caught exactly that: devices ended up with different *sets* of
+    transactions, each missing rows the other had learned.
+
+    Doing this correctly needs a local monotonic marker ("this row changed on this device at local
+    sequence N") that is bumped by merges as well as by user edits, which `updated_at` cannot be
+    because it deliberately carries the *originating* device's time. That is a schema addition and a
+    write hook; until then payloads are full state, which is correct and merely larger -- 2.5 MB for
+    ~3700 transactions.
+
+    Kept because `build_payload(since=...)` is still the right primitive, and the diagnostics show how
+    much a device would have skipped.
     """
     from src.models import AppMetadata
 
