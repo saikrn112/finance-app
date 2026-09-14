@@ -26,13 +26,23 @@
 # sync it ran itself. Plaid re-fetches on the next sync, so this is recoverable, but it is a real
 # overwrite and the script prints the delta before doing it.
 #
-# ## After cutover
+# ## After cutover -- THIS HAS HAPPENED, the script is disarmed
 #
-# When the desktop app becomes the source of truth, stop running this: from that point on it
-# would overwrite the newer database with the older one. Delete the script, or move the app to a
-# shared data folder (Diagnostics > Database > Change...) so there is only one copy at all.
+# On 2026-09-14 the owner switched to the desktop app as their only app. From that moment this
+# script's direction is backwards: the container's database is the stale one, and running this
+# would overwrite newer financial history with older.
+#
+# So the write path now refuses (see CUTOVER_DATE below). `--check` still works, because comparing
+# is useful and reads nothing. Kept rather than deleted because the two guards and the online-backup
+# reasoning are the reference for any future copy in either direction -- and because a deleted
+# script is re-invented from memory, without them.
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+# The date the desktop app became the source of truth. Set = the write path is disarmed.
+# In the script and in git rather than a marker file on disk, so it is visible in review and
+# survives a machine rebuild, and so nobody can re-enable it by deleting something invisible.
+CUTOVER_DATE="2026-09-14"
 
 APP_SUPPORT="$HOME/Library/Application Support/$APP_NAME"
 APP_DATA="$APP_SUPPORT/data/runtime/prod"
@@ -61,7 +71,7 @@ for arg in "$@"; do
         --no-launch)  RELAUNCH=0 ;;
         --force)      FORCE=1 ;;
         -h|--help)
-            sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             echo
             echo "usage: $(basename "$0") [--check] [--no-launch] [--force]"
             echo "  --check      compare the two databases and change nothing"
@@ -69,6 +79,8 @@ for arg in "$@"; do
             echo "  --force      refresh even though the container's copy has fewer transactions"
             echo
             echo "env: FINANCE_WEBAPP_ROOT  the container app's checkout (default: the main worktree)"
+            [ -n "$CUTOVER_DATE" ] \
+                && echo && echo "DISARMED since $CUTOVER_DATE: the desktop app is the source of truth."
             exit 0 ;;
         *) die "unknown option: $arg" ;;
     esac
@@ -113,7 +125,20 @@ fi
 
 if [ "$CHECK_ONLY" = 1 ]; then
     log "--check: nothing was written"
+    [ -n "$CUTOVER_DATE" ] && warn "the write path is disarmed (cutover $CUTOVER_DATE)"
     exit 0
+fi
+
+# Past cutover this script points the wrong way. Refused unconditionally -- not even --force,
+# because --force exists to override the "fewer transactions" heuristic, and reusing it here would
+# let one flag mean both "I checked, the counts are fine" and "yes, discard the newer database".
+if [ -n "$CUTOVER_DATE" ]; then
+    die "disarmed on $CUTOVER_DATE: the desktop app is now the source of truth, so copying from
+       the container would overwrite newer financial history with older.
+         * to compare the two:      $(basename "$0") --check
+         * to genuinely reverse it: clear CUTOVER_DATE in this script, in a reviewable commit
+       If what you actually want is the other direction (app -> container), this script does not
+       do that; it would need its own guards, not an inverted copy of these."
 fi
 
 # A refresh that shrinks the history is the signature of pointing at the wrong database -- an empty
