@@ -175,3 +175,33 @@ worse than reacting late.
 
 Sync stays **off behind a flag** until C and D are proven against a copy of a real database. The
 container app's behaviour does not change until then.
+
+---
+
+## 7. What has actually been exercised
+
+`DriveTransport` **has been run against real Google Drive** (2026-09-15), with a synthetic payload
+carrying zero records and a throwaway device id, deleted afterwards — so the plumbing is verified
+without publishing any financial data. Nine checks passed: the `devices/` folder resolves, upload
+succeeds, another device lists and downloads it, Drive reports a `modifiedTime`, **re-publishing
+updates in place rather than creating a duplicate**, the update is what is read back, a device does not
+fetch its own file, and delete removes it.
+
+Still unexercised: a real payload over Drive, concurrency (two processes syncing at once), and clock
+skew.
+
+### Publishing is skipped when nothing changed
+
+Payloads are full state, so republishing an unchanged one uploads the whole history — ~2.5 MB, which at
+a 15-minute poll would be a few hundred megabytes a day for nothing. `run_sync` therefore compares a
+cheap signature: per synced table the row count, the newest `updated_at`, **and the sum of all
+`updated_at` values**.
+
+The sum is not decoration. Count-and-maximum alone misses the most ordinary edit there is —
+re-categorising an *old* transaction moves that row's timestamp but neither the count nor the table
+maximum, so the change would never be published at all. That bug existed for one commit and was caught
+by a test written for a different purpose.
+
+An explicit "did the merge change anything?" condition was also present and was removed as provably
+redundant: every synced model declares `onupdate` on `updated_at`, so any ORM modification moves a
+timestamp the signature already covers.
