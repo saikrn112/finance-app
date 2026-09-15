@@ -166,7 +166,10 @@ worse than reacting late.
 - **C — payload and merge engine**, with convergence tested as a property: merging two payloads in
   either order must reach the same state.
 - **D — transport.** Per-device `device-<id>.json` in a `devices/` subfolder of the app's existing
-  Drive folder, reusing the existing Drive client. **Not** the appData folder: that needs the
+  Drive folder, reusing the existing Drive client. **Drive is the only transport.** A directory-based
+  one was added and then removed: a folder only reaches processes that can see that filesystem, so it
+  is single-machine sync wearing the label of multi-device sync — a phone or a second Mac could never
+  join. Tests use a dict-backed fake (`tests/sync_fakes.py`), which is a better double anyway. **Not** the appData folder: that needs the
   `drive.appdata` scope, and this app is authorised for `drive.file` only, so using it would force
   every existing user back through Google consent. `drive.file` covers files the app created, which
   is exactly what these are. Secrets excluded per §4.
@@ -187,8 +190,10 @@ succeeds, another device lists and downloads it, Drive reports a `modifiedTime`,
 updates in place rather than creating a duplicate**, the update is what is read back, a device does not
 fetch its own file, and delete removes it.
 
-Still unexercised: a real payload over Drive, concurrency (two processes syncing at once), and clock
-skew.
+Still unexercised, and the honest gap: **a real payload over Drive between two apps has never run.**
+Automated tests drive a fake transport, so `DriveTransport` itself has no automated coverage at all —
+only the manual synthetic run above. Concurrency (two processes syncing at once) and clock skew are
+also untested.
 
 ### Publishing is skipped when nothing changed
 

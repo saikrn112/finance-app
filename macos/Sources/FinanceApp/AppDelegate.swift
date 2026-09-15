@@ -122,8 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 layout: activeLayout,
                 privatePluginsDirectory: pluginStatus.usableDirectory,
                 privacyMask: privacyMask,
-                syncEnabled: SyncSettings.isEnabled(),
-                syncFolder: SyncSettings.folder()
+                syncEnabled: SyncSettings.isEnabled()
             )
         )
         self.supervisor = supervisor

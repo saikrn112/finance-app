@@ -1,7 +1,9 @@
 """Transport selection and the enable flag.
 
-The behaviour that matters most here is that sync is **off unless asked**: every existing install is
-in that state after this ships, and sync writes real financial history to cloud storage.
+Two things matter here. Sync is **off unless asked** -- every existing install is in that state, and
+sync publishes real financial history. And there is exactly **one transport**: Google Drive. A
+directory-based one existed briefly and was removed, because a folder only reaches processes that can
+see that filesystem, which made single-machine sync look like multi-device sync.
 """
 import pytest
 
@@ -11,7 +13,8 @@ from src.sync import runner
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
     monkeypatch.delenv(runner.ENABLE_VAR, raising=False)
-    monkeypatch.delenv(runner.FOLDER_VAR, raising=False)
+    # Guards against the removed setting coming back by the side door.
+    monkeypatch.delenv("FINANCE_APP_SYNC_FOLDER", raising=False)
 
 
 class TestEnableFlag:
@@ -36,15 +39,7 @@ class TestTransportChoice:
         assert choice.mode == runner.MODE_OFF
         assert runner.ENABLE_VAR in choice.reason
 
-    def test_a_configured_folder_wins(self, db_session, monkeypatch, tmp_path):
-        """No credentials needed, and the right answer for a shared volume."""
-        monkeypatch.setenv(runner.ENABLE_VAR, "1")
-        monkeypatch.setenv(runner.FOLDER_VAR, str(tmp_path))
-        choice = runner.choose_transport(db_session)
-        assert choice.mode == runner.MODE_FOLDER
-        assert choice.transport is not None
-
-    def test_drive_is_used_when_no_folder_is_set(self, db_session, monkeypatch):
+    def test_drive_is_the_only_transport(self, db_session, monkeypatch):
         monkeypatch.setenv(runner.ENABLE_VAR, "1")
         monkeypatch.setattr(
             "src.api.routes.settings._google_access",
@@ -52,6 +47,24 @@ class TestTransportChoice:
         )
         choice = runner.choose_transport(db_session)
         assert choice.mode == runner.MODE_DRIVE
+
+    def test_a_sync_folder_variable_is_ignored(self, db_session, monkeypatch):
+        """The removed setting must not quietly work if something still sets it."""
+        monkeypatch.setenv(runner.ENABLE_VAR, "1")
+        monkeypatch.setenv("FINANCE_APP_SYNC_FOLDER", "/tmp/should-be-ignored")
+        monkeypatch.setattr(
+            "src.api.routes.settings._google_access",
+            lambda db: (None, "test-token", {}),
+        )
+        choice = runner.choose_transport(db_session)
+        assert choice.mode == runner.MODE_DRIVE
+        assert "should-be-ignored" not in choice.reason
+
+    def test_no_folder_transport_exists_at_all(self):
+        """A stronger form: the class is gone, so it cannot be reintroduced by accident."""
+        import src.sync.transport as transport
+
+        assert not hasattr(transport, "FolderTransport")
 
     def test_an_unconnected_drive_is_reported_not_raised(self, db_session, monkeypatch):
         """A background scheduler calls this. "Google Drive is not connected" is a thing for the user
@@ -65,11 +78,10 @@ class TestTransportChoice:
 class TestSyncOnce:
     def test_does_nothing_and_does_not_raise_when_disabled(self, db_session):
         result = runner.sync_once(db_session)
-        assert result == {"ran": False, "mode": runner.MODE_OFF, "reason": result["reason"]}
+        assert result["ran"] is False
+        assert result["mode"] == runner.MODE_OFF
 
-    def test_runs_against_a_folder(self, db_session, monkeypatch, tmp_path):
+    def test_does_nothing_when_drive_is_not_connected(self, db_session, monkeypatch):
         monkeypatch.setenv(runner.ENABLE_VAR, "1")
-        monkeypatch.setenv(runner.FOLDER_VAR, str(tmp_path / "shared"))
-        result = runner.sync_once(db_session, device_label="Test")
-        assert result["ran"] is True
-        assert result["published"] is True
+        result = runner.sync_once(db_session)
+        assert result["ran"] is False

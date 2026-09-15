@@ -18,16 +18,10 @@ services:
       - VITE_PORT=${VITE_PORT:-5173}
       - VITE_API_PROXY_TARGET=${VITE_API_PROXY_TARGET:-http://localhost:8000}
       - FINANCE_APP_GOOGLE_REDIRECT_URI=${FINANCE_APP_GOOGLE_REDIRECT_URI:-http://localhost:8000/api/settings/vault/google/callback}
-      # Multi-device sync. Off unless FINANCE_APP_SYNC is set, because publishing writes financial
-      # history where other devices can read it.
-      #
-      # FINANCE_APP_SYNC_FOLDER is deliberately NOT defaulted. A folder only reaches processes that
-      # can see that filesystem, so defaulting to one silently limits sync to this single machine --
-      # a phone or a second Mac could never join, which is the entire point of the feature. Unset
-      # means Google Drive, the only transport that actually spans devices. Set a folder only for the
-      # narrow case of a genuinely shared volume.
+      # Multi-device sync via Google Drive, reusing the vault's existing connection. Off unless
+      # FINANCE_APP_SYNC is set, because publishing writes financial history where other devices can
+      # read it.
       - FINANCE_APP_SYNC=${FINANCE_APP_SYNC:-}
-      - FINANCE_APP_SYNC_FOLDER=${FINANCE_APP_SYNC_FOLDER:-}
     working_dir: /app
     command: ["/bin/bash", "/app/scripts/start_from_docker.sh", "prod"]
 

@@ -21,11 +21,8 @@ public struct BackendEnvironment: Sendable {
     /// figures never leave the process — the frontend's own privacy toggle only hides what it
     /// has already received.
     public var privacyMask: Bool
-    /// Whether this device takes part in multi-device sync at all.
+    /// Whether this device takes part in multi-device sync. The transport is always Google Drive.
     public var syncEnabled: Bool
-    /// An optional shared-volume override. Nil means Google Drive, which is the only transport that
-    /// spans devices and therefore what sync means by default.
-    public var syncFolder: URL?
 
     public init(
         layout: BundleLayout,
@@ -34,8 +31,7 @@ public struct BackendEnvironment: Sendable {
         displayCurrency: String? = nil,
         logLevel: String = "info",
         privacyMask: Bool = false,
-        syncEnabled: Bool = false,
-        syncFolder: URL? = nil
+        syncEnabled: Bool = false
     ) {
         self.layout = layout
         self.mode = mode
@@ -44,7 +40,6 @@ public struct BackendEnvironment: Sendable {
         self.logLevel = logLevel
         self.privacyMask = privacyMask
         self.syncEnabled = syncEnabled
-        self.syncFolder = syncFolder
     }
 
     public func variables(port: UInt16, token: SessionToken) -> [String: String] {
@@ -104,13 +99,8 @@ public struct BackendEnvironment: Sendable {
         if privacyMask {
             environment["FINANCE_APP_PRIVACY_MASK"] = "1"
         }
-        // Enabling and the transport are independent. Deriving one from the other made Drive
-        // unreachable, which limited sync to a single machine.
         if syncEnabled {
             environment["FINANCE_APP_SYNC"] = "1"
-            if let syncFolder {
-                environment["FINANCE_APP_SYNC_FOLDER"] = syncFolder.path
-            }
         }
         return environment
     }

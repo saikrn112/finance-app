@@ -19,15 +19,13 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from src.sync.engine import SyncResult, run_sync
-from src.sync.transport import DriveTransport, FolderTransport, SyncTransport
+from src.sync.transport import DriveTransport, SyncTransport
 
 logger = logging.getLogger(__name__)
 
 ENABLE_VAR = "FINANCE_APP_SYNC"
-FOLDER_VAR = "FINANCE_APP_SYNC_FOLDER"
 
 MODE_OFF = "off"
-MODE_FOLDER = "folder"
 MODE_DRIVE = "drive"
 
 
@@ -45,20 +43,15 @@ def sync_enabled() -> bool:
 def choose_transport(db: Session) -> TransportChoice:
     """Which transport to use, and why -- the reason is meant to be shown to the user.
 
-    Google Drive is the transport that matters: it is the only one that spans devices, which is the
-    whole point. It reuses the vault's existing connection and is already authorised for `drive.file`,
-    so no new consent is needed.
+    Google Drive, or nothing. It reuses the vault's existing connection and is already authorised for
+    `drive.file`, so no new consent is needed.
 
-    A folder wins when one is explicitly configured, but it must never be a *default*: a folder only
-    reaches processes that can see that filesystem, so choosing one silently reduces multi-device sync
-    to single-machine sync. It exists for a genuinely shared volume, and for tests.
+    There is deliberately no directory-based alternative. One existed briefly and was removed: a
+    folder only reaches processes that can see that filesystem, which makes it single-machine sync
+    wearing the label of multi-device sync.
     """
     if not sync_enabled():
         return TransportChoice(MODE_OFF, None, f"{ENABLE_VAR} is not set")
-
-    folder = (os.getenv(FOLDER_VAR) or "").strip()
-    if folder:
-        return TransportChoice(MODE_FOLDER, FolderTransport(folder), f"folder {folder}")
 
     from src.api.routes.settings import _google_access
 
