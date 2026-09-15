@@ -87,6 +87,9 @@ class Subscription(Base):
     status = Column(String, default="active")  # active, cancelled, paused
     price_history = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # No natural key here -- `merchant` is not unique -- so identity is a minted uid.
+    uid = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Rule(Base):
@@ -100,6 +103,8 @@ class Rule(Base):
     source = Column(String, default="user")  # builtin, learned, user
     priority = Column(Numeric, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
+    uid = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class SyncLog(Base):
@@ -373,6 +378,50 @@ class AppMetadata(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class Tombstone(Base):
+    """A record that something was deleted, so the deletion can travel between devices.
+
+    Without these a delete does not survive a merge: the other device still has the row, sends it
+    back, and it reappears -- which reads as "delete does not work". Applied *before* everything
+    else in a merge, so an incoming edit cannot resurrect a row this device has deleted. That makes
+    delete win over a concurrent edit regardless of timestamps, which is the safer direction: a
+    resurrected transaction is a wrong balance, while a lost edit is a re-typed note.
+
+    `ref` is the *natural* identity of what was deleted, not a local primary key -- a project name,
+    or `source|source_id` for a transaction -- because local ids differ per device. See
+    docs/multi_device_sync.md §4.
+    """
+
+    __tablename__ = "tombstones"
+
+    kind = Column(String, primary_key=True)
+    ref = Column(String, primary_key=True)
+    deleted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Which device deleted it. Diagnostic only: merge behaviour must never depend on this, or two
+    # devices would resolve the same tombstone differently.
+    device_id = Column(String)
+
+    __table_args__ = (Index("ix_tombstone_deleted_at", "deleted_at"),)
+
+
+class SyncDevice(Base):
+    """Devices participating in this vault, and when each was last heard from.
+
+    Persisted rather than derived from whoever published recently, because a row written months ago
+    by a device that is currently offline still needs a name to display.
+    """
+
+    __tablename__ = "sync_devices"
+
+    device_id = Column(String, primary_key=True)
+    label = Column(String)
+    platform = Column(String)  # macos, container, ios
+    last_seen_at = Column(DateTime)
+    # High-water mark: the newest `updated_at` already merged from this peer. Timeslice omits this
+    # and consequently re-downloads every peer's entire history on every poll, forever.
+    last_merged_watermark = Column(DateTime)
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -387,6 +436,12 @@ class Project(Base):
     # One Splitwise group per project, cached after the first commit.
     splitwise_group_id = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Multi-device identity. `name` is the merge key across devices because it is already unique,
+    # but a rename changes it -- `uid` is what follows this project *through* a rename. Nullable:
+    # existing rows are populated by the `backfill-sync-identity` CLI, never on startup.
+    # See docs/multi_device_sync.md.
+    uid = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class TransactionProject(Base):
@@ -395,6 +450,10 @@ class TransactionProject(Base):
     transaction_id = Column(String, ForeignKey("transactions.id"), primary_key=True)
     project_id = Column(String, ForeignKey("projects.id"), primary_key=True)
     description = Column(String)
+    # No uid: across devices this row is identified by (transaction natural key, project name),
+    # because its own primary key is a composite of per-device UUIDs. `description` is user input,
+    # so it needs a timestamp to order competing edits.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Contact(Base):
@@ -408,6 +467,9 @@ class Contact(Base):
     # avoids hardcoding a personal name anywhere in the app.
     is_self = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # As for Project: merged on the unique `name`, tracked through renames by `uid`.
+    uid = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ProjectMember(Base):
@@ -415,6 +477,8 @@ class ProjectMember(Base):
 
     project_id = Column(String, ForeignKey("projects.id"), primary_key=True)
     contact_id = Column(String, ForeignKey("contacts.id"), primary_key=True)
+    # Identified across devices by (project name, contact name).
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class TransactionSplit(Base):
@@ -448,6 +512,10 @@ class TransactionSplit(Base):
     def share_amount(self, value):
         self._share_amount = value
 
+    # Identified across devices by (transaction natural key, contact name). The share is user
+    # input, so competing edits are ordered by this.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class TransactionProjectSplit(Base):
     __tablename__ = "transaction_project_splits"
@@ -472,6 +540,9 @@ class TransactionProjectSplit(Base):
     def share_amount(self, value):
         self._share_amount = value
 
+    # Identified by (transaction natural key, project name, contact name).
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class ContactSplitwiseLink(Base):
     """Optional mapping from a local contact to a Splitwise user."""
@@ -481,6 +552,8 @@ class ContactSplitwiseLink(Base):
     splitwise_user_id = Column(String, nullable=False)
     display_name = Column(String)
     linked_at = Column(DateTime, default=datetime.utcnow)
+    # Identified by (contact name); the Splitwise user id is the value, not the identity.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class SplitwiseCommit(Base):

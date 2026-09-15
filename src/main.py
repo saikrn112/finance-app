@@ -286,5 +286,24 @@ def reroute_plaid_transactions_command(apply_changes: bool):
         db.close()
 
 
+@cli.command("backfill-sync-identity")
+@click.option("--apply", "apply_changes", is_flag=True, help="Persist the previewed rows")
+def backfill_sync_identity_command(apply_changes: bool):
+    """Mint multi-device sync identity (uid, updated_at) for pre-existing rows."""
+    from src.models import SessionLocal, init_db
+    from src.ingestion.backfill_sync_identity import preview_backfill, run_backfill
+
+    init_db()
+    db = SessionLocal()
+    try:
+        click.echo(f"Preview: {preview_backfill(db)}")
+        if not apply_changes:
+            click.echo("Dry run only. Re-run with --apply after backing up the database.")
+            return
+        click.echo(f"Applied: {run_backfill(db)}")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     cli()

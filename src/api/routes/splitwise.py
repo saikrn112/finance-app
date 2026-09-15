@@ -18,6 +18,7 @@ from src.models import Contact, ContactSplitwiseLink, Project, SplitwiseCommit, 
 from src.services import job_lock
 from src.services import splitwise_commit as commit_service
 from src.services import splitwise_credentials as creds_store
+from src.sync.tracking import bulk_delete
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -209,7 +210,7 @@ def link_contact(contact_id: str, body: LinkBody, db: Session = Depends(get_db))
 
 @router.delete("/links/{contact_id}")
 def unlink_contact(contact_id: str, db: Session = Depends(get_db)):
-    db.query(ContactSplitwiseLink).filter_by(contact_id=contact_id).delete()
+    bulk_delete(db, ContactSplitwiseLink, contact_id=contact_id)
     db.commit()
     return {"ok": True}
 
