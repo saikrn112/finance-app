@@ -45,9 +45,13 @@ def sync_enabled() -> bool:
 def choose_transport(db: Session) -> TransportChoice:
     """Which transport to use, and why -- the reason is meant to be shown to the user.
 
-    A folder is preferred when one is configured, because it needs no credentials and is the right
-    answer for a shared volume. Otherwise Google Drive, reusing the vault's existing connection: it is
-    already authorised for `drive.file`, so no new consent is needed.
+    Google Drive is the transport that matters: it is the only one that spans devices, which is the
+    whole point. It reuses the vault's existing connection and is already authorised for `drive.file`,
+    so no new consent is needed.
+
+    A folder wins when one is explicitly configured, but it must never be a *default*: a folder only
+    reaches processes that can see that filesystem, so choosing one silently reduces multi-device sync
+    to single-machine sync. It exists for a genuinely shared volume, and for tests.
     """
     if not sync_enabled():
         return TransportChoice(MODE_OFF, None, f"{ENABLE_VAR} is not set")

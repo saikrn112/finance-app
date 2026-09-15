@@ -21,11 +21,10 @@ public struct BackendEnvironment: Sendable {
     /// figures never leave the process — the frontend's own privacy toggle only hides what it
     /// has already received.
     public var privacyMask: Bool
-    /// The shared folder to exchange sync payloads through, or nil for no multi-device sync.
-    ///
-    /// A folder rather than Google Drive keeps the data on this machine, and the container app can
-    /// see the same directory through its `./data` bind mount. Absent means sync stays off, which is
-    /// the default -- it publishes real financial history and should start deliberately.
+    /// Whether this device takes part in multi-device sync at all.
+    public var syncEnabled: Bool
+    /// An optional shared-volume override. Nil means Google Drive, which is the only transport that
+    /// spans devices and therefore what sync means by default.
     public var syncFolder: URL?
 
     public init(
@@ -35,6 +34,7 @@ public struct BackendEnvironment: Sendable {
         displayCurrency: String? = nil,
         logLevel: String = "info",
         privacyMask: Bool = false,
+        syncEnabled: Bool = false,
         syncFolder: URL? = nil
     ) {
         self.layout = layout
@@ -43,6 +43,7 @@ public struct BackendEnvironment: Sendable {
         self.displayCurrency = displayCurrency
         self.logLevel = logLevel
         self.privacyMask = privacyMask
+        self.syncEnabled = syncEnabled
         self.syncFolder = syncFolder
     }
 
@@ -103,9 +104,13 @@ public struct BackendEnvironment: Sendable {
         if privacyMask {
             environment["FINANCE_APP_PRIVACY_MASK"] = "1"
         }
-        if let syncFolder {
+        // Enabling and the transport are independent. Deriving one from the other made Drive
+        // unreachable, which limited sync to a single machine.
+        if syncEnabled {
             environment["FINANCE_APP_SYNC"] = "1"
-            environment["FINANCE_APP_SYNC_FOLDER"] = syncFolder.path
+            if let syncFolder {
+                environment["FINANCE_APP_SYNC_FOLDER"] = syncFolder.path
+            }
         }
         return environment
     }
