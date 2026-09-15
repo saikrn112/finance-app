@@ -163,7 +163,11 @@ def _tick(*, trigger: str, force_sync: bool) -> None:
     try:
         try:
             if force_sync or _sync_due(db, now=now):
-                _run_plaid_sync(db, trigger=trigger)
+                # `force` must be forwarded, not just used to decide whether to call. Without it the
+                # startup tick still hit the peer lease -- and since that lease counts this device's
+                # own last pull, reopening the app within 24h pulled nothing at all, which is the
+                # opposite of what opening the app is for.
+                _run_plaid_sync(db, trigger=trigger, force=force_sync)
         except Exception:
             logger.exception("auto-task plaid sync failed", extra={"trigger": trigger})
 
