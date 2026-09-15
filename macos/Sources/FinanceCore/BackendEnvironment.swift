@@ -21,6 +21,12 @@ public struct BackendEnvironment: Sendable {
     /// figures never leave the process — the frontend's own privacy toggle only hides what it
     /// has already received.
     public var privacyMask: Bool
+    /// The shared folder to exchange sync payloads through, or nil for no multi-device sync.
+    ///
+    /// A folder rather than Google Drive keeps the data on this machine, and the container app can
+    /// see the same directory through its `./data` bind mount. Absent means sync stays off, which is
+    /// the default -- it publishes real financial history and should start deliberately.
+    public var syncFolder: URL?
 
     public init(
         layout: BundleLayout,
@@ -28,7 +34,8 @@ public struct BackendEnvironment: Sendable {
         privatePluginsDirectory: URL? = nil,
         displayCurrency: String? = nil,
         logLevel: String = "info",
-        privacyMask: Bool = false
+        privacyMask: Bool = false,
+        syncFolder: URL? = nil
     ) {
         self.layout = layout
         self.mode = mode
@@ -36,6 +43,7 @@ public struct BackendEnvironment: Sendable {
         self.displayCurrency = displayCurrency
         self.logLevel = logLevel
         self.privacyMask = privacyMask
+        self.syncFolder = syncFolder
     }
 
     public func variables(port: UInt16, token: SessionToken) -> [String: String] {
@@ -94,6 +102,10 @@ public struct BackendEnvironment: Sendable {
         }
         if privacyMask {
             environment["FINANCE_APP_PRIVACY_MASK"] = "1"
+        }
+        if let syncFolder {
+            environment["FINANCE_APP_SYNC"] = "1"
+            environment["FINANCE_APP_SYNC_FOLDER"] = syncFolder.path
         }
         return environment
     }

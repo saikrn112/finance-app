@@ -112,12 +112,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             log.write("private plugins UNUSABLE: \(problem.explanation)")
         }
 
+        // Multi-device sync, off unless a folder has been chosen. Logged either way: "my devices are
+        // not syncing" is otherwise invisible from inside the app.
+        let syncFolder = SyncFolder.usable()
+        if let syncFolder {
+            log.write("device sync via folder: \(syncFolder.path)")
+        } else if SyncFolder.remembered() != nil {
+            log.write("device sync DISABLED: the configured folder is not usable")
+        }
+
         let supervisor = BackendSupervisor(
             layout: activeLayout,
             environment: BackendEnvironment(
                 layout: activeLayout,
                 privatePluginsDirectory: pluginStatus.usableDirectory,
-                privacyMask: privacyMask
+                privacyMask: privacyMask,
+                syncFolder: syncFolder
             )
         )
         self.supervisor = supervisor
