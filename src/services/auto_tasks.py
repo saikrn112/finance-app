@@ -27,6 +27,11 @@ AUTO_SYNC_INTERVAL = timedelta(hours=24)
 # with nothing due costs one primary-key lookup.
 POLL_INTERVAL = timedelta(minutes=15)
 
+# Multi-device sync runs on every poll, not on AUTO_SYNC_INTERVAL. Its whole value is promptness --
+# a change made on the phone should reach the Mac in minutes, not tomorrow -- and a round costs one
+# listing plus a download per peer that has actually changed. Publishing is skipped entirely when
+# nothing changed locally, so a quiet device is close to free.
+
 # In app_metadata rather than in memory, which is the whole point.
 LAST_SYNC_KEY = "auto_task_last_sync_at"
 # Attempts, not successes: a backup that fails every time -- no vault connected, no network --
@@ -151,6 +156,31 @@ def _run_vault_backup(db, *, trigger: str) -> None:
         logger.exception("auto-task vault backup failed", extra={"trigger": trigger})
 
 
+def _run_device_sync(db, *, trigger: str) -> None:
+    """One multi-device sync round, if sync is switched on.
+
+    Silent and cheap when it is off, which is the state of every existing install: `sync_once` returns
+    without touching the network rather than raising, because a missing setting is not a failure.
+    """
+    from src.sync.runner import sync_once
+
+    result = sync_once(db)
+    if not result.get("ran"):
+        # Debug, not info: this is the normal state until someone enables sync, and logging it at
+        # info level every 15 minutes would bury everything else.
+        logger.debug("auto-task device sync skipped", extra={"trigger": trigger, "result": result})
+        return
+    logger.info(
+        "auto-task device sync completed",
+        extra={
+            "trigger": trigger,
+            "peers": result.get("peers_seen"),
+            "published": result.get("published"),
+            "skipped_publish": result.get("skipped_publish"),
+        },
+    )
+
+
 def _tick(*, trigger: str, force_sync: bool) -> None:
     """One scheduling decision.
 
@@ -176,6 +206,13 @@ def _tick(*, trigger: str, force_sync: bool) -> None:
                 _run_vault_backup(db, trigger=trigger)
         except Exception:
             logger.exception("auto-task vault backup crashed", extra={"trigger": trigger})
+
+        # Third, and independently guarded: sync must not be able to break the two tasks that keep
+        # the data safe, and neither of those failing should stop devices converging.
+        try:
+            _run_device_sync(db, trigger=trigger)
+        except Exception:
+            logger.exception("auto-task device sync crashed", extra={"trigger": trigger})
     finally:
         db.close()
 

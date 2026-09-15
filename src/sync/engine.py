@@ -34,7 +34,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.sync import coding, device
+from src.sync import coding, device, schema
 from src.sync.merge import MergeReport, merge_payload
 from src.sync.payload import build_payload
 from src.sync.transport import RemotePayload, SyncTransport
@@ -53,6 +53,8 @@ class SyncResult:
     peers_failed: list[str] = field(default_factory=list)
     merges: dict[str, dict] = field(default_factory=dict)
     published: bool = False
+    #: True when publishing was skipped because nothing had changed -- distinct from a failure.
+    skipped_publish: bool = False
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -62,6 +64,7 @@ class SyncResult:
             "peers_failed": self.peers_failed,
             "merges": self.merges,
             "published": self.published,
+            "skipped_publish": self.skipped_publish,
             "error": self.error,
         }
 
@@ -73,6 +76,7 @@ def run_sync(
     device_id: str | None = None,
     device_label: str | None = None,
     full: bool = False,
+    force_publish: bool = False,
 ) -> SyncResult:
     """One full round against `transport`.
 
@@ -112,6 +116,22 @@ def run_sync(
             result.merges[remote.device_id] = {"error": str(exc)}
             db.rollback()
 
+    # Payloads are full state, so republishing an unchanged one uploads the entire history for
+    # nothing -- ~2.5 MB per round, which at a 15-minute poll is a few hundred MB a day of pointless
+    # traffic. Skip when neither our own data nor anything we just merged has changed.
+    # Computed *after* merging, so anything just learned from a peer is included and gets relayed
+    # onward. An explicit "did the merge change something?" check was here too and was removed as
+    # provably redundant: every synced model declares `onupdate` on `updated_at`, so any ORM
+    # modification moves that row's timestamp, and inserts and deletes move the row count -- both of
+    # which the signature covers. Verified by mutation: with the check removed, no test changes
+    # behaviour, including one written specifically for uid convergence, which touches no timestamp
+    # of its own.
+    signature = _content_signature(db)
+    if not force_publish and signature == _stored_signature(db):
+        result.published = False
+        result.skipped_publish = True
+        return result
+
     try:
         # Full state, always. See _own_watermark for why the obvious optimisation is wrong.
         since = None
@@ -125,6 +145,7 @@ def run_sync(
         payload["plaid"] = _plaid_report(db)
         transport.put(device_id, payload)
         _record_own_publish(db, device_id, device_label, platform_name, payload)
+        _store_signature(db, signature)
         db.commit()
         result.published = True
     except Exception as exc:
@@ -206,6 +227,63 @@ def _record_own_publish(
         platform_name=platform_name,
         last_seen_at=coding.datetime_from_wire(payload.get("written_at")),
     )
+
+
+# --- publish-skipping ---------------------------------------------------------------------------
+
+_SIGNATURE_KEY = "sync_last_published_signature"
+
+
+def _content_signature(db: Session) -> str:
+    """A cheap fingerprint of everything that would go into a payload.
+
+    Per synced table: row count, newest `updated_at`, **and the sum of all `updated_at` values**.
+    Not a hash of the payload itself -- building one is the expensive step this exists to avoid.
+
+    The sum is the part that makes this safe, and leaving it out was a real bug. Count-and-maximum
+    misses the most ordinary edit there is: re-categorising an *old* transaction moves that row's
+    `updated_at` but changes neither the row count nor the table maximum, so the signature looked
+    unchanged and the edit was **never published at all**. Caught by
+    `test_a_merged_update_relays_even_when_the_signature_does_not_move`, which failed on the wrong
+    side -- the peer never published, rather than the relay being skipped.
+
+    Any change to any row's timestamp moves the sum. Two edits cancelling out exactly would defeat it,
+    which requires one row's timestamp to move backwards by precisely what another moved forward; not
+    a thing monotonic clocks do.
+    """
+    from sqlalchemy import func
+
+    from src.models import Tombstone
+
+    parts: list[str] = []
+    for spec in schema.TABLES:
+        model = schema.model_for(spec)
+        count, newest, total = db.query(
+            func.count(model.updated_at),
+            func.max(model.updated_at),
+            # strftime rather than arithmetic on the column: these are stored as datetime strings.
+            func.sum(func.strftime("%s", model.updated_at)),
+        ).one()
+        parts.append(f"{spec.name}:{count}:{newest}:{total}")
+    parts.append(f"tombstones:{db.query(func.count(Tombstone.ref)).scalar()}")
+    return "|".join(parts)
+
+
+def _stored_signature(db: Session) -> str | None:
+    from src.models import AppMetadata
+
+    row = db.get(AppMetadata, _SIGNATURE_KEY)
+    return row.value if row else None
+
+
+def _store_signature(db: Session, signature: str) -> None:
+    from src.models import AppMetadata
+
+    row = db.get(AppMetadata, _SIGNATURE_KEY)
+    if row is None:
+        db.add(AppMetadata(key=_SIGNATURE_KEY, value=signature))
+    else:
+        row.value = signature
 
 
 # --- the Plaid economy ------------------------------------------------------------------------

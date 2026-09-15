@@ -305,5 +305,50 @@ def backfill_sync_identity_command(apply_changes: bool):
         db.close()
 
 
+@cli.command("sync")
+@click.option("--label", default=None, help="Label to publish for this device")
+@click.option("--status", "status_only", is_flag=True, help="Show what would be used, run nothing")
+def sync_command(label: str | None, status_only: bool):
+    """Run one multi-device sync round (publish, fetch peers, merge)."""
+    from src.models import SessionLocal, init_db
+    from src.sync import device
+    from src.sync.payload import find_unsyncable
+    from src.sync.runner import choose_transport, sync_once
+
+    init_db()
+    db = SessionLocal()
+    try:
+        click.echo(f"device: {device.current_device_id()}  ({device.default_device_label()})")
+        choice = choose_transport(db)
+        click.echo(f"transport: {choice.mode} -- {choice.reason}")
+
+        unsyncable = find_unsyncable(db)
+        if unsyncable:
+            # Reported every run: these rows cannot be named, so they never travel, and a silent
+            # omission is exactly the kind of difference nobody notices until numbers disagree.
+            click.echo(f"warning: {unsyncable} row(s) cannot sync (orphaned links)")
+
+        if status_only:
+            return
+        if choice.transport is None:
+            click.echo("Nothing to do. Set FINANCE_APP_SYNC=1 to enable sync.")
+            return
+
+        result = sync_once(db, device_label=label)
+        click.echo(f"peers seen: {result.get('peers_seen')}")
+        for peer, report in (result.get("merges") or {}).items():
+            interesting = {
+                k: v for k, v in report.items()
+                if v and k in ("inserted", "updated", "deletions_applied", "uid_converged",
+                               "unresolved", "rename_conflicts", "error")
+            }
+            click.echo(f"  from {peer}: {interesting or 'nothing new'}")
+        click.echo(f"published: {result.get('published')}")
+        if result.get("error"):
+            click.echo(f"error: {result['error']}")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     cli()

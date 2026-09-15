@@ -349,3 +349,66 @@ class TestPlaidEconomy:
         auto_tasks._run_plaid_sync(db, trigger="test")
 
         assert auto_tasks._read_timestamp(db, auto_tasks.LAST_SYNC_KEY) is not None
+
+
+class TestSchedulerSyncWiring:
+    """Sync runs from the tick, is off by default, and cannot break the other two tasks."""
+
+    def test_no_device_sync_happens_when_it_is_disabled(self, db, monkeypatch, tmp_path):
+        """Note that `_stub_tasks`'s "sync" counter is the *Plaid* pull, not the device sync.
+        Asserting on it here would conflate the two and pass for the wrong reason -- an interval tick
+        legitimately pulls from Plaid when nothing has pulled recently."""
+        from src.sync import runner
+
+        monkeypatch.delenv(runner.ENABLE_VAR, raising=False)
+        monkeypatch.setenv(runner.FOLDER_VAR, str(tmp_path / "shared"))
+        _stub_tasks(monkeypatch)
+        _vault(monkeypatch, {"last_backup_at": _iso(_now())})
+
+        auto_tasks._tick(trigger="interval", force_sync=False)  # must not raise
+
+        # The flag is off, so nothing may be published even though a folder is configured.
+        assert not (tmp_path / "shared").exists()
+
+    def test_sync_runs_on_a_tick_when_enabled(self, db, monkeypatch, tmp_path):
+        from src.sync import runner
+
+        monkeypatch.setenv(runner.ENABLE_VAR, "1")
+        monkeypatch.setenv(runner.FOLDER_VAR, str(tmp_path / "shared"))
+        _stub_tasks(monkeypatch)
+        _vault(monkeypatch, {"last_backup_at": _iso(_now())})
+
+        auto_tasks._tick(trigger="interval", force_sync=False)
+
+        published = sorted(p.name for p in (tmp_path / "shared").iterdir())
+        assert len(published) == 1 and published[0].startswith("device-")
+
+    def test_a_failing_sync_does_not_stop_the_backup(self, db, monkeypatch):
+        """Sync is the newest and least proven of the three; it must not take the others down."""
+        calls = _stub_tasks(monkeypatch)
+        _vault(monkeypatch, {"last_backup_at": _iso(_now() - timedelta(days=2))})
+        monkeypatch.setattr(
+            "src.sync.runner.sync_once",
+            lambda db, **kw: (_ for _ in ()).throw(RuntimeError("drive is down")),
+        )
+
+        auto_tasks._tick(trigger="startup", force_sync=True)
+
+        assert calls["backup"] == 1
+        assert calls["sync"] == 1
+
+    def test_a_failing_backup_does_not_stop_sync(self, db, monkeypatch, tmp_path):
+        from src.sync import runner
+
+        monkeypatch.setenv(runner.ENABLE_VAR, "1")
+        monkeypatch.setenv(runner.FOLDER_VAR, str(tmp_path / "shared"))
+        _vault(monkeypatch, {})
+        monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: {"ok": True})
+        monkeypatch.setattr(
+            "src.api.routes.settings.backup_vault_to_google_drive",
+            lambda *, db: (_ for _ in ()).throw(RuntimeError("no vault")),
+        )
+
+        auto_tasks._tick(trigger="startup", force_sync=True)
+
+        assert (tmp_path / "shared").exists(), "sync did not run after the backup failed"
