@@ -3,8 +3,11 @@
 Design of record for running the app on several devices at once — the container app, the macOS
 desktop app, and a future iOS app — with all of them able to write.
 
-Status: **in progress.** Phase A (identity) is the only part implemented. Nothing syncs yet, and the
-existing `.fvault` vault backup is untouched and remains the only cloud path in use.
+Status: **in progress.** Phases A–E are implemented: identity, tombstones, the merge engine,
+transports and the Plaid lease. **Nothing calls sync from the app yet** — no scheduler hook, no UI, no
+device list — so merging this changes no runtime behaviour. `DriveTransport` has never been run
+against real Google Drive; only `FolderTransport` is covered by tests. The `.fvault` vault backup is
+untouched and remains the only cloud path in use.
 
 ---
 
@@ -50,7 +53,16 @@ Three real defects found while studying it:
 
 - Payloads are full state and rewritten on every publish, and tombstones are never pruned, so both
   grow without bound. Its Drive change-delta code exists but is never called, so every poll
-  re-downloads every peer's entire history. **We need a high-water mark from the start.**
+  re-downloads every peer's entire history.
+
+  An earlier version of this document concluded "we need a high-water mark from the start". That was
+  **wrong, and trying it lost data.** A row merged from a peer carries *that peer's* `updated_at`, and
+  peer clocks are independent, so a freshly-learned row often predates this device's own watermark —
+  it is then never republished and never relayed, and a third device silently never receives it. The
+  randomised soak test found this as devices holding different *sets* of transactions. Payloads are
+  therefore full state here too. Doing it properly needs a **local** monotonic marker, bumped by
+  merges as well as by user edits, which `updated_at` cannot be because it deliberately carries the
+  originating device's time.
 - On macOS its server-timestamp parameter is silently dropped on the polling path, so freshness falls
   back to peers' self-reported clocks — the exact skew the parameter was added to avoid.
 - "Forget device" deletes a file rather than revoking anything; a signed-in device recreates it.
