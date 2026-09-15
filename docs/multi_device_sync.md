@@ -79,9 +79,19 @@ money is never subject to LWW.
 
 Chosen rather than "everything", because two of the exclusions are security boundaries.
 
-**Synced — provider facts** (insert if unseen; natural keys above): `transactions`,
+**Synced today — provider facts** (insert if unseen; natural key above): `transactions`. That is the
+only fact table with a `TableSpec`; check `src/sync/schema.py:TABLES` rather than this list, which is
+prose and can drift.
+
+**Intended but NOT yet synced.** These have the natural keys to make it straightforward and simply do
+not have specs yet, so **their data does not travel between devices at all**:
 `account_activity`, `investment_period_facts`, `payslips`, `payslip_line_items`,
 `retirement_transactions`, `retirement_statements`.
+
+This gap is worth stating loudly because **net-worth history and payroll are actively used**: until
+these are added, a device only shows the payslips and investment facts it ingested itself, and net
+worth will differ between devices even when transactions agree. An earlier version of this document
+listed them as synced, which was wrong.
 
 **Synced — user-authored** (need `uid` + `updated_at`; LWW, and merge-by-name for the first two):
 `projects`, `contacts`, `subscriptions`, `rules`.
