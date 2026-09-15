@@ -138,7 +138,7 @@ def test_overlap_audit_finds_statement_vs_plaid_duplicate(db_session):
                 origin="statements",
                 date=date(2026, 2, 7),
                 amount=Decimal("-132.65"),
-                merchant_raw="WAL-MART NEIGHBORHOOD MARKET 1234 ANYTOWN CA",
+                merchant_raw="EXAMPLE STORE 1234 ANYTOWN CA",
                 merchant_clean="Example Store",
                 category="Groceries",
                 category_source="rule",
@@ -198,31 +198,53 @@ def test_overlap_audit_finds_plaid_pending_duplicates(db_session):
     assert len(audit["plaid_duplicates"]) == 1
 
 
-def test_apply_plaid_sync_batch_skips_pending_rows(db_session):
+def test_apply_plaid_sync_batch_stores_pending_then_promotes_it(db_session):
+    """Pending rows are kept, then promoted in place when they post.
+
+    This used to assert that pending rows were skipped entirely. That behaviour is gone:
+    pending charges are stored so they show up promptly, and `pending_transaction_id` links
+    the posted row back so it is promoted rather than duplicated. Anything that keys off the
+    row (category, project, split) therefore survives the transition.
+    """
+    pending = {
+        "source_id": "pending-ride",
+        "pending_transaction_id": None,
+        "pending": True,
+        "date": date(2026, 3, 7),
+        "amount": -23.99,
+        "merchant_raw": "Example Rideshare",
+        "merchant_clean": "Example Rideshare",
+        "account_last4": "1234",
+    }
     counts = apply_plaid_sync_batch(
-        db_session,
-        institution="Example Card",
-        added=[
-            {
-                "source_id": "pending-lyft",
-                "pending_transaction_id": None,
-                "pending": True,
-                "date": date(2026, 3, 7),
-                "amount": -23.99,
-                "merchant_raw": "Lyft",
-                "merchant_clean": "Lyft",
-                "account_last4": "1234",
-            }
-        ],
-        modified=[],
-        removed=[],
+        db_session, institution="Example Card", added=[pending], modified=[], removed=[],
     )
     db_session.commit()
 
     rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
-    assert counts.skipped_pending == 1
-    assert rows == []
+    assert counts.added == 1
+    assert len(rows) == 1
+    assert rows[0].pending is True
 
+    # The posted charge arrives with a new id that points back at the pending one.
+    posted = {
+        **pending,
+        "source_id": "posted-ride",
+        "pending_transaction_id": "pending-ride",
+        "pending": False,
+        "date": date(2026, 3, 9),
+    }
+    counts = apply_plaid_sync_batch(
+        db_session, institution="Example Card", added=[posted], modified=[], removed=[],
+    )
+    db_session.commit()
+
+    rows = db_session.query(Transaction).filter(Transaction.source == "Example Card").all()
+    assert counts.pending_promotions == 1
+    assert counts.added == 0, "the posted charge must not become a second row"
+    assert len(rows) == 1
+    assert rows[0].source_id == "posted-ride"
+    assert rows[0].pending is False
 
 def test_apply_plaid_sync_batch_skips_statement_boundary_overlap(db_session):
     db_session.add(
@@ -232,7 +254,7 @@ def test_apply_plaid_sync_batch_skips_statement_boundary_overlap(db_session):
             origin="statements",
             date=date(2026, 2, 7),
             amount=Decimal("-132.65"),
-            merchant_raw="WAL-MART NEIGHBORHOOD MARKET 1234 ANYTOWN CA",
+            merchant_raw="EXAMPLE STORE 1234 ANYTOWN CA",
             merchant_clean="Example Store",
             category="Groceries",
             category_source="rule",

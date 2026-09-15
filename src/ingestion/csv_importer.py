@@ -3,7 +3,7 @@ import csv
 import hashlib
 from pathlib import Path
 from datetime import datetime, date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Iterator
 from dataclasses import dataclass
 
@@ -68,7 +68,9 @@ def parse_csv(file_path: Path, source: str) -> Iterator[RawTransaction]:
                     amount=amount,
                     merchant_raw=merchant,
                 )
-            except (ValueError, KeyError) as e:
+            except (ValueError, KeyError, InvalidOperation):
+                # InvalidOperation matters: it is an ArithmeticError, not a ValueError, so a
+                # single unparseable amount used to abort the entire file.
                 continue  # Skip malformed rows
 
 

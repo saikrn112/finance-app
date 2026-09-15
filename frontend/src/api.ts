@@ -425,6 +425,7 @@ export interface NetWorthTrackedHistory {
 
 export interface SidebarAccount {
   source: string
+  account_last4?: string | null
   account_key?: string
   provider_source?: string
   source_key?: string

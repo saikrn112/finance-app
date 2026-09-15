@@ -1,6 +1,6 @@
 """Tests for API endpoints."""
 import pytest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from fastapi.testclient import TestClient
 
@@ -74,6 +74,11 @@ class TestHealthEndpoint:
         assert response.json() == {"status": "ok"}
 
 
+def _recent(days_ago: int) -> str:
+    """ISO date relative to today, so fixtures do not rot into the past."""
+    return (date.today() - timedelta(days=days_ago)).isoformat()
+
+
 class TestTransactionsAPI:
     """Tests for transactions endpoints."""
 
@@ -112,10 +117,10 @@ class TestTransactionsAPI:
         assert all(t["source"] == "example_card" for t in data["transactions"])
 
     def test_list_transactions_search(self, client_with_data):
-        response = client_with_data.get("/api/transactions/?search=Whole&currency=USD")
+        response = client_with_data.get("/api/transactions/?search=Grocer&currency=USD")
         data = response.json()
         assert len(data["transactions"]) == 1
-        assert "Whole" in data["transactions"][0]["merchant_clean"]
+        assert "Grocer" in data["transactions"][0]["merchant_clean"]
 
     def test_list_transactions_ordered_by_date_desc(self, client_with_data):
         response = client_with_data.get("/api/transactions/?currency=USD")
@@ -304,21 +309,20 @@ class TestConnectedAccountsAPI:
         list_response = client_with_data.get("/api/transactions/?currency=USD")
         txn_id = list_response.json()["transactions"][0]["id"]
         
-        response = client_with_data.get(f"/api/transactions/{txn_id}")
+        response = client_with_data.get(f"/api/transactions/{txn_id}?currency=USD")
         assert response.status_code == 200
         assert response.json()["id"] == txn_id
 
     def test_get_transaction_not_found(self, client_with_data):
-        response = client_with_data.get("/api/transactions/nonexistent-id")
-        # Returns tuple (dict, status) in current implementation
-        assert response.status_code in [200, 404]
+        response = client_with_data.get("/api/transactions/nonexistent-id?currency=USD")
+        assert response.status_code == 404
 
     def test_update_transaction_category(self, client_with_data):
         list_response = client_with_data.get("/api/transactions/?currency=USD")
         txn_id = list_response.json()["transactions"][0]["id"]
         
         response = client_with_data.patch(
-            f"/api/transactions/{txn_id}",
+            f"/api/transactions/{txn_id}?currency=USD",
             json={"category": "Shopping"}
         )
         assert response.status_code == 200
@@ -339,7 +343,7 @@ class TestConnectedAccountsAPI:
         txn_id = list_response.json()["transactions"][0]["id"]
 
         response = client_with_data.patch(
-            f"/api/transactions/{txn_id}",
+            f"/api/transactions/{txn_id}?currency=USD",
             json={"category": "  Transportation / Gas  "},
         )
 
@@ -351,7 +355,7 @@ class TestConnectedAccountsAPI:
         txn_id = list_response.json()["transactions"][0]["id"]
 
         response = client_with_data.patch(
-            f"/api/transactions/{txn_id}",
+            f"/api/transactions/{txn_id}?currency=USD",
             json={"category": "Shopping/Home/Furniture"},
         )
 
@@ -362,7 +366,7 @@ class TestConnectedAccountsAPI:
         txn_id = list_response.json()["transactions"][0]["id"]
         
         response = client_with_data.patch(
-            f"/api/transactions/{txn_id}",
+            f"/api/transactions/{txn_id}?currency=USD",
             json={"category": "Entertainment"}
         )
         # category_source should be set to "user" when manually updated
@@ -512,7 +516,7 @@ class TestAnalyticsAPI:
         assert data["2026-02-02"]["total"] == 25.0
 
     def test_subscriptions(self, client_with_data):
-        response = client_with_data.get("/api/analytics/subscriptions")
+        response = client_with_data.get("/api/analytics/subscriptions?currency=USD")
         assert response.status_code == 200
         assert isinstance(response.json(), list)
 
@@ -570,6 +574,16 @@ class TestAnalyticsAPI:
                 synced_at=datetime(2026, 3, 2, 10, 0, 0),
                 created_at=datetime(2026, 3, 2, 10, 0, 0),
             ),
+            # Stored fact for the card. The series never derives a balance from
+            # transactions — see test_net_worth_history_does_not_backderive_*.
+            AccountSnapshot(
+                source="Example Card",
+                account_group="credit_card",
+                connection_state="plaid",
+                current_value=Decimal("-200.00"),
+                synced_at=datetime(2026, 3, 2, 10, 0, 0),
+                created_at=datetime(2026, 3, 2, 10, 0, 0),
+            ),
         ])
         db.commit()
         db.close()
@@ -578,7 +592,7 @@ class TestAnalyticsAPI:
         assert response.status_code == 200
         payload = response.json()
         points = {point["date"]: point for point in payload["points"]}
-        latest_rows = {row["key"]: row for row in payload["latest_sources"]}
+        latest_rows = {row["label"]: row for row in payload["latest_sources"]}
 
         assert points["2026-03-01"]["bank_accounts"] == 1000.0
         assert points["2026-03-01"]["cash_like"] == 0.0
@@ -623,7 +637,7 @@ class TestAnalyticsAPI:
         assert response.status_code == 200
         payload = response.json()
         points = {point["date"]: point for point in payload["points"]}
-        latest_rows = {row["key"]: row for row in payload["latest_sources"]}
+        latest_rows = {row["label"]: row for row in payload["latest_sources"]}
 
         assert points["2026-03-02"]["retirement"] == 1000.0
         assert points["2026-03-03"]["retirement"] == 2000.0
@@ -683,20 +697,20 @@ class TestAnalyticsAPI:
                 Transaction(
                     source_id="recurring_1",
                     source="example_charge_card",
-                    date=date(2025, 12, 10),
+                    date=date.today() - timedelta(days=60),
                     amount=Decimal("-12.99"),
-                    merchant_raw="DISNEYPLUS 888-905-7888 CA",
-                    merchant_clean="Disney+",
+                    merchant_raw="EXAMPLE STREAM SUBSCRIPTION",
+                    merchant_clean="Example Stream",
                     category="Subscriptions/Entertainment",
                     account_last4="2100",
                 ),
                 Transaction(
                     source_id="recurring_2",
                     source="example_charge_card",
-                    date=date(2026, 1, 10),
+                    date=date.today() - timedelta(days=30),
                     amount=Decimal("-12.99"),
-                    merchant_raw="DISNEYPLUS 888-905-7888 CA",
-                    merchant_clean="Disney+",
+                    merchant_raw="EXAMPLE STREAM SUBSCRIPTION",
+                    merchant_clean="Example Stream",
                     category="Subscriptions/Entertainment",
                     account_last4="2100",
                 ),
@@ -705,24 +719,29 @@ class TestAnalyticsAPI:
         db.commit()
         db.close()
 
-        response = test_client.get("/api/recurring/catalog?start_date=2026-01-01&end_date=2026-03-31&currency=USD")
+        response = test_client.get(
+            f"/api/recurring/catalog?start_date={_recent(120)}&end_date={_recent(0)}&currency=USD")
         assert response.status_code == 200
         payload = response.json()
         assert payload["summary"]["active_count"] >= 1
-        assert any(item["display_name"] == "Disney+" for item in payload["items"])
+        assert any(item["display_name"] == "Example Stream" for item in payload["items"])
 
     def test_recurring_detail_endpoint(self, client):
         test_client, Session = client
         db = Session()
-        for idx, amount in enumerate([Decimal("-10.99"), Decimal("-12.99")]):
+        # Two charges at each price: a single charge at a new amount is not treated as a
+        # confirmed price change, only a repeated one is.
+        for idx, amount in enumerate([
+            Decimal("-10.99"), Decimal("-10.99"), Decimal("-12.99"), Decimal("-12.99"),
+        ]):
             db.add(
                 Transaction(
                     source_id=f"recurring_detail_{idx}",
                     source="example_charge_card",
-                    date=date(2026, 1 + idx, 10),
+                    date=date.today() - timedelta(days=105 - 30 * idx),
                     amount=amount,
-                    merchant_raw="DISNEYPLUS 888-905-7888 CA",
-                    merchant_clean="Disney+",
+                    merchant_raw="EXAMPLE STREAM SUBSCRIPTION",
+                    merchant_clean="Example Stream",
                     category="Subscriptions/Entertainment",
                     account_last4="2100",
                 )
@@ -730,13 +749,14 @@ class TestAnalyticsAPI:
         db.commit()
         db.close()
 
-        catalog = test_client.get("/api/recurring/catalog?start_date=2026-01-01&end_date=2026-03-31&currency=USD").json()
-        disney = next(item for item in catalog["items"] if item["display_name"] == "Disney+")
+        catalog = test_client.get(
+            f"/api/recurring/catalog?start_date={_recent(120)}&end_date={_recent(0)}&currency=USD").json()
+        stream = next(item for item in catalog["items"] if item["display_name"] == "Example Stream")
 
-        response = test_client.get(f"/api/recurring/{disney['id']}?currency=USD")
+        response = test_client.get(f"/api/recurring/{stream['id']}?currency=USD")
         assert response.status_code == 200
         detail = response.json()
-        assert detail["display_name"] == "Disney+"
+        assert detail["display_name"] == "Example Stream"
         assert any(event["event_type"] == "price_changed" for event in detail["events"])
 
 

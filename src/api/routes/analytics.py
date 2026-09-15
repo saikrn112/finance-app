@@ -2,7 +2,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, literal
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from src.models import get_db, Transaction, AccountSnapshot, ExchangeRate, SourceBalanceHistory
@@ -576,12 +576,24 @@ def _compute_net_worth(
             "history_mode": "historical" if len(source_events[source_key]) > 1 else "latest_only",
         }
 
+    # synced_at is a datetime and `end` a date, so `<= end` meant "<= midnight" and dropped
+    # every snapshot taken later in the day on the final day of the range. Since end_date is
+    # normally today, that silently hid the most recent balances.
+    end_exclusive = datetime.combine(end + timedelta(days=1), time.min)
     snapshot_rows = (
         db.query(AccountSnapshot)
-        .filter(AccountSnapshot.synced_at <= end)
+        .filter(AccountSnapshot.synced_at < end_exclusive)
         .order_by(AccountSnapshot.source.asc(), AccountSnapshot.synced_at.asc())
         .all()
     )
+
+    # Sources already carried by SourceBalanceHistory must not also take events from
+    # snapshots, or the same balance is counted from two provenances. Snapshot-sourced
+    # entries, though, legitimately accumulate several events over time.
+    history_sourced = set(source_info)
+    history_labels = [
+        (info["group"], info["label"]) for key, info in source_info.items()
+    ]
 
     for row in snapshot_rows:
         provider_key = classify_source(row.source) or row.source
@@ -590,9 +602,9 @@ def _compute_net_worth(
             continue
         event_day = row.synced_at.date()
         group = _classify_snapshot_group(row.source, row.account_group)
-        if source_key in source_info or any(
-            info["group"] == group and _same_source_label(info["label"], row.source)
-            for info in source_info.values()
+        if source_key in history_sourced or any(
+            hist_group == group and _same_source_label(hist_label, row.source)
+            for hist_group, hist_label in history_labels
         ):
             continue
         row_currency = getattr(row, "currency", "USD") or "USD"

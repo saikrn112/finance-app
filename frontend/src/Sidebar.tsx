@@ -241,6 +241,11 @@ export function Sidebar({
                       {expanded ? (
                         <span className="min-w-0 flex-1 text-left">
                           <span className="block truncate">{account.source}</span>
+                          {account.account_last4 ? (
+                            <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                              Card •••• {account.account_last4}
+                            </span>
+                          ) : null}
                           {secondaryBalance !== null ? (
                             <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
                               Acct {fmt(secondaryBalance)}

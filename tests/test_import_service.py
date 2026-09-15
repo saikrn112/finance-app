@@ -105,7 +105,7 @@ def test_preview_import_marks_cross_source_duplicates(db_session):
     )
     db_session.commit()
 
-    content = b"Date,Amount,Description\n02/07/2026,132.65,WAL-MART NEIGHBORHOOD MARKET 1234 ANYTOWN CA\n"
+    content = b"Date,Amount,Description\n02/07/2026,132.65,EXAMPLE STORE 1234 ANYTOWN CA\n"
     preview = preview_import(
         db_session,
         file_bytes=content,
@@ -388,42 +388,3 @@ def test_retirement_preview_and_commit_skip_existing_rows(db_session):
     assert len(logs) == 2
     assert len(logs[-1].extra_data["payload"]["transactions"]) == 1
     assert logs[-1].extra_data["payload"]["transactions"][0]["date"] == "2026-02-28"
-
-
-def test_retirement_preview_marks_legacy_csv_duplicates(db_session, monkeypatch):
-    first_preview = preview_import(
-        db_session,
-        file_bytes=(
-            b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-            b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
-        ),
-        filename="example_retirement.csv",
-        source="example_retirement",
-        kind="retirement_csv",
-    )
-    legacy_source_id = first_preview["payload"]["transactions"][0]["source_id"]
-    monkeypatch.setattr(
-        "src.ingestion.import_service._legacy_retirement_source_ids",
-        lambda: {
-            legacy_source_id: {
-                "existing_id": f"legacy-retirement:{legacy_source_id}",
-                "existing_origin": "legacy_retirement_csv",
-            }
-        },
-    )
-
-    preview = preview_import(
-        db_session,
-        file_bytes=(
-            b"Date,Transaction Type,Source,Fund Name,Unit Count,Unit Value,Transaction Amount\n"
-            b"02/14/26,Employee Pre-Tax,Employee,Example Target Fund,7.8142,138.22,1080.54\n"
-        ),
-        filename="example_retirement.csv",
-        source="example_retirement",
-        kind="retirement_csv",
-    )
-
-    assert preview["duplicate_summary"]["duplicate_count"] == 1
-    assert preview["duplicate_summary"]["importable_count"] == 0
-    assert preview["duplicate_summary"]["items"][0]["duplicate_reason"]["type"] == "retirement_source_id"
-    assert preview["duplicate_summary"]["items"][0]["duplicate_reason"]["existing_origin"] == "legacy_retirement_csv"

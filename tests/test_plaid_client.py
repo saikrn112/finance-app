@@ -13,6 +13,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn_abc"
         mock_txn.date = date(2026, 2, 15)
+        mock_txn.authorized_date = None
         mock_txn.amount = 100.00
         mock_txn.name = "RAW MERCHANT"
         mock_txn.merchant_name = "Clean Merchant"
@@ -22,7 +23,7 @@ class TestTransformTxn:
         result = _transform_txn(mock_txn)
         
         assert result["source_id"] == "txn_abc"
-        assert result["date"] == "2026-02-15"
+        assert result["date"] == date(2026, 2, 15)
         assert result["merchant_raw"] == "RAW MERCHANT"
         assert result["merchant_clean"] == "Clean Merchant"
 
@@ -30,6 +31,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = 50.00  # Plaid: positive = debit
         mock_txn.name = "Merchant"
         mock_txn.merchant_name = None
@@ -44,6 +46,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = 10.00
         mock_txn.name = "RAW NAME"
         mock_txn.merchant_name = None
@@ -58,6 +61,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = 10.00
         mock_txn.name = "Merchant"
         mock_txn.merchant_name = "Merchant"
@@ -72,6 +76,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = 10.00
         mock_txn.name = "Merchant"
         mock_txn.merchant_name = "Merchant"
@@ -86,6 +91,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = 10.00
         mock_txn.name = "Merchant"
         mock_txn.merchant_name = "Merchant"
@@ -101,6 +107,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = 10.00
         mock_txn.name = "Merchant"
         mock_txn.merchant_name = "Merchant"
@@ -115,6 +122,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = "2026-02-15"  # String instead of date object
+        mock_txn.authorized_date = None
         mock_txn.amount = 10.00
         mock_txn.name = "Merchant"
         mock_txn.merchant_name = "Merchant"
@@ -123,13 +131,14 @@ class TestTransformTxn:
         
         result = _transform_txn(mock_txn)
         
-        assert result["date"] == "2026-02-15"
+        assert result["date"] == date(2026, 2, 15)
 
     def test_handles_negative_plaid_amount(self):
         """Plaid returns negative for credits/refunds."""
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn"
         mock_txn.date = date(2026, 1, 1)
+        mock_txn.authorized_date = None
         mock_txn.amount = -100.00  # Plaid: negative = credit
         mock_txn.name = "Refund"
         mock_txn.merchant_name = "Refund"
@@ -144,6 +153,7 @@ class TestTransformTxn:
         mock_txn = MagicMock()
         mock_txn.transaction_id = "txn_full"
         mock_txn.date = date(2026, 3, 15)
+        mock_txn.authorized_date = None
         mock_txn.amount = 75.50
         mock_txn.name = "FULL TEST MERCHANT"
         mock_txn.merchant_name = "Full Test"
