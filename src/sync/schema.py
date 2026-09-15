@@ -74,6 +74,12 @@ def moment(name: str, attr: str | None = None) -> Field:
     return Field(name, coding.datetime_to_wire, coding.datetime_from_wire, attr)
 
 
+def integer(name: str, attr: str | None = None) -> Field:
+    """A whole-number column. Distinct from `money` so an ordering value does not travel as a
+    decimal string and come back as a `Decimal` -- harmless in effect, misleading to read."""
+    return Field(name, lambda v: None if v is None else int(v), lambda v: None if v in (None, "") else int(v), attr)
+
+
 def blob(name: str, attr: str | None = None) -> Field:
     """A JSON column. Passed through -- it is already JSON-representable."""
     return Field(name, _identity, _identity, attr)
@@ -140,7 +146,7 @@ TABLES: tuple[TableSpec, ...] = (
             text("category"),
             text("merchant_clean"),
             text("source"),
-            money("priority"),
+            integer("priority"),
         ),
         ref_attrs=("uid",),
     ),
@@ -219,6 +225,9 @@ TABLES: tuple[TableSpec, ...] = (
         model_name="TransactionSplit",
         mutable=(money("share_amount", attr="_share_amount"),),
     ),
+    # The legacy per-project split table, superseded by `transaction_splits`. Synced only so the two
+    # apps agree while it still holds rows; **delete this spec when the table is dropped**, along with
+    # KIND_TRANSACTION_PROJECT_SPLIT and its ref helper.
     TableSpec(
         name="transaction_project_splits",
         kind=refs.KIND_TRANSACTION_PROJECT_SPLIT,

@@ -208,20 +208,88 @@ def _vault(monkeypatch, metadata: dict) -> None:
 
 
 def _stub_tasks(monkeypatch, *, sync_raises: Exception | None = None) -> dict:
-    """Replace both real tasks with counters, so scheduling is tested without Plaid or Drive."""
+    """Count real work without doing it, stubbing at the **provider boundaries**.
+
+    Deliberately `sync_plaid` and `backup_vault_to_google_drive`, not `_run_plaid_sync` /
+    `_run_vault_backup`. Stubbing the latter proves only that `_tick` dispatches, and that is exactly
+    how a real bug survived review here: `_tick` decided to sync but never forwarded its `force` flag,
+    so the lease inside `_run_plaid_sync` silently suppressed the pull. Every test passed, because
+    none of them could see past the layer that was broken.
+
+    Stubbing one level lower means these tests fail if anything between `_tick` and the provider
+    swallows the call.
+    """
     calls = {"sync": 0, "backup": 0}
 
-    def fake_sync(db, *, trigger):
+    def fake_sync(db):
         calls["sync"] += 1
         if sync_raises:
             raise sync_raises
+        return {"ok": True}
 
-    def fake_backup(db, *, trigger):
+    def fake_backup(*, db):
         calls["backup"] += 1
+        return {"ok": True}
 
-    monkeypatch.setattr(auto_tasks, "_run_plaid_sync", fake_sync)
-    monkeypatch.setattr(auto_tasks, "_run_vault_backup", fake_backup)
+    monkeypatch.setattr("src.api.routes.sync.sync_plaid", fake_sync)
+    monkeypatch.setattr("src.api.routes.settings.backup_vault_to_google_drive", fake_backup)
     return calls
+
+
+class TestStartupReachesPlaid:
+    """Opening the app must pull, even if this device pulled an hour ago.
+
+    The regression this exists for: `_tick` decided to sync but did not forward its `force` flag, so
+    the peer lease inside `_run_plaid_sync` still applied -- and because that lease counts *this*
+    device's own last pull, reopening the app within 24h pulled nothing at all. Strictly worse than
+    the behaviour on main, and the opposite of what opening the app is for.
+
+    Note what was needed to catch it. Stubbing at the provider boundary was necessary but not
+    sufficient: the pre-existing startup test records no Plaid pull, so the lease permits the sync
+    regardless and the test passes either way. The missing ingredient was a *recent local pull*, which
+    is precisely the everyday case of quitting and reopening.
+    """
+
+    def test_a_startup_tick_pulls_even_after_a_recent_local_pull(self, db, monkeypatch):
+        from src.sync.engine import record_plaid_pull
+
+        calls = _stub_tasks(monkeypatch)
+        _vault(monkeypatch, {"last_backup_at": _iso(_now())})
+        record_plaid_pull(db, _now().replace(tzinfo=None) - timedelta(hours=1))
+
+        auto_tasks._tick(trigger="startup", force_sync=True)
+
+        assert calls["sync"] == 1, "reopening the app did not reach Plaid"
+
+    def test_an_interval_tick_still_respects_the_lease(self, db, monkeypatch):
+        """The other half: the saving must survive the fix. Only *startup* forces."""
+        from src.sync.engine import record_plaid_pull
+
+        calls = _stub_tasks(monkeypatch)
+        _vault(monkeypatch, {"last_backup_at": _iso(_now())})
+        record_plaid_pull(db, _now().replace(tzinfo=None) - timedelta(hours=1))
+        # Due by the clock, so the lease is the only thing that can stop it.
+        auto_tasks._write_timestamp(db, auto_tasks.LAST_SYNC_KEY, _now() - timedelta(days=2))
+
+        auto_tasks._tick(trigger="interval", force_sync=False)
+
+        assert calls["sync"] == 0, "an interval tick spent a Plaid call a peer had already spent"
+
+    def test_a_peers_recent_pull_does_not_block_startup(self, db, monkeypatch):
+        """A user reopening the app wants current data, whichever device pulled last."""
+        calls = _stub_tasks(monkeypatch)
+        _vault(monkeypatch, {"last_backup_at": _iso(_now())})
+        db.add(
+            AppMetadata(
+                key="plaid_peer_pull_at:other",
+                value=_iso(_now() - timedelta(hours=1)),
+            )
+        )
+        db.commit()
+
+        auto_tasks._tick(trigger="startup", force_sync=True)
+
+        assert calls["sync"] == 1
 
 
 class TestPlaidEconomy:
