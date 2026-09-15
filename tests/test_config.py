@@ -12,10 +12,10 @@ class TestSettings:
 
     def test_default_values(self):
         settings = Settings()
-        assert settings.plaid.env == "development"
+        assert settings.plaid.environment == "sandbox"
         assert settings.server.host == "0.0.0.0"
         assert settings.server.port == 8000
-        assert settings.database.path == "data/finances.db"
+        assert settings.database.path == "data/runtime/prod/finances.db"
 
     def test_load_from_yaml(self):
         config_content = """
@@ -39,7 +39,7 @@ database:
         
         assert settings.plaid.client_id == "test_client"
         assert settings.plaid.secret == "test_secret"
-        assert settings.plaid.env == "sandbox"
+        assert settings.plaid.environment == "sandbox"
         assert settings.gemini.api_key == "test_key"
         assert settings.server.host == "127.0.0.1"
         assert settings.server.port == 9000
@@ -77,17 +77,17 @@ class TestPlaidConfig:
         config = PlaidConfig()
         assert config.client_id == ""
         assert config.secret == ""
-        assert config.env == "development"
+        assert config.environment == "sandbox"
 
     def test_custom_values(self):
         config = PlaidConfig(
             client_id="my_client",
             secret="my_secret",
-            env="production"
+            environment="production"
         )
         assert config.client_id == "my_client"
         assert config.secret == "my_secret"
-        assert config.env == "production"
+        assert config.environment == "production"
 
 
 class TestGeminiConfig:
@@ -121,7 +121,7 @@ class TestDatabaseConfig:
 
     def test_default_values(self):
         config = DatabaseConfig()
-        assert config.path == "data/finances.db"
+        assert config.path == "data/runtime/prod/finances.db"
 
     def test_custom_values(self):
         config = DatabaseConfig(path="/custom/path/db.sqlite")

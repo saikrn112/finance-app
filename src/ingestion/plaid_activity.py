@@ -3,10 +3,43 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from src.models import AccountActivity, Transaction, TransactionProject
+from src.models import AccountActivity, ConnectedAccount, SyncLog, Transaction, TransactionProject
+
+
+def relink_orphaned_account_rows(db: Session, institution: str) -> tuple[int, int]:
+    """Reassociate historical Plaid rows after an Item reconnect changes account IDs."""
+    accounts = db.query(ConnectedAccount).join(SyncLog, SyncLog.id == ConnectedAccount.sync_log_id).filter(
+        ConnectedAccount.source == institution, ConnectedAccount.active.is_(True),
+        ConnectedAccount.mask.isnot(None), SyncLog.status == "connected",
+    ).all()
+    by_mask: dict[str, list[ConnectedAccount]] = {}
+    for account in accounts:
+        by_mask.setdefault(account.mask, []).append(account)
+
+    connected_ids = select(ConnectedAccount.external_account_id).join(
+        SyncLog, SyncLog.id == ConnectedAccount.sync_log_id,
+    ).where(ConnectedAccount.active.is_(True), SyncLog.status == "connected")
+    activity_count = ledger_count = 0
+    for mask, matches in by_mask.items():
+        if len(matches) != 1:
+            continue
+        account = matches[0]
+        activity_count += db.query(AccountActivity).filter(
+            AccountActivity.source == institution,
+            AccountActivity.account_last4 == mask,
+            AccountActivity.account_id.isnot(None),
+            AccountActivity.account_id.not_in(connected_ids),
+        ).update({AccountActivity.account_id: account.external_account_id}, synchronize_session=False)
+        ledger_count += db.query(Transaction).filter(
+            Transaction.source == institution,
+            Transaction.account_last4 == mask,
+            Transaction.plaid_account_id.isnot(None),
+            Transaction.plaid_account_id.not_in(connected_ids),
+        ).update({Transaction.plaid_account_id: account.external_account_id}, synchronize_session=False)
+    return activity_count, ledger_count
 from src.plugins.registry import classify_source, get_all_sources
 
 

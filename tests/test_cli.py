@@ -13,7 +13,9 @@ class TestCleanMerchant:
     """Tests for merchant name cleanup."""
 
     def test_removes_asterisk_suffix(self):
-        assert _clean_merchant("EXAMPLE DELIVERY ORDER") == "UBER"
+        # The asterisk and everything after it goes; no provider aliasing happens here,
+        # that lives in the plugin repo.
+        assert _clean_merchant("EXAMPLE DELIVERY *TRIP 123") == "EXAMPLE DELIVERY"
 
     def test_removes_hash_numbers(self):
         assert _clean_merchant("WHOLEFDS #12345") == "WHOLEFDS"
@@ -78,8 +80,8 @@ class TestImportCommand:
             f.write(csv_content)
             path = f.name
         
-        with patch("src.main.init_db"), \
-             patch("src.main.SessionLocal") as mock_session:
+        with patch("src.models.init_db"), \
+             patch("src.models.SessionLocal") as mock_session:
             mock_db = MagicMock()
             mock_db.query.return_value.filter.return_value.first.return_value = None
             mock_session.return_value = mock_db
@@ -95,8 +97,8 @@ class TestServeCommand:
 
     def test_serve_default_options(self):
         runner = CliRunner()
-        with patch("src.main.init_db"), \
-             patch("src.main.uvicorn.run") as mock_run:
+        with patch("src.models.init_db"), \
+             patch("uvicorn.run") as mock_run:
             result = runner.invoke(cli, ["serve"])
             mock_run.assert_called_once()
             call_args = mock_run.call_args
@@ -105,8 +107,8 @@ class TestServeCommand:
 
     def test_serve_custom_port(self):
         runner = CliRunner()
-        with patch("src.main.init_db"), \
-             patch("src.main.uvicorn.run") as mock_run:
+        with patch("src.models.init_db"), \
+             patch("uvicorn.run") as mock_run:
             result = runner.invoke(cli, ["serve", "--port", "9000"])
             call_args = mock_run.call_args
             assert call_args.kwargs["port"] == 9000
@@ -118,8 +120,7 @@ class TestReparseCommand:
     def test_reparse_no_files(self):
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("src.main.Path") as mock_path:
-                mock_path.return_value.exists.return_value = False
+            with patch("src.data_paths.RAW_ROOT", Path(tmpdir)):
                 result = runner.invoke(cli, ["reparse"])
                 assert "No raw files found" in result.output
 
@@ -129,8 +130,8 @@ class TestCategorizeCommand:
 
     def test_categorize_no_uncategorized(self):
         runner = CliRunner()
-        with patch("src.main.init_db"), \
-             patch("src.main.SessionLocal") as mock_session:
+        with patch("src.models.init_db"), \
+             patch("src.models.SessionLocal") as mock_session:
             mock_db = MagicMock()
             mock_db.query.return_value.filter.return_value.all.return_value = []
             mock_session.return_value = mock_db
@@ -140,9 +141,9 @@ class TestCategorizeCommand:
 
     def test_categorize_with_llm_flag(self):
         runner = CliRunner()
-        with patch("src.main.init_db"), \
-             patch("src.main.SessionLocal") as mock_session, \
-             patch("src.main.CategorizationEngine") as mock_engine:
+        with patch("src.models.init_db"), \
+             patch("src.models.SessionLocal") as mock_session, \
+             patch("src.processing.categorizer.CategorizationEngine") as mock_engine:
             mock_db = MagicMock()
             mock_db.query.return_value.filter.return_value.all.return_value = []
             mock_session.return_value = mock_db

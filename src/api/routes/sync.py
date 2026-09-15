@@ -18,7 +18,7 @@ from src.ingestion.plaid_client import create_link_token, exchange_public_token,
 from src.ingestion.csv_importer import import_csv_file
 from src.ingestion.import_service import commit_import, preview_import
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
-from src.ingestion.plaid_activity import apply_account_activity_batch, plaid_transactions_destination
+from src.ingestion.plaid_activity import apply_account_activity_batch, plaid_transactions_destination, relink_orphaned_account_rows
 from src.ingestion.plaid_usage import (
     plaid_usage_summary, record_plaid_usage, finish_plaid_usage, upsert_product_enrollments,
 )
@@ -154,6 +154,7 @@ def _upsert_connected_accounts(
             ConnectedAccount.sync_log_id == log.id,
             ConnectedAccount.external_account_id.notin_(seen),
         ).update({ConnectedAccount.active: False}, synchronize_session=False)
+    relink_orphaned_account_rows(db, institution)
     return result
 
 
@@ -983,6 +984,7 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
         rows.append({
             "source": account.display_name, "source_key": account.source_key,
             "account_key": account.id, "provider_source": account.source,
+            "account_last4": account.mask,
             "group": account.account_group, "connection_state": "plaid",
             "balance": balance, "snapshot_balance": balance,
             "ledger_balance": round(float(ledger), 2) if ledger is not None else None,
@@ -1442,11 +1444,11 @@ def get_investment_activity(
         activity = [{"id": r.AccountActivity.id, "date": r.AccountActivity.date.isoformat(),
                      "description": r.AccountActivity.description, "merchant": r.AccountActivity.merchant,
                      "type": r.AccountActivity.activity_type, "amount": round(float(r.converted), 2),
-                     "pending": r.AccountActivity.pending} for r in activity_rows]
+                     "pending": r.AccountActivity.pending, "account_last4": r.AccountActivity.account_last4} for r in activity_rows]
         activity.extend({"id": r.Transaction.id, "date": r.Transaction.date.isoformat(),
                          "description": r.Transaction.merchant_raw, "merchant": r.Transaction.merchant_clean,
                          "type": "other", "amount": round(float(r.converted), 2),
-                         "pending": r.Transaction.pending} for r in ledger_rows)
+                         "pending": r.Transaction.pending, "account_last4": r.Transaction.account_last4} for r in ledger_rows)
         return {"currency": currency, "activity": sorted(activity, key=lambda r: (r["date"], r["id"]), reverse=True)}
     rates = db.query(lr.c.from_currency, lr.c.rate).filter(lr.c.to_currency == currency).all()
     rate_map = {row[0]: float(row[1]) for row in rates}

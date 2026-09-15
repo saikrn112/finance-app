@@ -509,6 +509,7 @@ class RecurringDetailResponse(FinancialResponse):
 
 class SidebarAccountItem(BaseModel):
     source: str
+    account_last4: Optional[str] = None
     account_key: Optional[str] = None
     provider_source: Optional[str] = None
     source_key: Optional[str] = None

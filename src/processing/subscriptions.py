@@ -639,4 +639,6 @@ def detect_subscriptions(db: Session, rate_map: dict[str, float] | None = None) 
 
 
 def get_monthly_subscription_total(db: Session, rate_map: dict[str, float] | None = None) -> float:
-    return round(sum(item["monthly_equivalent"] for item in detect_subscriptions(db, rate_map=rate_map)), 2)
+    # float() matters: with nothing to sum, round(0, 2) is an int, so the return type
+    # changed shape depending on the data.
+    return float(round(sum(item["monthly_equivalent"] for item in detect_subscriptions(db, rate_map=rate_map)), 2))
