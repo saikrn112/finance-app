@@ -1,9 +1,11 @@
-"""End-to-end sync between devices, over a real transport.
+"""End-to-end sync between devices.
 
-`FolderTransport` against a temp directory exercises the actual publish/fetch/merge path with no
-network and no credentials, which is the only way to test convergence honestly. `DriveTransport`
-differs only in where the bytes live.
+`FakeTransport` (tests/sync_fakes.py) exercises the real publish/fetch/merge path with no network and
+no credentials, round-tripping payloads through JSON so a non-serialisable value still fails here.
+`DriveTransport` differs only in where the bytes live, and is **not** covered by automated tests -- it
+has been exercised only by hand. That gap is recorded in docs/multi_device_sync.md.
 """
+import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -20,7 +22,8 @@ from src.sync.engine import (
     record_plaid_pull,
     run_sync,
 )
-from src.sync.transport import FolderTransport, payload_name
+from src.sync.transport import payload_name
+from tests.sync_fakes import FakeTransport
 from src.sync.tracking import resume_tombstones
 
 T0 = datetime(2026, 1, 1, 0, 0, 0)
@@ -95,7 +98,7 @@ class Device:
 
 @pytest.fixture
 def transport(tmp_path):
-    return FolderTransport(tmp_path / "shared")
+    return FakeTransport()
 
 
 @pytest.fixture
@@ -148,7 +151,7 @@ class TestTwoDevices:
 
         tablet = Device(tmp_path, "tablet")
         # Only the Mac's file is visible to the tablet.
-        (transport.root / payload_name("phone")).unlink()
+        transport.delete("phone")
         tablet.sync(transport)
 
         session = tablet.session()
@@ -164,8 +167,7 @@ class TestRobustness:
         mac.add_transaction("mac-1")
         mac.sync(transport)
 
-        transport.root.mkdir(parents=True, exist_ok=True)
-        (transport.root / payload_name("corrupt")).write_text("{not json")
+        transport.corrupt("corrupt")
 
         result = phone.sync(transport)
         session = phone.session()
@@ -175,39 +177,11 @@ class TestRobustness:
             session.close()
         assert "corrupt" not in result.peers_seen
 
-    def test_a_write_leaves_no_stray_files_behind(self, transport, mac):
-        mac.add_transaction()
-        mac.sync(transport)
-        assert sorted(p.name for p in transport.root.iterdir()) == [payload_name("mac")]
-
-    def test_a_leftover_partial_file_never_becomes_a_peer_or_a_failure(self, transport, mac, phone):
-        """A crash mid-write leaves a temp file behind; syncing must carry on unbothered.
-
-        Note what this does *not* prove: it is not evidence that `TEMP_SUFFIX` is what protects the
-        reader. It is not -- `tempfile` generates names like `tmpab12cd`, which never match the
-        `device-*` prefix, so setting the suffix to `.json` changes nothing here. Mutation confirmed
-        that. Even a file deliberately named `device-ghost.json` is only skipped as unreadable, which
-        the corrupt-payload test already covers. The prefix is the real protection.
-        """
-        mac.add_transaction("mac-1")
-        mac.sync(transport)
-
-        from src.sync.transport import TEMP_SUFFIX
-
-        (transport.root / f"device-ghost{TEMP_SUFFIX}").write_text('{"records": {"trans')
-
-        result = phone.sync(transport)
-        assert result.peers_seen == ["mac"], f"a stray file was read as a peer: {result.peers_seen}"
-        assert not result.peers_failed
-
     def test_a_failing_peer_merge_is_reported_and_the_publish_still_happens(
         self, transport, mac, phone
     ):
-        transport.root.mkdir(parents=True, exist_ok=True)
         # A payload from a format this build refuses to guess at.
-        (transport.root / payload_name("future")).write_text(
-            '{"format_version": 999, "records": {}, "tombstones": []}'
-        )
+        transport.files["future"] = '{"format_version": 999, "records": {}, "tombstones": []}'
 
         result = phone.sync(transport)
         assert "future" in result.peers_failed
@@ -278,7 +252,7 @@ class TestPublishesFullState:
         mac.add_transaction("new", updated_at=T0 + timedelta(days=1))
         mac.sync(transport)
 
-        payload = json.loads((transport.root / payload_name("mac")).read_text())
+        payload = transport.raw("mac")
         assert sorted(r["source_id"] for r in payload["records"]["transactions"]) == ["new", "old"]
 
     def test_a_row_learned_from_a_peer_is_relayed_onward(self, transport, mac, phone, tmp_path):
@@ -292,9 +266,7 @@ class TestPublishesFullState:
 
         mac.sync(transport)  # learns phone-old, and must republish it
 
-        import json
-
-        payload = json.loads((transport.root / payload_name("mac")).read_text())
+        payload = transport.raw("mac")
         assert sorted(r["source_id"] for r in payload["records"]["transactions"]) == [
             "mac-new",
             "phone-old",
@@ -302,7 +274,7 @@ class TestPublishesFullState:
 
         # And a device that can only see the Mac's file still gets everything.
         tablet = Device(tmp_path, "tablet")
-        (transport.root / payload_name("phone")).unlink()
+        transport.delete("phone")
         tablet.sync(transport)
         session = tablet.session()
         try:
@@ -411,7 +383,9 @@ class TestPlaidEconomy:
             session.close()
         mac.sync(transport)
 
-        raw = (transport.root / payload_name("mac")).read_text()
+        # The serialised form, not the dict: a secret leaking as a nested value would still be in
+        # the bytes that reach the transport.
+        raw = transport.files["mac"]
         payload = json.loads(raw)
         assert payload["plaid"]["last_pull_at"]
         assert set(payload["plaid"]) == {"last_pull_at"}
@@ -471,14 +445,13 @@ class TestPublishSkipping:
     def test_an_unchanged_device_does_not_republish(self, transport, mac):
         mac.add_transaction()
         first = mac.sync(transport)
-        path = transport.root / payload_name("mac")
-        before = path.stat().st_mtime_ns
+        before = transport.put_count
 
         second = mac.sync(transport)
 
         assert first.published and not first.skipped_publish
         assert second.skipped_publish and not second.published
-        assert path.stat().st_mtime_ns == before, "the payload was rewritten with identical content"
+        assert transport.put_count == before, "the payload was rewritten with identical content"
 
     def test_a_local_edit_publishes_again(self, transport, mac):
         mac.add_transaction("a")
@@ -548,7 +521,7 @@ class TestPublishSkipping:
         )
 
         tablet = Device(tmp_path, "tablet")
-        (transport.root / payload_name("phone")).unlink()
+        transport.delete("phone")
         tablet.sync(transport)
         session = tablet.session()
         try:
@@ -595,7 +568,7 @@ class TestPublishSkipping:
         assert result.published is True, "a converged uid was not relayed onward"
 
         tablet = Device(tmp_path, "tablet")
-        (transport.root / payload_name("phone")).unlink()
+        transport.delete("phone")
         tablet.sync(transport)
         session = tablet.session()
         try:

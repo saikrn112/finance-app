@@ -41,7 +41,7 @@ from src.models import (
 )
 from src.sync.engine import run_sync
 from src.sync.tracking import resume_tombstones
-from src.sync.transport import FolderTransport
+from tests.sync_fakes import FakeTransport
 
 T0 = datetime(2026, 1, 1)
 
@@ -370,7 +370,7 @@ def test_random_histories_converge(tmp_path, seed):
     rng = random.Random(seed)
     device_count = rng.choice([2, 3, 4])
     devices = [SoakDevice(tmp_path, f"dev{i}") for i in range(device_count)]
-    transport = FolderTransport(tmp_path / "shared")
+    transport = FakeTransport()
 
     for _ in range(rng.randrange(20, 60)):
         device = rng.choice(devices)
@@ -403,7 +403,7 @@ def test_money_is_never_altered_by_merging(tmp_path, seed):
     """
     rng = random.Random(1000 + seed)
     devices = [SoakDevice(tmp_path, f"dev{i}") for i in range(3)]
-    transport = FolderTransport(tmp_path / "shared")
+    transport = FakeTransport()
 
     created: dict[tuple[str, str], str] = {}
     for _ in range(40):
@@ -439,7 +439,7 @@ def test_a_late_joining_device_catches_up(tmp_path):
     """A phone switched on after weeks must reach the same state, not a partial one."""
     rng = random.Random(99)
     established = [SoakDevice(tmp_path, "mac"), SoakDevice(tmp_path, "laptop")]
-    transport = FolderTransport(tmp_path / "shared")
+    transport = FakeTransport()
 
     for _ in range(40):
         rng.choice(_WEIGHTED)(rng, rng.choice(established))

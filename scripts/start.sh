@@ -130,17 +130,14 @@ start_prod() {
   # Vite port makes Google reject the sign-in with redirect_uri_mismatch.
   export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${API_PORT}/api/settings/vault/google/callback"
 
-  # Multi-device sync. Off unless this is set; the transport falls back to the vault's existing
-  # Google Drive connection, so no extra credentials are needed.
-  export FINANCE_APP_SYNC="${FINANCE_APP_SYNC:-1}"
+  # Multi-device sync, over Google Drive, reusing the vault's existing connection. Off unless
+  # deliberately switched on: publishing sends the user's financial history to cloud storage, so
+  # it is not something a default should decide. Pass FINANCE_APP_SYNC=1 to enable.
+  export FINANCE_APP_SYNC="${FINANCE_APP_SYNC:-}"
   # _in_container() looks for /.dockerenv or "docker" in /proc/1/cgroup, neither of which Finch
   # creates, so without this the container would label itself "linux". Only affects the device
   # list, but a wrong label is worse than none.
   export FINANCE_APP_PLATFORM="${FINANCE_APP_PLATFORM:-container}"
-  # A folder beats Drive for two apps on this machine: the history never leaves it, and the macOS
-  # app sees the same directory directly because data/ is bind-mounted here. Drive stays the
-  # fallback for genuinely separate machines (unset this to use it).
-  export FINANCE_APP_SYNC_FOLDER="${FINANCE_APP_SYNC_FOLDER:-/app/data/sync}"
 
   COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/finances-start.XXXXXX.yml")"
   trap 'rm -f "${COMPOSE_FILE}"' EXIT
@@ -166,7 +163,6 @@ services:
       FINANCE_APP_GOOGLE_REDIRECT_URI: "${FINANCE_APP_GOOGLE_REDIRECT_URI}"
       FINANCE_APP_SYNC: "${FINANCE_APP_SYNC}"
       FINANCE_APP_PLATFORM: "${FINANCE_APP_PLATFORM}"
-      FINANCE_APP_SYNC_FOLDER: "${FINANCE_APP_SYNC_FOLDER}"
       FINANCE_APP_GOOGLE_CLIENT_ID: "${FINANCE_APP_GOOGLE_CLIENT_ID}"
       FINANCE_APP_GOOGLE_CLIENT_SECRET: "${FINANCE_APP_GOOGLE_CLIENT_SECRET}"
       FINANCE_APP_GOOGLE_CLIENT_TYPE: "${FINANCE_APP_GOOGLE_CLIENT_TYPE}"

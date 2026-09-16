@@ -13,35 +13,25 @@ fork detection, because there is nothing shared to fork.
 Contrast the vault, whose one `latest.manifest.json` per vault is written by every device and where
 the second writer silently orphans the first.
 
-## Writes are atomic
+## Google Drive only
 
-A reader must never see half a payload. Local writes go to a temporary file in the same directory and
-are then renamed, which is atomic within a filesystem.
-
-What actually keeps a leftover temp file out of the reader's view is the **`device-` prefix**: the
-reader matches `device-*.json`, and `tempfile` generates names like `tmpab12cd`, which cannot match
-whatever suffix is used. `TEMP_SUFFIX` is belt-and-braces on top of that, not the protection --
-setting it to `.json` changes nothing, which is worth stating because the obvious assumption is the
-opposite. (Timeslice hit the real version of this bug by *constructing* its temp names from the final
-name, so its temp files did carry the matching prefix.)
+There is deliberately one transport. A directory-based one existed briefly and was removed: a folder
+only reaches processes that can see that filesystem, so it is single-machine sync wearing the label of
+multi-device sync -- a phone or a second Mac could never join. Tests use a dict-backed fake instead,
+which is a better test double anyway.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
 PAYLOAD_PREFIX = "device-"
 PAYLOAD_SUFFIX = ".json"
-#: Deliberately not `.json.tmp`: a partial file must not match the reader's pattern.
-TEMP_SUFFIX = ".partial"
 
 
 @dataclass
@@ -72,59 +62,6 @@ def device_id_from_name(name: str) -> str | None:
     if not name.startswith(PAYLOAD_PREFIX) or not name.endswith(PAYLOAD_SUFFIX):
         return None
     return name[len(PAYLOAD_PREFIX) : -len(PAYLOAD_SUFFIX)] or None
-
-
-class FolderTransport:
-    """A directory both devices can see -- a shared volume, or iCloud/Dropbox on a Mac.
-
-    Also what the tests run against: it exercises the real publish/fetch/merge path with no network
-    and no credentials, which is the only way to test convergence honestly.
-    """
-
-    def __init__(self, root: str | Path):
-        self.root = Path(root)
-
-    def put(self, device_id: str, payload: dict) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        target = self.root / payload_name(device_id)
-        # Same directory, so the rename is atomic rather than a cross-filesystem copy.
-        handle = tempfile.NamedTemporaryFile(
-            mode="w", dir=self.root, suffix=TEMP_SUFFIX, delete=False, encoding="utf-8"
-        )
-        try:
-            with handle:
-                json.dump(payload, handle, default=str)
-            os.chmod(handle.name, 0o600)
-            os.replace(handle.name, target)
-        except Exception:
-            Path(handle.name).unlink(missing_ok=True)
-            raise
-
-    def fetch_others(self, device_id: str) -> list[RemotePayload]:
-        if not self.root.exists():
-            return []
-        results: list[RemotePayload] = []
-        for path in sorted(self.root.glob(f"{PAYLOAD_PREFIX}*{PAYLOAD_SUFFIX}")):
-            peer = device_id_from_name(path.name)
-            if peer is None or peer == device_id:
-                continue
-            try:
-                payload = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                # One unreadable file must not stop syncing with every other device.
-                logger.warning("sync: could not read peer payload %s", path.name)
-                continue
-            modified_at = datetime.fromtimestamp(
-                path.stat().st_mtime, tz=timezone.utc
-            ).replace(tzinfo=None)
-            results.append(RemotePayload(peer, payload, modified_at))
-        return results
-
-    def delete(self, device_id: str) -> None:
-        (self.root / payload_name(device_id)).unlink(missing_ok=True)
-
-    def describe(self) -> str:
-        return f"folder {self.root}"
 
 
 class DriveTransport:
