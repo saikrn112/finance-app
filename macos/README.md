@@ -593,5 +593,6 @@ Note that the *first* attempt to mutation-test it was invalid — the mutant was
 where its `source .../common.sh` failed silently, so `log` resolved to macOS's `/usr/bin/log` and the
 "mutant" was never the same program. A mutant has to live beside `common.sh`.
 
-**After cutover, stop running this** — it would overwrite the newer database with the older one.
-Delete it, or move the app to a shared folder so there is only one copy.
+**Superseded by sync — do not run this.** Multi-device sync (`docs/multi_device_sync.md`) is how the
+two apps agree now: they each keep their own database and converge per record. A one-way file copy
+would overwrite whichever side happens to be newer, which is exactly what sync exists to avoid.

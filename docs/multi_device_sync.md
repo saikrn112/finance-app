@@ -6,7 +6,8 @@ desktop app, and a future iOS app — with all of them able to write.
 Status: **in progress.** Phases A–E are implemented: identity, tombstones, the merge engine,
 transports and the Plaid lease. **Nothing calls sync from the app yet** — no scheduler hook, no UI, no
 device list — so merging this changes no runtime behaviour. `DriveTransport` has never been run
-against real Google Drive; only `FolderTransport` is covered by tests. The `.fvault` vault backup is
+against real Google Drive with a real payload; the automated tests drive a fake transport, so
+`DriveTransport` has no automated coverage at all. The `.fvault` vault backup is
 untouched and remains the only cloud path in use.
 
 ---
