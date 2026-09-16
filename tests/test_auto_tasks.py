@@ -76,7 +76,11 @@ class TestDueCalculation:
         now = _now()
         assert auto_tasks._is_due(now + timedelta(days=400), now=now) is True
 
-    def test_unparseable_stored_value_errs_towards_backing_up(self, db):
+    def test_unparseable_stored_value_errs_towards_backing_up(self, db, monkeypatch):
+        # The vault must be stubbed: _backup_due also consults vault_metadata.json, and without
+        # this the test reads the developer's real file and passes or fails depending on whether
+        # that machine happens to have backed up recently.
+        _vault(monkeypatch, {})
         db.add(AppMetadata(key=auto_tasks.LAST_BACKUP_ATTEMPT_KEY, value="garbage"))
         db.commit()
         assert auto_tasks._backup_due(db, now=_now()) is True

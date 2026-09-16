@@ -130,6 +130,15 @@ start_prod() {
   # Vite port makes Google reject the sign-in with redirect_uri_mismatch.
   export FINANCE_APP_GOOGLE_REDIRECT_URI="http://localhost:${API_PORT}/api/settings/vault/google/callback"
 
+  # Multi-device sync, over Google Drive, reusing the vault's existing connection. Off unless
+  # deliberately switched on: publishing sends the user's financial history to cloud storage, so
+  # it is not something a default should decide. Pass FINANCE_APP_SYNC=1 to enable.
+  export FINANCE_APP_SYNC="${FINANCE_APP_SYNC:-}"
+  # _in_container() looks for /.dockerenv or "docker" in /proc/1/cgroup, neither of which Finch
+  # creates, so without this the container would label itself "linux". Only affects the device
+  # list, but a wrong label is worse than none.
+  export FINANCE_APP_PLATFORM="${FINANCE_APP_PLATFORM:-container}"
+
   COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/finances-start.XXXXXX.yml")"
   trap 'rm -f "${COMPOSE_FILE}"' EXIT
   cat > "${COMPOSE_FILE}" <<EOF
@@ -152,6 +161,8 @@ services:
       VITE_PORT: "${VITE_PORT}"
       VITE_API_PROXY_TARGET: "${VITE_API_PROXY_TARGET}"
       FINANCE_APP_GOOGLE_REDIRECT_URI: "${FINANCE_APP_GOOGLE_REDIRECT_URI}"
+      FINANCE_APP_SYNC: "${FINANCE_APP_SYNC}"
+      FINANCE_APP_PLATFORM: "${FINANCE_APP_PLATFORM}"
       FINANCE_APP_GOOGLE_CLIENT_ID: "${FINANCE_APP_GOOGLE_CLIENT_ID}"
       FINANCE_APP_GOOGLE_CLIENT_SECRET: "${FINANCE_APP_GOOGLE_CLIENT_SECRET}"
       FINANCE_APP_GOOGLE_CLIENT_TYPE: "${FINANCE_APP_GOOGLE_CLIENT_TYPE}"

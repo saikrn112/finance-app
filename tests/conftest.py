@@ -162,6 +162,26 @@ _ensure_test_plugins_registered()
 
 
 @pytest.fixture(autouse=True)
+def _isolate_runtime_dir(tmp_path_factory):
+    """Point runtime_dir at a temp directory for every test.
+
+    Anything that writes beside the database -- the sync device id, vault metadata, the import
+    workspace -- resolves through settings.app.runtime_dir. Without this, tests that exercise
+    sync minted a real `device-id` into data/runtime/prod, stamped with the *host* platform, so
+    the container app would have identified itself as a Mac. Tests must not write into
+    production data at all.
+    """
+    from src.config import settings
+
+    original = settings.app.runtime_dir
+    settings.app.runtime_dir = str(tmp_path_factory.mktemp("runtime"))
+    try:
+        yield
+    finally:
+        settings.app.runtime_dir = original
+
+
+@pytest.fixture(autouse=True)
 def _isolate_finance_env():
     """Undo FINANCE_APP_* env changes a test makes.
 
