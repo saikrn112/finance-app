@@ -6,7 +6,12 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from src.models import Transaction, TransactionProject
+from src.models import (
+    Transaction,
+    TransactionProject,
+    TransactionProjectSplit,
+    TransactionSplit,
+)
 from src.processing.categorizer import RuleMatcher
 from src.processing.overlap_diagnostics import _merchant_matches
 
@@ -80,7 +85,14 @@ def upsert_plaid_transaction(
     txn_data: dict[str, Any],
     matcher: RuleMatcher,
 ) -> str:
-    if _find_statement_boundary_overlap(db, institution, txn_data):
+    statement_twin = _find_statement_boundary_overlap(db, institution, txn_data)
+    if statement_twin:
+        # The statement row already represents this expense, so the Plaid copy goes -- but anything
+        # the user attached to it moves onto the survivor first. Deleting outright discarded real
+        # work: a project assignment and a split nobody had a second copy of.
+        doomed = _find_plaid_txn(db, institution, txn_data["source_id"])
+        if doomed is not None:
+            _transfer_user_attributes(db, doomed, statement_twin)
         remove_plaid_transaction(db, institution, txn_data["source_id"])
         return "skipped_statement_overlap"
 
@@ -124,8 +136,29 @@ def remove_plaid_transaction(db: Session, institution: str, source_id: str) -> i
     txn = _find_plaid_txn(db, institution, source_id)
     if not txn:
         return 0
+    _delete_transaction_links(db, txn.id)
     db.delete(txn)
     return 1
+
+
+def _delete_transaction_links(db: Session, transaction_id: str) -> int:
+    """Remove the join rows that point at a transaction being deleted.
+
+    SQLite declares these foreign keys `NO ACTION` and runs with `PRAGMA foreign_keys = 0`, so
+    deleting a transaction silently leaves them dangling rather than refusing. Left behind they are
+    invisible in the app (every read joins through the parent) *and* unsyncable, because a row that
+    cannot be named cannot be put in a payload -- which is how 77 of them accumulated unnoticed.
+    """
+    removed = 0
+    for model in (TransactionProject, TransactionSplit, TransactionProjectSplit):
+        removed += (
+            db.query(model).filter(model.transaction_id == transaction_id).delete(
+                synchronize_session=False
+            )
+            or 0
+        )
+    db.flush()
+    return removed
 
 
 def _find_plaid_txn(db: Session, institution: str, source_id: str | None) -> Transaction | None:
@@ -180,8 +213,34 @@ def _transfer_user_attributes(db: Session, src: Transaction, dest: Transaction) 
             TransactionProject.project_id == link.project_id,
         ).first()
         if not existing:
-            db.add(TransactionProject(transaction_id=dest.id, project_id=link.project_id))
+            db.add(
+                TransactionProject(
+                    transaction_id=dest.id,
+                    project_id=link.project_id,
+                    description=link.description,
+                )
+            )
         db.delete(link)
+
+    # Splits move with the row too. They did not, which meant a pending charge that had been split
+    # with someone kept its project when it posted but silently lost who owed what -- and because
+    # SQLite is not enforcing these foreign keys, the split rows were left pointing at a deleted
+    # transaction rather than raising.
+    for model, key in ((TransactionSplit, ("contact_id",)),
+                       (TransactionProjectSplit, ("project_id", "contact_id"))):
+        for link in db.query(model).filter(model.transaction_id == src.id).all():
+            match = db.query(model).filter(
+                model.transaction_id == dest.id,
+                *[getattr(model, name) == getattr(link, name) for name in key],
+            ).first()
+            if not match:
+                fields = {name: getattr(link, name) for name in key}
+                moved = model(transaction_id=dest.id, **fields)
+                # Private column: reading the public property is deliberately blocked.
+                moved._share_amount = link._share_amount
+                db.add(moved)
+            db.delete(link)
+    db.flush()
 
 
 def _apply_txn_data(txn: Transaction, txn_data: dict[str, Any], matcher: RuleMatcher) -> None:
