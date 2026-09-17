@@ -232,6 +232,10 @@ export function Dashboard() {
     setGranularity('alltime')
     navigateToView('net-worth')
   }
+  // Dismissing and completing both have to persist. Closing the tour IS a decision -- "I do not want
+  // this" -- and forgetting it means the tour returns on every launch, which is what happened: only
+  // the final "Mark done" button wrote the flag, so anyone who used the X, Close or Escape saw the
+  // tour again forever. Reopening it deliberately from the sidebar is the intended way back in.
   const handleCompleteGettingStarted = () => {
     window.localStorage.setItem(GETTING_STARTED_DONE_KEY, 'true')
     setShowGettingStarted(false)
@@ -543,7 +547,7 @@ export function Dashboard() {
       />
       <AppTour
         open={showGettingStarted}
-        onClose={() => setShowGettingStarted(false)}
+        onClose={handleCompleteGettingStarted}
         onComplete={handleCompleteGettingStarted}
       />
       <ImportsPanel open={showImports} onClose={() => setShowImports(false)} onSuccess={handleDataChange} />

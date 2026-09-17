@@ -63,7 +63,34 @@ cp -R "$BUILD_DIR/backend" "$CONTENTS/Resources/backend"
 
 # The built frontend. Absent until phase 2; the shell shows the backend status
 # window in that case rather than a blank webview.
+# Build the frontend when the sources are newer than the last build.
+#
+# This script used to *copy* frontend/dist and never build it, which meant a bundle could ship a
+# frontend days older than the source with nothing complaining. It happened: a fix to the getting
+# started tour was edited, "verified" by grepping the bundle for a string that was already there, and
+# shipped four times without ever reaching the app. A build script that silently packages stale
+# artifacts is worse than one that fails.
+if [ -d "$REPO_ROOT/frontend/src" ]; then
+  newest_source="$(find "$REPO_ROOT/frontend/src" -type f -newer "$REPO_ROOT/frontend/dist/index.html" -print -quit 2>/dev/null || true)"
+  if [ ! -f "$REPO_ROOT/frontend/dist/index.html" ] || [ -n "$newest_source" ]; then
+    log "frontend/dist is stale (or missing) -- running the frontend build"
+    # `vite build`, not `npm run build`. The npm script is `tsc -b && vite build`, and this repo
+    # carries ~57 pre-existing type errors, so that script always fails -- which is exactly why
+    # frontend/dist sat four days stale while the bundle happily shipped it. Vite transpiles without
+    # type-checking, so it produces a correct bundle regardless.
+    #
+    # Types are still checked, just not here: `npx tsc -p tsconfig.app.json --noEmit`, compared
+    # against the recorded baseline (see AGENTS.md). Coupling the shippable artifact to a
+    # long-standing type debt only guaranteed a stale artifact.
+    ( cd "$REPO_ROOT/frontend" && npx vite build ) \
+      || die "the frontend build failed; refusing to ship a stale web UI"
+  else
+    log "frontend/dist is up to date"
+  fi
+fi
+
 if [ -d "$REPO_ROOT/frontend/dist" ]; then
+  rm -rf "$CONTENTS/Resources/web"
   cp -R "$REPO_ROOT/frontend/dist" "$CONTENTS/Resources/web"
   log "included frontend/dist as Resources/web"
 else
