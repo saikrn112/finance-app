@@ -305,6 +305,29 @@ def backfill_sync_identity_command(apply_changes: bool):
         db.close()
 
 
+@cli.command("prune-orphan-links")
+@click.option("--apply", "apply_changes", is_flag=True, help="Delete the previewed rows")
+def prune_orphan_links_command(apply_changes: bool):
+    """Remove project/split rows pointing at transactions that no longer exist."""
+    from src.models import SessionLocal, init_db
+    from src.ingestion.prune_orphan_links import preview_prune, run_prune
+
+    init_db()
+    db = SessionLocal()
+    try:
+        preview = preview_prune(db)
+        click.echo(f"Preview: {preview}")
+        if not preview["total_rows"]:
+            click.echo("Nothing to prune.")
+            return
+        if not apply_changes:
+            click.echo("Dry run only. Re-run with --apply after backing up the database.")
+            return
+        click.echo(f"Applied: {run_prune(db)}")
+    finally:
+        db.close()
+
+
 @cli.command("sync")
 @click.option("--label", default=None, help="Label to publish for this device")
 @click.option("--status", "status_only", is_flag=True, help="Show what would be used, run nothing")
