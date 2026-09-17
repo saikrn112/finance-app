@@ -326,6 +326,25 @@ export interface MemberTotal {
   net: number
 }
 
+export interface SnapshotRow {
+  name: string
+  file_id: string
+  created_at: string
+  size_bytes: number
+}
+
+/** Set until this device has agreed to merge with a peer. Until then it publishes but never merges. */
+export interface PendingMergeState {
+  consent_given: boolean
+  pending: {
+    device_id: string | null
+    device_label: string | null
+    would_insert: number
+    would_update: number
+    by_table: Record<string, { insert: number; update: number }>
+  } | null
+}
+
 export interface SplitwiseCredentialsInfo {
   usable: boolean
   auth_mode: 'api_key' | 'oauth' | null
@@ -743,6 +762,26 @@ export const api = {
       () => fetchJson<{ vaults: VaultDiscoveryRow[] }>(`/settings/vault/google/discover`),
     )
   },
+  // Snapshot backup. Replaces the bundle path: that uploaded ~475 MB to preserve a ~9 MB database.
+  snapshotBackup: () => request<{
+    snapshot: { name: string; file_id: string; created_at: string; transactions: number; size_bytes: number; pruned: string[] }
+    statements: { uploaded: number; skipped: number; bytes: number }
+  }>(`/settings/vault/google/snapshot`, { method: 'POST' }),
+
+  listSnapshots: () => request<{ snapshots: SnapshotRow[]; retention: number }>(
+    `/settings/vault/google/snapshots`,
+  ),
+
+  restoreSnapshot: (fileId: string) => request<{
+    status: string; transactions: number; displaced: string | null; republished: unknown
+  }>(`/settings/vault/google/snapshots/${encodeURIComponent(fileId)}/restore`, { method: 'POST' }),
+
+  getPendingMerge: () => request<PendingMergeState>(`/settings/sync/pending-merge`),
+
+  acceptPendingMerge: () => request<{ consent_given: boolean }>(
+    `/settings/sync/pending-merge/accept`, { method: 'POST' },
+  ),
+
   listGoogleBackups: (vaultId?: string, options?: { fresh?: boolean }) => {
     const key = `vault-backups:${vaultId || 'default'}`
     if (options?.fresh) invalidateCache(key)

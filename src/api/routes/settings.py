@@ -1,5 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+import time
 import logging
 import threading
 import uuid
@@ -36,6 +37,7 @@ from src.ingestion.plaid_usage import deactivate_product_enrollments
 from pathlib import Path
 import tempfile
 
+from src.vault import snapshot
 from src.vault.backup import (
     BACKUP_MANIFEST_NAME,
     build_backup_bundle,
@@ -45,6 +47,7 @@ from src.vault.backup import (
     manifest_filename,
     mark_backup_succeeded,
     restore_backup_bundle,
+    save_vault_metadata,
 )
 from src.vault.google_drive import (
     create_google_auth_url,
@@ -101,22 +104,59 @@ def _google_drive_log(db: Session) -> SyncLog | None:
     )
 
 
+_TOKEN_CHECK_TTL_SECONDS = 60
+#: (checked_at, ok, reason). Cached because the settings panel polls, and refreshing a token on
+#: every poll would be both slow and rude to Google.
+_token_health: tuple[float, bool, str | None] = (0.0, False, None)
+
+
+def _google_token_health(log: SyncLog | None) -> tuple[bool, str | None]:
+    """Whether the stored Google token actually works right now.
+
+    `bool(access_token)` only proves a row exists. That is what let the panel read "Connected" for
+    a week while the refresh token was dead: no backups, no sync, green label. A refresh attempt is
+    the only honest answer, so make one and cache it briefly.
+    """
+    global _token_health
+    if log is None:
+        return False, "not connected"
+    now = time.monotonic()
+    checked_at, ok, reason = _token_health
+    if now - checked_at < _TOKEN_CHECK_TTL_SECONDS:
+        return ok, reason
+    try:
+        ensure_fresh_google_access_token(dict(log.extra_data or {}))
+        _token_health = (now, True, None)
+        return True, None
+    except HTTPException as exc:
+        _token_health = (now, False, str(exc.detail))
+        return False, str(exc.detail)
+    except Exception as exc:
+        _token_health = (now, False, str(exc))
+        return False, str(exc)
+
+
 def _vault_status(db: Session) -> dict:
     metadata = load_vault_metadata()
     log = _google_drive_log(db)
     extra = dict(log.extra_data or {}) if log else {}
+    token_ok, token_reason = _google_token_health(log)
     return {
         "vault_id": metadata.get("vault_id"),
         "provider": metadata.get("provider"),
         "provider_email": metadata.get("provider_email") or extra.get("email"),
-        "connected": bool(log),
+        # Verified, not merely stored. A row with a dead refresh token is not "connected".
+        "connected": bool(log) and token_ok,
+        "token_row_present": bool(log),
+        "needs_reconnect": bool(log) and not token_ok,
+        "reconnect_reason": token_reason if (log and not token_ok) else None,
         "last_backup_at": metadata.get("last_backup_at"),
         "last_backup_file_id": metadata.get("last_backup_file_id"),
         "drive_folder_name": extra.get("drive_folder_name"),
         "drive_folder_id": extra.get("drive_folder_id"),
         "last_backup_id": metadata.get("last_backup_id"),
         "last_restore_at": metadata.get("last_restore_at"),
-        "google_drive_ready": bool(log and extra.get("access_token")),
+        "google_drive_ready": bool(log) and token_ok,
     }
 
 
@@ -660,6 +700,138 @@ def backup_vault_to_google_drive(db: Session = Depends(get_db)):
                 detail=f"Busy: {job_lock.current_holder() or 'another job'} is running",
             )
         return _perform_google_drive_backup(db)
+
+
+# --- first-contact merge consent ------------------------------------------------------------------
+
+
+@router.get("/sync/pending-merge")
+def get_pending_merge(db: Session = Depends(get_db)):
+    """What a peer is offering, if this device has not yet agreed to merge with one.
+
+    Null once answered. The counts come from a real trial merge that was rolled back, so they are
+    what would actually happen rather than an estimate.
+    """
+    from src.sync.engine import merge_consent_given, pending_first_merge
+
+    return {
+        "consent_given": merge_consent_given(db),
+        "pending": pending_first_merge(db),
+    }
+
+
+@router.post("/sync/pending-merge/accept")
+def accept_pending_merge(db: Session = Depends(get_db)):
+    """Agree to merge. The next sync round absorbs the peer and the prompt does not return."""
+    from src.sync.engine import grant_merge_consent
+
+    grant_merge_consent(db)
+    return {"consent_given": True}
+
+
+# --- snapshot backup ---------------------------------------------------------------------------
+#
+# The bundle path below is kept for reading existing archives; everything new goes through these.
+# See src/vault/snapshot.py for why: the bundle uploaded ~475 MB to preserve a 9.3 MB database.
+
+
+@router.post("/vault/google/snapshot")
+def snapshot_backup_to_google_drive(db: Session = Depends(get_db)):
+    """Take a dated snapshot, upload it, prune old ones, archive new statements.
+
+    Shares the job lock with sync and the legacy backup: this holds a read transaction over the
+    database while talking to Drive, which is how "database is locked" was reintroduced before.
+    """
+    with job_lock.try_acquire("snapshot backup") as acquired:
+        if not acquired:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Busy: {job_lock.current_holder() or 'another job'} is running",
+            )
+        _, access_token, updated_extra = _google_access(db)
+        db.commit()  # release the write transaction before the network work
+
+        result = snapshot.publish_snapshot(access_token)
+        statements = snapshot.archive_statements(access_token)
+
+        metadata = ensure_vault_metadata(provider="google_drive")
+        metadata["last_backup_at"] = result["created_at"]
+        metadata["last_snapshot_name"] = result["name"]
+        metadata["last_backup_file_id"] = result["file_id"]
+        metadata.pop("dirty", None)
+        save_vault_metadata(metadata)
+
+        # Recorded here, not only in the scheduler: a backup taken by hand protects peers just as
+        # much as a scheduled one, so it should suppress their duplicates too.
+        from src.sync.engine import record_backup
+
+        record_backup(db)
+        return {"snapshot": result, "statements": statements}
+
+
+@router.get("/vault/google/snapshots")
+def list_google_snapshots(db: Session = Depends(get_db)):
+    _, access_token, _ = _google_access_ephemeral(db)
+    rows = snapshot.list_snapshots(access_token)
+    return {"snapshots": rows, "retention": snapshot.SNAPSHOT_RETENTION}
+
+
+@router.post("/vault/google/snapshots/{file_id}/restore")
+def restore_google_snapshot(file_id: str, db: Session = Depends(get_db)):
+    """Replace the live database with a snapshot, then republish so peers agree.
+
+    The republish is the point. A restore rolls back local rows *and* discards the `tombstones`
+    table, so without it a peer's payload can merge deleted rows straight back in with nothing left
+    to block them. Publishing immediately makes the restored state win deliberately.
+    """
+    with job_lock.try_acquire("snapshot restore") as acquired:
+        if not acquired:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Busy: {job_lock.current_holder() or 'another job'} is running",
+            )
+        _, access_token, _ = _google_access(db)
+        db.commit()
+
+        with tempfile.TemporaryDirectory(prefix="snapshot-restore-") as tmp:
+            landed = snapshot.download_snapshot(
+                access_token, file_id, Path(tmp) / "restored.db"
+            )
+            promoted = snapshot.promote_snapshot(landed)
+
+        # The file under the engine has just been swapped, and pooled connections still hold the
+        # displaced inode. Without this the app keeps serving the *pre-restore* database until it
+        # is restarted -- and the republish below would read that stale state and conclude nothing
+        # had changed. The legacy restore path closes and disposes for the same reason.
+        db.close()
+        engine.dispose()
+
+        metadata = ensure_vault_metadata(provider="google_drive")
+        metadata["last_restore_at"] = _iso_now()
+        save_vault_metadata(metadata)
+
+    # Outside the lock: publishing takes its own round and must not deadlock against it.
+    republished = _republish_after_restore()
+    return {"status": "restored", **promoted, "republished": republished}
+
+
+def _republish_after_restore() -> dict:
+    """Force this device's restored state onto peers. Never fatal: the restore already happened."""
+    from src.models import SessionLocal
+    from src.sync.runner import sync_once
+
+    session = SessionLocal()
+    try:
+        return sync_once(session, force_publish=True)
+    except Exception as exc:
+        logger.warning("restore succeeded but republishing failed: %s", exc)
+        return {"ran": False, "error": str(exc)}
+    finally:
+        session.close()
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 @router.post("/vault/google/backup/start")

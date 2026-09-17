@@ -53,6 +53,9 @@ class FakeTransport:
         self.files.pop(device_id, None)
         self.modified.pop(device_id, None)
 
+    def has_payload(self, device_id: str) -> bool:
+        return device_id in self.files
+
     def describe(self) -> str:
         return "fake transport"
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, Trash2 } from 'lucide-react'
-import { api, type Contact, type SplitwiseContactLink, type SplitwiseCredentialsInfo, type SplitwiseFriend, type SplitwiseStatus, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
+import { api, type Contact, type PendingMergeState, type SplitwiseContactLink, type SplitwiseCredentialsInfo, type SplitwiseFriend, type SplitwiseStatus, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
 import { GETTING_STARTED_DASHBOARD_KEY, GETTING_STARTED_DONE_KEY } from './GettingStartedGuide'
 import { PlaidLinkButton } from './PlaidLink'
 import { SUPPORTED_CURRENCIES } from './currency'
@@ -28,6 +28,10 @@ interface SettingsData {
     drive_folder_name?: string | null
     drive_folder_id?: string | null
     google_drive_ready: boolean
+    // Verified against a real token refresh, not merely "a row exists".
+    token_row_present?: boolean
+    needs_reconnect?: boolean
+    reconnect_reason?: string | null
   }
   accounts: Array<{
     id: string
@@ -351,8 +355,26 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
               Vault ID: <span className="font-medium">{data?.vault.vault_id ?? 'Not created yet'}</span>
             </p>
             <p className="text-sm">
-              Google Drive: <span className="font-medium">{data?.vault.connected ? `Connected${data?.vault.provider_email ? ` as ${data.vault.provider_email}` : ''}` : 'Not connected'}</span>
+              Google Drive:{' '}
+              {data?.vault.needs_reconnect ? (
+                // A stored token is not a working one. This read "Connected" for a week with a
+                // dead refresh token: no backups, no sync, green label.
+                <span className="font-medium" style={{ color: 'var(--color-negative)' }}>
+                  Reconnect needed{data?.vault.provider_email ? ` (${data.vault.provider_email})` : ''}
+                </span>
+              ) : (
+                <span className="font-medium">
+                  {data?.vault.connected
+                    ? `Connected${data?.vault.provider_email ? ` as ${data.vault.provider_email}` : ''}`
+                    : 'Not connected'}
+                </span>
+              )}
             </p>
+            {data?.vault.needs_reconnect && data?.vault.reconnect_reason ? (
+              <p className="text-xs" style={{ color: 'var(--color-negative)' }}>
+                {data.vault.reconnect_reason}
+              </p>
+            ) : null}
             <p className="text-sm">
               Drive folder: <span className="font-medium">{data?.vault.drive_folder_name ?? 'Will be created on first backup'}</span>
             </p>
@@ -557,6 +579,10 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
             ) : null}
           </div>
         </div>
+
+        {/* Asks before absorbing another device's history. Above everything else on purpose:
+            until it is answered this device publishes but never merges. */}
+        <FirstMergePrompt />
 
         {/* Members */}
         <ContactsManager />
@@ -1019,6 +1045,57 @@ function SplitwiseCredentialsForm({
         ) : null}
       </div>
       {error ? <div className="mt-2 text-xs text-red-400">{error}</div> : null}
+    </div>
+  )
+}
+
+function FirstMergePrompt() {
+  const [state, setState] = useState<PendingMergeState | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = () => {
+    api.getPendingMerge().then(setState).catch(() => setState(null))
+  }
+  useEffect(load, [])
+
+  const accept = async () => {
+    setBusy(true)
+    try {
+      await api.acceptPendingMerge()
+      load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const pending = state?.pending
+  if (!state || state.consent_given || !pending) return null
+
+  const label = pending.device_label || pending.device_id || 'Another device'
+  return (
+    <div className="mb-4 rounded-lg border border-blue-400/50 bg-blue-500/10 p-4">
+      <h3 className="mb-1 text-sm font-semibold">{label} has data to merge</h3>
+      <p className="mb-2 text-xs text-slate-600 dark:text-slate-300">
+        {pending.would_insert} new record{pending.would_insert === 1 ? '' : 's'}
+        {pending.would_update > 0 ? `, ${pending.would_update} updated` : ''}
+      </p>
+      <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+        Merging keeps everything from both devices. Amounts, dates and merchants are never
+        overwritten by another device &mdash; only categories, notes, tags and projects merge.
+        Anything either device deleted <em>before</em> sync existed may reappear.
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => void accept()}
+          disabled={busy}
+          className="rounded bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-60"
+        >
+          {busy ? 'Merging\u2026' : 'Merge'}
+        </button>
+        {/* No decline button: this device keeps publishing and asks again next round, which is
+            what "not now" means. A permanent no would be a different setting. */}
+        <span className="text-xs text-slate-500">Not now &mdash; leave this and it will ask again</span>
+      </div>
     </div>
   )
 }

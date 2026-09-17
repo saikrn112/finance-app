@@ -82,8 +82,15 @@ class MergeReport:
         return bool(self.inserted or self.updated or self.deletions_applied or self.uid_converged)
 
 
-def merge_payload(db: Session, payload: dict[str, Any]) -> MergeReport:
-    """Apply `payload` to the local database. Idempotent."""
+def merge_payload(db: Session, payload: dict[str, Any], *, dry_run: bool = False) -> MergeReport:
+    """Apply `payload` to the local database. Idempotent.
+
+    `dry_run` computes the report without committing, leaving the caller to roll back. It is a
+    parameter rather than something a caller can arrange from outside because this function
+    commits: wrapping it and rolling back afterwards silently does nothing, which is a mistake
+    worth making impossible. Used by the first-contact preview, so the numbers shown to the user
+    come from the code that would actually run.
+    """
     version = payload.get("format_version")
     if version is not None and version > schema_format_version():
         # Newer peers may add fields; unknown ones are ignored below. A whole new *format* is not
@@ -115,7 +122,8 @@ def merge_payload(db: Session, payload: dict[str, Any]) -> MergeReport:
         resume_tombstones()
 
     report.watermark = coding.datetime_from_wire(payload.get("watermark"))
-    db.commit()
+    if not dry_run:
+        db.commit()
     return report
 
 

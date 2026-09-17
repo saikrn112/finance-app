@@ -92,8 +92,13 @@ def run_sync(
     incoming = _fetch(transport, device_id, result)
     for remote in incoming:
         try:
-            report = merge_payload(db, remote.payload)
-            result.merges[remote.device_id] = report.as_dict()
+            # Recorded whether or not the payload is merged. Knowing a peer exists is what lets the
+            # UI offer the first-merge choice at all, and the lease timestamps are timestamps --
+            # not the user's history -- so withholding them would only make both devices spend
+            # Plaid calls and take duplicate backups while waiting for an answer.
+            last_seen = remote.modified_at or coding.datetime_from_wire(
+                remote.payload.get("written_at")
+            )
             device.remember_device(
                 db,
                 remote.device_id,
@@ -101,13 +106,36 @@ def run_sync(
                 platform_name=remote.payload.get("platform"),
                 # The store's own timestamp where it has one: a peer's self-reported clock can be
                 # wrong, and this is used to judge freshness.
-                last_seen_at=remote.modified_at
-                or coding.datetime_from_wire(remote.payload.get("written_at")),
+                last_seen_at=last_seen,
+            )
+            note_peer_plaid_report(db, remote.device_id, remote.payload)
+            note_peer_backup_report(db, remote.device_id, remote.payload)
+            # Committed before the preview below, which rolls back to discard the trial merge and
+            # would otherwise take this bookkeeping with it.
+            db.commit()
+
+            if not merge_consent_given(db):
+                # First contact. Count what the payload *would* do and stop -- absorbing another
+                # device's entire history unasked is how a tracker loses trust, and because
+                # tombstones only cover deletions made after sync shipped, a blind first merge
+                # produces the *union* of two databases and resurrects anything either side deleted
+                # beforehand. Publishing continues, so this device is not invisible while it waits.
+                preview = preview_merge(db, remote.payload)
+                record_pending_first_merge(db, remote.device_id, preview)
+                result.merges[remote.device_id] = {"awaiting_consent": True, **preview}
+                db.commit()
+                continue
+
+            report = merge_payload(db, remote.payload)
+            result.merges[remote.device_id] = report.as_dict()
+            device.remember_device(
+                db,
+                remote.device_id,
+                label=remote.payload.get("device_label"),
+                platform_name=remote.payload.get("platform"),
+                last_seen_at=last_seen,
                 watermark=report.watermark,
             )
-            # Remember what this peer says about its Plaid usage, so the decision to spend a Plaid
-            # call later needs no network round trip of its own.
-            note_peer_plaid_report(db, remote.device_id, remote.payload)
             db.commit()
         except Exception as exc:
             # One bad payload must not stop syncing with every other device.
@@ -126,8 +154,18 @@ def run_sync(
     # which the signature covers. Verified by mutation: with the check removed, no test changes
     # behaviour, including one written specifically for uid convergence, which touches no timestamp
     # of its own.
+    #
+    # The signature alone is not enough to justify skipping. It records what this device last
+    # *decided* to publish, not what is actually on the transport, so if the payload is removed --
+    # a trashed file, a folder someone cleared, a fresh Drive account -- the signature still
+    # matches and the device never republishes. Observed live: a container reporting
+    # `skipped_publish: true` with no payload on Drive at all, which is sync silently doing
+    # nothing until local data happens to change. So confirm the payload is still there before
+    # trusting the fingerprint.
     signature = _content_signature(db)
-    if not force_publish and signature == _stored_signature(db):
+    if not force_publish and signature == _stored_signature(db) and _payload_still_published(
+        transport, device_id, result
+    ):
         result.published = False
         result.skipped_publish = True
         return result
@@ -143,6 +181,7 @@ def run_sync(
             since=since,
         )
         payload["plaid"] = _plaid_report(db)
+        payload["backup"] = _backup_report(db)
         transport.put(device_id, payload)
         _record_own_publish(db, device_id, device_label, platform_name, payload)
         _store_signature(db, signature)
@@ -286,6 +325,25 @@ def _store_signature(db: Session, signature: str) -> None:
         row.value = signature
 
 
+def _payload_still_published(
+    transport: SyncTransport, device_id: str, result: SyncResult
+) -> bool:
+    """Whether this device's own payload is present on the transport.
+
+    A transport that cannot answer is treated as "present": the fallback must be to skip a
+    redundant 2.5 MB upload rather than to re-upload on every poll because a listing failed.
+    Publishing is retried on the next round anyway, and the round after that.
+    """
+    lister = getattr(transport, "has_payload", None)
+    if callable(lister):
+        try:
+            return bool(lister(device_id))
+        except Exception:
+            logger.warning("sync: could not confirm our payload is still published", exc_info=True)
+            return True
+    return True
+
+
 # --- the Plaid economy ------------------------------------------------------------------------
 
 PLAID_LAST_PULL_KEY = "plaid_last_pull_at"
@@ -391,3 +449,164 @@ def plaid_pull_is_needed(
     if age >= interval:
         return True, f"the last pull anywhere was {age} ago"
     return False, f"another device pulled {age} ago; skipping to avoid a duplicate Plaid call"
+
+
+# --- the backup lease -------------------------------------------------------------------------
+#
+# Same shape as the Plaid economy above, and for the same reason: the question is "has *anybody*
+# backed up recently", not "have I". Every device holds the whole database, so a snapshot taken on
+# the Mac protects the container equally -- and without this, N devices produce N near-identical
+# snapshots a day and the retention window shrinks to a fraction of the days it claims to cover.
+#
+# A lease, not a lock. If two devices decide to back up at once the result is two dated files that
+# are both valid; wasteful, never wrong. That is why no coordination is attempted.
+
+BACKUP_LAST_AT_KEY = "backup_last_at"
+_PEER_BACKUP_KEY_PREFIX = "backup_peer_at:"
+
+
+def _backup_report(db: Session) -> dict[str, Any]:
+    """What this device tells peers about backups: a timestamp, and nothing else."""
+    from src.models import AppMetadata
+
+    row = db.get(AppMetadata, BACKUP_LAST_AT_KEY)
+    return {"last_backup_at": row.value if row else None}
+
+
+def record_backup(db: Session, when: datetime | None = None) -> None:
+    """Note that this device just took a snapshot, so peers can skip taking their own."""
+    from src.models import AppMetadata
+
+    value = coding.datetime_to_wire(when or datetime.utcnow())
+    row = db.get(AppMetadata, BACKUP_LAST_AT_KEY)
+    if row is None:
+        db.add(AppMetadata(key=BACKUP_LAST_AT_KEY, value=value))
+    else:
+        row.value = value
+    db.commit()
+
+
+def note_peer_backup_report(db: Session, device_id: str, payload: dict) -> None:
+    """Remember a peer's reported backup time, so the decision needs no network."""
+    from src.models import AppMetadata
+
+    reported = (payload.get("backup") or {}).get("last_backup_at")
+    if not reported:
+        return
+    key = f"{_PEER_BACKUP_KEY_PREFIX}{device_id}"
+    row = db.get(AppMetadata, key)
+    if row is None:
+        db.add(AppMetadata(key=key, value=reported))
+    elif (row.value or "") < reported:
+        row.value = reported
+
+
+def last_backup_anywhere(db: Session) -> datetime | None:
+    """The most recent snapshot by *any* device, as far as this device knows."""
+    from src.models import AppMetadata
+
+    candidates: list[datetime] = []
+    row = db.get(AppMetadata, BACKUP_LAST_AT_KEY)
+    mine = coding.datetime_from_wire(row.value) if row else None
+    if mine:
+        candidates.append(mine)
+    for peer_row in (
+        db.query(AppMetadata).filter(AppMetadata.key.like(f"{_PEER_BACKUP_KEY_PREFIX}%")).all()
+    ):
+        parsed = coding.datetime_from_wire(peer_row.value)
+        if parsed is not None:
+            candidates.append(parsed)
+    return max(candidates) if candidates else None
+
+
+# --- first-contact consent ----------------------------------------------------------------------
+#
+# Modelled on Timeslice, which asks once before absorbing another device's history and, until it is
+# answered, publishes but does not merge. Two reasons it matters more here: a finance database is
+# not reconstructible from memory, and tombstones only cover deletions made after sync shipped, so
+# a first merge between two long-lived databases produces their *union* -- resurrecting anything
+# either side deleted beforehand.
+
+MERGE_CONSENT_KEY = "sync_merge_consent"
+PENDING_FIRST_MERGE_KEY = "sync_pending_first_merge"
+
+
+def merge_consent_given(db: Session) -> bool:
+    from src.models import AppMetadata
+
+    row = db.get(AppMetadata, MERGE_CONSENT_KEY)
+    return bool(row and (row.value or "").strip() not in ("", "0", "false", "no"))
+
+
+def grant_merge_consent(db: Session) -> None:
+    """Answered yes. From now on peers merge normally, and the prompt does not return."""
+    from src.models import AppMetadata
+
+    row = db.get(AppMetadata, MERGE_CONSENT_KEY)
+    if row is None:
+        db.add(AppMetadata(key=MERGE_CONSENT_KEY, value="1"))
+    else:
+        row.value = "1"
+    db.query(AppMetadata).filter(AppMetadata.key == PENDING_FIRST_MERGE_KEY).delete()
+    db.commit()
+
+
+def preview_merge(db: Session, payload: dict) -> dict[str, Any]:
+    """What merging this payload would change, without changing it.
+
+    Runs the real merge and rolls it back, so the counts come from the code that would actually
+    run rather than from a second implementation that can drift from it.
+    """
+    import json as _json
+
+    from src.sync.merge import merge_payload as _merge
+
+    try:
+        report = _merge(db, payload, dry_run=True)
+        counts = report.as_dict()
+    finally:
+        # dry_run leaves the work uncommitted; this is what discards it.
+        db.rollback()
+    inserted = counts.get("inserted") or {}
+    updated = counts.get("updated") or {}
+    return {
+        "device_id": payload.get("device_id"),
+        "device_label": payload.get("device_label"),
+        "would_insert": sum(inserted.values()) if isinstance(inserted, dict) else 0,
+        "would_update": sum(updated.values()) if isinstance(updated, dict) else 0,
+        "by_table": {
+            table: {"insert": inserted.get(table, 0), "update": updated.get(table, 0)}
+            for table in sorted(set(inserted) | set(updated))
+        },
+        "detail": _json.loads(_json.dumps(counts, default=str)),
+    }
+
+
+def record_pending_first_merge(db: Session, device_id: str, preview: dict) -> None:
+    """Stash the preview so the UI can show real numbers, not "a peer exists"."""
+    import json as _json
+
+    from src.models import AppMetadata
+
+    value = _json.dumps(preview, default=str)
+    row = db.get(AppMetadata, PENDING_FIRST_MERGE_KEY)
+    if row is None:
+        db.add(AppMetadata(key=PENDING_FIRST_MERGE_KEY, value=value))
+    else:
+        row.value = value
+
+
+def pending_first_merge(db: Session) -> dict | None:
+    import json as _json
+
+    from src.models import AppMetadata
+
+    if merge_consent_given(db):
+        return None
+    row = db.get(AppMetadata, PENDING_FIRST_MERGE_KEY)
+    if not row or not row.value:
+        return None
+    try:
+        return _json.loads(row.value)
+    except ValueError:
+        return None

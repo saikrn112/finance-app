@@ -66,17 +66,25 @@ def choose_transport(db: Session) -> TransportChoice:
     return TransportChoice(MODE_DRIVE, DriveTransport(access_token), "google drive")
 
 
-def sync_once(db: Session, *, device_label: str | None = None) -> dict:
+def sync_once(
+    db: Session, *, device_label: str | None = None, force_publish: bool = False
+) -> dict:
     """One round, if sync is enabled. Returns a summary safe to log or display.
 
     Never raises for "sync is not configured": callers include a background scheduler, and a missing
     setting is not a failure.
+
+    `force_publish` republishes even when the content fingerprint says nothing changed. Needed
+    after a restore -- so the restored state wins on peers deliberately rather than being merged
+    back over -- and as the recovery path when a payload has gone missing from the transport.
     """
     choice = choose_transport(db)
     if choice.transport is None:
         return {"ran": False, "mode": choice.mode, "reason": choice.reason}
 
-    result: SyncResult = run_sync(db, choice.transport, device_label=device_label)
+    result: SyncResult = run_sync(
+        db, choice.transport, device_label=device_label, force_publish=force_publish
+    )
     summary = {"ran": True, "mode": choice.mode, "transport": choice.transport.describe()}
     summary.update(result.as_dict())
     return summary
