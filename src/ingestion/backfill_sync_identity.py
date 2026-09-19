@@ -67,10 +67,21 @@ _UID_TABLES = [
 _TIMESTAMP_ONLY_TABLES = [
     ("transactions", "created_at"),
     ("account_activity", "created_at"),
+    # Provider facts, all keyed naturally and all carrying created_at already. Seeded from it for
+    # the same reason as transactions: a NULL age lets the model default claim the row was written
+    # "now", which then beats a peer holding the real, older value.
+    ("payslips", "created_at"),
+    ("account_snapshots", "created_at"),
+    ("investment_holding_snapshots", "created_at"),
+    ("source_balance_history", "created_at"),
+    ("investment_period_facts", "created_at"),
+    ("retirement_transactions", "created_at"),
+    ("retirement_statements", "created_at"),
 ]
 
 # Link tables: updated_at only, inherited from the parent named here.
 _LINK_TABLES = [
+    ("payslip_line_items", "payslips", "payslip_id"),
     ("transaction_projects", "transactions", "transaction_id"),
     ("transaction_splits", "transactions", "transaction_id"),
     ("transaction_project_splits", "transactions", "transaction_id"),

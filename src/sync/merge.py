@@ -411,17 +411,22 @@ def _find_by_ref(db: Session, spec: schema.TableSpec, ref: str):
     except (ValueError, TypeError):
         return None
 
-    if spec.kind == refs.KIND_TRANSACTION:
-        source, source_id = parts[0], parts[1]
-        return (
-            db.query(model)
-            .filter(model.source == source, model.source_id == source_id)
-            .first()
-        )
-    if spec.kind in (refs.KIND_PROJECT, refs.KIND_CONTACT):
-        return db.query(model).filter(model.name == parts[0]).first()
-    if spec.kind in (refs.KIND_RULE, refs.KIND_SUBSCRIPTION):
-        return db.query(model).filter(model.uid == parts[0]).first()
+    # Looked up by the very columns the row was named by. Driving both from `spec.ref_attrs`
+    # is what stops the two halves drifting: before this, naming and lookup were written out
+    # separately in two modules and nothing held them to the same definition.
+    if spec.ref_attrs:
+        if len(parts) != len(spec.ref_attrs):
+            return None
+        # Each part must be decoded to the column's own type before comparing. A reference is
+        # always strings on the wire, so a key containing a date or a timestamp -- `synced_at` on
+        # the snapshot tables -- would compare "2026-09-15T10:00:00Z" against a DATETIME column,
+        # match nothing, and insert a duplicate on every single round.
+        by_attr = {field.attribute: field for field in spec.all_fields}
+        criteria = []
+        for attr, value in zip(spec.ref_attrs, parts):
+            field = by_attr.get(attr)
+            criteria.append(getattr(model, attr) == (field.from_wire(value) if field else value))
+        return db.query(model).filter(*criteria).first()
 
     ids = _resolve_link_ids(db, spec, parts)
     if ids is None:
@@ -471,6 +476,22 @@ def _resolve_link_ids(db: Session, spec: schema.TableSpec, parts: list) -> dict 
         if not (txn and project and contact):
             return None
         return {"transaction_id": txn, "project_id": project, "contact_id": contact}
+
+    if spec.kind == refs.KIND_PAYSLIP_LINE_ITEM:
+        from src.models import Payslip
+
+        try:
+            source, signature = refs.decode(parts[0])[:2]
+        except (ValueError, TypeError):
+            return None
+        row = (
+            db.query(Payslip.id)
+            .filter(Payslip.source == source, Payslip.signature == signature)
+            .first()
+        )
+        if row is None:
+            return None
+        return {"payslip_id": row[0], "section": parts[1], "label": parts[2]}
 
     if spec.kind == refs.KIND_CONTACT_SPLITWISE_LINK:
         contact = contact_id(parts[0])

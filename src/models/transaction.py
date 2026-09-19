@@ -180,6 +180,9 @@ class AccountSnapshot(Base):
     currency = Column(String(3), default="USD", nullable=False)
     synced_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def current_value(self):
@@ -217,6 +220,9 @@ class InvestmentHoldingSnapshot(Base):
     type = Column(String)
     synced_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def value(self):
@@ -256,6 +262,9 @@ class SourceBalanceHistory(Base):
     currency = Column(String(3), nullable=False, default="USD")
     provenance = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def value(self):
@@ -288,6 +297,49 @@ class InvestmentPeriodFact(Base):
     currency = Column(String(3), nullable=False, default="USD")
     provenance = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def beginning_value(self):
+        raise AttributeError(
+            "Direct access to InvestmentPeriodFact.beginning_value is forbidden. Use _beginning_value with a rate JOIN."
+        )
+
+    @beginning_value.setter
+    def beginning_value(self, val):
+        self._beginning_value = val
+
+    @property
+    def ending_value(self):
+        raise AttributeError(
+            "Direct access to InvestmentPeriodFact.ending_value is forbidden. Use _ending_value with a rate JOIN."
+        )
+
+    @ending_value.setter
+    def ending_value(self, val):
+        self._ending_value = val
+
+    @property
+    def inflow(self):
+        raise AttributeError(
+            "Direct access to InvestmentPeriodFact.inflow is forbidden. Use _inflow with a rate JOIN."
+        )
+
+    @inflow.setter
+    def inflow(self, val):
+        self._inflow = val
+
+    @property
+    def market_gain(self):
+        raise AttributeError(
+            "Direct access to InvestmentPeriodFact.market_gain is forbidden. Use _market_gain with a rate JOIN."
+        )
+
+    @market_gain.setter
+    def market_gain(self, val):
+        self._market_gain = val
 
     __table_args__ = (
         Index("ix_investment_period_source_end", "source", "period_end", unique=True),
@@ -599,6 +651,9 @@ class Payslip(Base):
     signature = Column(String(32), nullable=False)
     filename = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def gross(self):
@@ -648,6 +703,19 @@ class PayslipLineItem(Base):
     _amount = Column("amount", Numeric(10, 2), nullable=False)
     _ytd = Column("ytd", Numeric(10, 2))
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def ytd(self):
+        raise AttributeError(
+            "Direct access to PayslipLineItem.ytd is forbidden. Use _ytd with a rate JOIN."
+        )
+
+    @ytd.setter
+    def ytd(self, val):
+        self._ytd = val
 
     @property
     def amount(self):
@@ -676,6 +744,9 @@ class RetirementTransaction(Base):
     units = Column(Numeric(18, 6))
     unit_price = Column(Numeric(18, 6))
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Multi-device sync merges these as immutable facts, keyed by their natural key; this
+    # timestamp only orders them against a tombstone. See docs/multi_device_sync.md.
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def amount(self):
@@ -709,6 +780,8 @@ class RetirementStatement(Base):
     _vested_balance = Column("vested_balance", Numeric(12, 2))
     rate_of_return = Column(Numeric(8, 4))  # percentage, not money
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Merged as an immutable fact, keyed by (source, period_end).
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     @property
     def ending_balance(self):
