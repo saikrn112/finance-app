@@ -90,6 +90,22 @@ class Dev:
 
 
 def converge(devices, transport, rounds=4):
+    """Sync everyone repeatedly, having first granted first-contact merge consent.
+
+    Consent is required since the prod agent added the first-contact gate: a peer's payload is
+    previewed and NOT merged until the owner agrees, because a blind first merge between two
+    long-lived databases produces their union and resurrects pre-sync deletions. These tests are
+    about clock behaviour once devices are paired, so they answer that question up front -- without
+    it they were testing the gate, and all five failed for a reason unrelated to clocks.
+    """
+    from src.sync.engine import grant_merge_consent
+
+    for d in devices:
+        s = d.session()
+        try:
+            grant_merge_consent(s)
+        finally:
+            s.close()
     for _ in range(rounds):
         for d in devices:
             d.sync(transport)
@@ -177,9 +193,7 @@ class TestConcurrentPublishers:
         a.add_txn("only-a", "a-cat", NOW)
         b.add_txn("only-b", "b-cat", NOW)
 
-        # Publish both before either fetches.
-        a.sync(transport)
-        b.sync(transport)
+        # Publish both before either fetches. converge() grants consent, which the gate requires.
         converge([a, b], transport)
 
         for dev in (a, b):
