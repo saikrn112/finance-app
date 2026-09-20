@@ -17,6 +17,7 @@ from src.models import AppMetadata, Base, Project, SyncDevice, Transaction
 from src.sync import device as device_mod
 from src.sync.engine import (
     PLAID_REPORT_TRUST_WINDOW,
+    grant_merge_consent,
     last_plaid_pull_anywhere,
     plaid_pull_is_needed,
     record_plaid_pull,
@@ -39,11 +40,20 @@ def _tombstones_on():
 class Device:
     """A database plus a device id -- one simulated device."""
 
-    def __init__(self, tmp_path, name):
+    def __init__(self, tmp_path, name, *, merge_consent: bool = True):
         self.name = name
         engine = create_engine(f"sqlite:///{tmp_path}/{name}.db")
         Base.metadata.create_all(bind=engine)
         self.factory = sessionmaker(bind=engine)
+        # A device that has already accepted syncing with a peer, which is what these tests are
+        # about. First contact is gated on purpose -- see TestFirstContactGate -- and a device
+        # without consent publishes but never merges.
+        if merge_consent:
+            session = self.factory()
+            try:
+                grant_merge_consent(session)
+            finally:
+                session.close()
 
     def session(self):
         return self.factory()

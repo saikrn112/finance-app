@@ -157,12 +157,71 @@ class TestBackupScheduling:
             raise RuntimeError("network died mid-upload")
 
         monkeypatch.setattr(
-            "src.api.routes.settings.backup_vault_to_google_drive", exploding_backup
+            "src.api.routes.settings.snapshot_backup_to_google_drive", exploding_backup
         )
         auto_tasks._run_vault_backup(db, trigger="test")
 
         assert recorded and recorded[0] is not None, "the attempt was not recorded before the call"
         assert auto_tasks._backup_due(db, now=_now()) is False
+
+
+class TestBackupLease:
+    """One device backs up per interval, not every device."""
+
+    def test_a_peers_recent_backup_means_this_device_skips_its_own(self, db, monkeypatch):
+        from src.sync.engine import note_peer_backup_report
+        from src.sync import coding
+
+        _vault(monkeypatch, {})
+        note_peer_backup_report(
+            db, "macos-1",
+            {"backup": {"last_backup_at": coding.datetime_to_wire(_now().replace(tzinfo=None))}},
+        )
+        db.commit()
+
+        assert auto_tasks._backup_due(db, now=_now()) is False, (
+            "N devices would otherwise take N near-identical snapshots a day"
+        )
+
+    def test_an_old_peer_backup_does_not_suppress_this_device(self, db, monkeypatch):
+        from src.sync.engine import note_peer_backup_report
+        from src.sync import coding
+
+        _vault(monkeypatch, {})
+        stale = (_now() - timedelta(days=3)).replace(tzinfo=None)
+        note_peer_backup_report(db, "macos-1", {"backup": {"last_backup_at": coding.datetime_to_wire(stale)}})
+        db.commit()
+
+        assert auto_tasks._backup_due(db, now=_now()) is True
+
+    def test_a_successful_backup_reports_to_peers(self, db, monkeypatch):
+        """Reported on success only: a device that never uploads must not suppress the others."""
+        from src.sync.engine import last_backup_anywhere
+
+        _vault(monkeypatch, {})
+        monkeypatch.setattr(
+            "src.api.routes.settings.snapshot_backup_to_google_drive", lambda db: {"ok": True}
+        )
+
+        auto_tasks._run_vault_backup(db, trigger="test")
+
+        assert last_backup_anywhere(db) is not None
+
+    def test_a_failing_backup_does_not_report(self, db, monkeypatch):
+        from src.sync.engine import last_backup_anywhere
+
+        _vault(monkeypatch, {})
+
+        def explode(db):
+            raise RuntimeError("drive is down")
+
+        monkeypatch.setattr("src.api.routes.settings.snapshot_backup_to_google_drive", explode)
+
+        auto_tasks._run_vault_backup(db, trigger="test")
+
+        assert last_backup_anywhere(db) is None, (
+            "a device that cannot upload must not tell peers a backup happened"
+        )
 
 
 class TestTick:
@@ -214,7 +273,7 @@ def _vault(monkeypatch, metadata: dict) -> None:
 def _stub_tasks(monkeypatch, *, sync_raises: Exception | None = None) -> dict:
     """Count real work without doing it, stubbing at the **provider boundaries**.
 
-    Deliberately `sync_plaid` and `backup_vault_to_google_drive`, not `_run_plaid_sync` /
+    Deliberately `sync_plaid` and `snapshot_backup_to_google_drive`, not `_run_plaid_sync` /
     `_run_vault_backup`. Stubbing the latter proves only that `_tick` dispatches, and that is exactly
     how a real bug survived review here: `_tick` decided to sync but never forwarded its `force` flag,
     so the lease inside `_run_plaid_sync` silently suppressed the pull. Every test passed, because
@@ -236,7 +295,7 @@ def _stub_tasks(monkeypatch, *, sync_raises: Exception | None = None) -> dict:
         return {"ok": True}
 
     monkeypatch.setattr("src.api.routes.sync.sync_plaid", fake_sync)
-    monkeypatch.setattr("src.api.routes.settings.backup_vault_to_google_drive", fake_backup)
+    monkeypatch.setattr("src.api.routes.settings.snapshot_backup_to_google_drive", fake_backup)
     return calls
 
 
@@ -415,7 +474,7 @@ class TestSchedulerSyncWiring:
         _vault(monkeypatch, {})
         monkeypatch.setattr("src.api.routes.sync.sync_plaid", lambda db: {"ok": True})
         monkeypatch.setattr(
-            "src.api.routes.settings.backup_vault_to_google_drive",
+            "src.api.routes.settings.snapshot_backup_to_google_drive",
             lambda *, db: (_ for _ in ()).throw(RuntimeError("no vault")),
         )
         calls = []

@@ -39,7 +39,7 @@ from src.models import (
     TransactionProject,
     TransactionSplit,
 )
-from src.sync.engine import run_sync
+from src.sync.engine import grant_merge_consent, run_sync
 from src.sync.tracking import resume_tombstones
 from tests.sync_fakes import FakeTransport
 
@@ -70,6 +70,14 @@ class SoakDevice:
         Base.metadata.create_all(bind=engine)
         self.factory = sessionmaker(bind=engine)
         self.clock = T0
+        # These devices model an install whose owner has already accepted syncing with a peer.
+        # Without consent the engine publishes but never merges -- correct for first contact, and
+        # not what convergence is being tested against here.
+        session = self.factory()
+        try:
+            grant_merge_consent(session)
+        finally:
+            session.close()
 
     def tick(self) -> datetime:
         """A monotonic per-device clock. Distinct values so most comparisons are decided by time and

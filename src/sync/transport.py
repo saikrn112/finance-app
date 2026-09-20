@@ -51,6 +51,14 @@ class SyncTransport(Protocol):
 
     def delete(self, device_id: str) -> None: ...
 
+    def has_payload(self, device_id: str) -> bool:
+        """Whether this device's own payload is still on the transport.
+
+        Used to stop the publish-skip trusting a local fingerprint after the payload has been
+        removed. Optional: the engine assumes "present" when a transport does not implement it.
+        """
+        ...
+
     def describe(self) -> str: ...
 
 
@@ -144,6 +152,15 @@ class DriveTransport:
         name = payload_name(device_id)
         for entry in list_drive_files(self.access_token, name=name, parent_id=self.folder_id()):
             _trash_file(self.access_token, entry["id"])
+
+    def has_payload(self, device_id: str) -> bool:
+        from src.vault.google_drive import list_drive_files
+
+        return bool(
+            list_drive_files(
+                self.access_token, name=payload_name(device_id), parent_id=self.folder_id()
+            )
+        )
 
     def describe(self) -> str:
         return "google drive"

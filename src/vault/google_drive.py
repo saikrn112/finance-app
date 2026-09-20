@@ -152,19 +152,29 @@ def list_drive_files(
     if mime_type:
         safe_mime = mime_type.replace("'", "\\'")
         query += f" and mimeType = '{safe_mime}'"
-    params = urlencode(
-        {
+    # Paginated. Without this the answer silently truncated at 100 files, and a caller asking
+    # "have I already uploaded this?" got "no" for everything past the first page -- which made the
+    # content-addressed statement archive re-upload the same documents on every single run.
+    files: list[dict[str, Any]] = []
+    page_token: str | None = None
+    while True:
+        params = {
             "q": query,
-            "fields": "files(id,name,mimeType,createdTime,modifiedTime,size,parents)",
-            "pageSize": 100,
+            "fields": "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,size,parents)",
+            "pageSize": 1000,
         }
-    )
-    request = Request(
-        f"{GOOGLE_DRIVE_FILES_URL}?{params}",
-        headers={"Authorization": f"Bearer {access_token}"},
-        method="GET",
-    )
-    return (_json_request(request).get("files") or [])
+        if page_token:
+            params["pageToken"] = page_token
+        request = Request(
+            f"{GOOGLE_DRIVE_FILES_URL}?{urlencode(params)}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            method="GET",
+        )
+        response = _json_request(request)
+        files.extend(response.get("files") or [])
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return files
 
 
 def ensure_visible_app_folder(access_token: str) -> dict[str, Any]:

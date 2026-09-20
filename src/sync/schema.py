@@ -98,6 +98,11 @@ class TableSpec:
     mutable: tuple[Field, ...] = ()
     #: Fields identifying the row locally, used to build the natural reference on the way out.
     ref_attrs: tuple[str, ...] = ()
+    #: Key parts that may legitimately be NULL, encoded as null rather than making the row
+    #: unnameable. Declared per table rather than inferred from column nullability: `rules.uid` is
+    #: nullable only because it is added by ALTER and minted later, and treating its NULL as a value
+    #: would give every un-backfilled rule the same reference.
+    ref_nullable: tuple[str, ...] = ()
 
     @property
     def all_fields(self) -> tuple[Field, ...]:
@@ -234,6 +239,204 @@ TABLES: tuple[TableSpec, ...] = (
         behaviour=LINK,
         model_name="TransactionProjectSplit",
         mutable=(money("share_amount", attr="_share_amount"),),
+    ),
+    # --- provider facts -------------------------------------------------------------------------
+    #
+    # Observed or computed by whichever device ingested them, and never edited by a user, so every
+    # field is immutable and there is no last-write-wins. Two devices that both derive the same row
+    # produce byte-identical values under the same natural key, so the second one is simply seen as
+    # already present.
+    #
+    # They travel rather than being recomputed per device because two of the three clients cannot
+    # ingest: an iOS app runs neither Plaid nor PDF imports, and if these did not sync it would show
+    # a wrong net worth until it reimplemented every derivation in Swift.
+    TableSpec(
+        name="payslips",
+        kind=refs.KIND_PAYSLIP,
+        behaviour=FACT,
+        model_name="Payslip",
+        immutable=(
+            text("source"),
+            text("signature"),
+            text("employer"),
+            day("pay_date"),
+            day("pay_period_start"),
+            day("pay_period_end"),
+            text("currency"),
+            money("gross", attr="_gross"),
+            money("net", attr="_net"),
+            money("total_taxes", attr="_total_taxes"),
+            money("total_deductions", attr="_total_deductions"),
+            text("filename"),
+            moment("created_at"),
+        ),
+        ref_attrs=("source", "signature"),
+    ),
+    TableSpec(
+        name="payslip_line_items",
+        kind=refs.KIND_PAYSLIP_LINE_ITEM,
+        behaviour=LINK,
+        model_name="PayslipLineItem",
+        # Named by (parent payslip reference, section, label): `payslip_id` is a local UUID and so
+        # means nothing on another device.
+        immutable=(text("section"), text("label")),
+        mutable=(money("amount", attr="_amount"), money("ytd", attr="_ytd")),
+    ),
+    TableSpec(
+        name="account_snapshots",
+        kind=refs.KIND_ACCOUNT_SNAPSHOT,
+        behaviour=FACT,
+        model_name="AccountSnapshot",
+        immutable=(
+            text("source"),
+            text("account_key"),
+            text("account_name"),
+            text("account_group"),
+            text("connection_state"),
+            money("current_value", attr="_current_value"),
+            text("currency"),
+            moment("synced_at"),
+            moment("created_at"),
+        ),
+        # synced_at is part of the key: a snapshot *is* a reading at a moment, and two readings of
+        # the same account on the same day are two facts, not a conflict. account_name joins the key
+        # because 260 of 269 real rows have no account_key, and (source, synced_at) alone collides
+        # for a provider that snapshots several accounts at once.
+        ref_attrs=("source", "account_key", "account_name", "synced_at"),
+        ref_nullable=("account_key", "account_name"),
+    ),
+    TableSpec(
+        name="investment_holding_snapshots",
+        kind=refs.KIND_INVESTMENT_HOLDING_SNAPSHOT,
+        behaviour=FACT,
+        model_name="InvestmentHoldingSnapshot",
+        immutable=(
+            text("source"),
+            text("plaid_account_id"),
+            text("account_name"),
+            text("security_id"),
+            text("ticker"),
+            text("name"),
+            money("quantity"),
+            money("price"),
+            money("value", attr="_value"),
+            money("cost_basis", attr="_cost_basis"),
+            text("currency"),
+            text("type"),
+            moment("synced_at"),
+            moment("created_at"),
+        ),
+        ref_attrs=("source", "plaid_account_id", "security_id", "synced_at"),
+        ref_nullable=("plaid_account_id", "security_id"),
+    ),
+    TableSpec(
+        name="source_balance_history",
+        kind=refs.KIND_SOURCE_BALANCE,
+        behaviour=FACT,
+        model_name="SourceBalanceHistory",
+        immutable=(
+            text("source_key"),
+            text("account_key"),
+            text("account_name"),
+            text("source"),
+            text("account_group"),
+            day("date"),
+            money("value", attr="_value"),
+            text("currency"),
+            text("provenance"),
+            moment("created_at"),
+        ),
+        # provenance belongs in the key: the same account on the same day legitimately has both an
+        # observed snapshot value and a ledger-derived one, and collapsing them would silently
+        # replace an observation with a derivation. account_key is NULL on 7236 of 7245 real rows,
+        # so it has to be a nullable part rather than a required one.
+        ref_attrs=("source", "account_key", "date", "provenance"),
+        ref_nullable=("account_key",),
+    ),
+    TableSpec(
+        name="investment_period_facts",
+        kind=refs.KIND_INVESTMENT_PERIOD_FACT,
+        behaviour=FACT,
+        model_name="InvestmentPeriodFact",
+        immutable=(
+            text("source_key"),
+            text("source"),
+            day("period_start"),
+            day("period_end"),
+            money("beginning_value", attr="_beginning_value"),
+            money("ending_value", attr="_ending_value"),
+            money("inflow", attr="_inflow"),
+            money("market_gain", attr="_market_gain"),
+            text("currency"),
+            text("provenance"),
+            moment("created_at"),
+        ),
+        ref_attrs=("source", "period_end"),
+    ),
+    TableSpec(
+        name="account_activity",
+        kind=refs.KIND_ACCOUNT_ACTIVITY,
+        behaviour=FACT,
+        model_name="AccountActivity",
+        immutable=(
+            text("source_id"),
+            text("source_key"),
+            text("source"),
+            text("account_id"),
+            text("account_last4"),
+            day("date"),
+            day("authorized_date"),
+            money("amount", attr="_amount"),
+            text("description"),
+            text("merchant"),
+            text("activity_type"),
+            text("currency"),
+            flag("pending"),
+            text("pending_activity_id"),
+        ),
+        ref_attrs=("source", "source_id"),
+    ),
+    TableSpec(
+        name="retirement_transactions",
+        kind=refs.KIND_RETIREMENT_TRANSACTION,
+        behaviour=FACT,
+        model_name="RetirementTransaction",
+        immutable=(
+            text("source"),
+            text("source_id"),
+            day("date"),
+            text("type"),
+            text("contribution_source"),
+            text("fund"),
+            text("currency"),
+            money("amount", attr="_amount"),
+            money("units"),
+            money("unit_price"),
+            moment("created_at"),
+        ),
+        ref_attrs=("source", "source_id"),
+    ),
+    TableSpec(
+        name="retirement_statements",
+        kind=refs.KIND_RETIREMENT_STATEMENT,
+        behaviour=FACT,
+        model_name="RetirementStatement",
+        immutable=(
+            text("source"),
+            text("plan_name"),
+            day("period_start"),
+            day("period_end"),
+            text("currency"),
+            money("beginning_balance", attr="_beginning_balance"),
+            money("ending_balance", attr="_ending_balance"),
+            money("employee_contributions", attr="_employee_contributions"),
+            money("employer_contributions", attr="_employer_contributions"),
+            money("market_change", attr="_market_change"),
+            money("vested_balance", attr="_vested_balance"),
+            money("rate_of_return"),
+            moment("created_at"),
+        ),
+        ref_attrs=("source", "period_end"),
     ),
     TableSpec(
         name="contact_splitwise_links",

@@ -100,11 +100,23 @@ def _sync_due(db, *, now: datetime) -> bool:
 
 
 def _backup_due(db, *, now: datetime) -> bool:
+    """Whether a snapshot is owed, asking about *every* device rather than only this one.
+
+    Every device holds the whole database, so a snapshot taken on the Mac protects the container
+    equally. Without the peer term, N devices each take their own near-identical snapshot every day
+    and the retention window covers a fraction of the days it claims to.
+
+    A lease, not a lock: if two devices decide at once the result is two dated files, both valid.
+    """
+    from src.sync.engine import last_backup_anywhere
     from src.vault.backup import load_vault_metadata
 
     last_success = _parse_timestamp(load_vault_metadata().get("last_backup_at"))
     last_attempt = _read_timestamp(db, LAST_BACKUP_ATTEMPT_KEY)
-    candidates = [t for t in (last_success, last_attempt) if t is not None]
+    last_anywhere = last_backup_anywhere(db)
+    if last_anywhere is not None and last_anywhere.tzinfo is None:
+        last_anywhere = last_anywhere.replace(tzinfo=timezone.utc)
+    candidates = [t for t in (last_success, last_attempt, last_anywhere) if t is not None]
     return _is_due(max(candidates) if candidates else None, now=now)
 
 
@@ -138,14 +150,23 @@ def _run_plaid_sync(db, *, trigger: str, force: bool = False) -> None:
 
 
 def _run_vault_backup(db, *, trigger: str) -> None:
-    from src.api.routes.settings import backup_vault_to_google_drive
+    """Take a dated snapshot, archive any new statements, and tell peers we did.
+
+    Snapshots, not the old bundle: that zipped everything under the data directory and uploaded
+    ~475 MB to preserve a 9.3 MB database. See src/vault/snapshot.py.
+    """
+    from src.api.routes.settings import snapshot_backup_to_google_drive
+    from src.sync.engine import record_backup
 
     # Recorded before the attempt, so a crash or a hang inside the backup cannot turn into a tight
     # retry loop on the next poll.
     _write_timestamp(db, LAST_BACKUP_ATTEMPT_KEY, _utc_now())
     try:
-        result = backup_vault_to_google_drive(db=db)
-        logger.info("auto-task vault backup completed", extra={"trigger": trigger, "result": result})
+        result = snapshot_backup_to_google_drive(db=db)
+        # Only on success: reporting an attempt would let a device that never manages to upload
+        # suppress every other device's backup too.
+        record_backup(db)
+        logger.info("auto-task snapshot backup completed", extra={"trigger": trigger, "result": result})
     except HTTPException as exc:
         if exc.status_code == 400:
             # No vault connected yet. Expected, not a failure.

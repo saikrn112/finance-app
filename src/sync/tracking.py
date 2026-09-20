@@ -70,6 +70,30 @@ def record_tombstone(db: Session, kind: str, ref: str, *, device_id: str | None 
     )
 
 
+def retract_tombstone(db: Session, kind: str, ref: str) -> int:
+    """Forget a deletion, because the row it named exists again.
+
+    The mirror of `record_tombstone`. A tombstone means "this is gone"; once the row is back, the
+    claim is false, and leaving it in place makes every peer delete the row on their next merge.
+    """
+    from src.models import Tombstone
+
+    # Deleted through the ORM, with autoflush off, because this runs inside `before_flush`. A bulk
+    # `query.delete()` there emits its DELETE immediately and re-enters the flush, which corrupts
+    # the unit of work -- it surfaced as "Error binding parameter: type 'UOWTransaction' is not
+    # supported" on almost every test.
+    removed = 0
+    with db.no_autoflush:
+        for row in (
+            db.query(Tombstone)
+            .filter(Tombstone.kind == kind, Tombstone.ref == ref)
+            .all()
+        ):
+            db.delete(row)
+            removed += 1
+    return removed
+
+
 @event.listens_for(Session, "before_flush")
 def _record_tombstones_for_deletes(session: Session, _flush_context, _instances) -> None:
     """Record a tombstone for every synced row being deleted in this flush.
@@ -77,11 +101,38 @@ def _record_tombstones_for_deletes(session: Session, _flush_context, _instances)
     Runs before the flush so the parents a link row is named after are still readable: naming
     `(transaction, project)` requires looking both up, and after the DELETE they may be gone.
     """
-    if not _enabled or not session.deleted:
+    if not _enabled or not (session.deleted or session.new):
         return
 
     try:
+        # Autoflush off for the whole hook. Naming a row requires reading its parents, and a query
+        # issued here would autoflush the very inserts this flush is about -- re-entering the flush
+        # and corrupting the unit of work. It surfaced as "Error binding parameter: type
+        # 'UOWTransaction' is not supported" at the setup of almost every test.
+        with session.no_autoflush:
+            _track_flush(session)
+    except Exception:
+        # A failure here must never block the user's delete. Losing propagation is recoverable;
+        # a route that 500s on every delete is not.
+        logger.exception("sync: failed to record tombstones for this flush")
+
+
+def _track_flush(session: Session) -> None:
+    try:
         resolver = RefResolver(session)
+
+        # A row created again retracts its own deletion. Without this, editing a split deletes it
+        # on every peer: the splits route removes a transaction's split rows and re-inserts them
+        # under the same identity, so the delete leaves a tombstone that the re-insert never
+        # clears, and the next merge obeys the tombstone. Nothing local looks wrong -- the row is
+        # right there -- which is why this only surfaces once a peer exists.
+        #
+        # Only for local work. During a merge tombstone recording is paused anyway, and a peer's
+        # insert must not silently revoke a deletion this device has not yet propagated.
+        recreated, _ = resolver.describe_all(session.new)
+        for kind, ref in recreated:
+            retract_tombstone(session, kind, ref)
+
         described, unresolvable = resolver.describe_all(session.deleted)
         for kind, ref in described:
             record_tombstone(session, kind, ref)

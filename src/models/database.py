@@ -189,6 +189,17 @@ _SYNC_IDENTITY_COLUMNS: dict[str, tuple[str, ...]] = {
     "transaction_splits": ("updated_at",),
     "transaction_project_splits": ("updated_at",),
     "contact_splitwise_links": ("updated_at",),
+    # Provider facts. No uid: each has a natural key of its own, so there is nothing a uid would
+    # disambiguate -- the same reasoning as `transactions`, which is also keyed by (source,
+    # source_id) and carries no uid.
+    "payslips": ("updated_at",),
+    "payslip_line_items": ("updated_at",),
+    "account_snapshots": ("updated_at",),
+    "investment_holding_snapshots": ("updated_at",),
+    "source_balance_history": ("updated_at",),
+    "investment_period_facts": ("updated_at",),
+    "retirement_transactions": ("updated_at",),
+    "retirement_statements": ("updated_at",),
 }
 
 

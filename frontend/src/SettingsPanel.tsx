@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { X, Trash2 } from 'lucide-react'
-import { api, type Contact, type SplitwiseContactLink, type SplitwiseCredentialsInfo, type SplitwiseFriend, type SplitwiseStatus, type VaultBackupJob, type VaultBackupRow, type VaultDiscoveryRow, type VaultRestoreJob } from './api'
+import { api, type Contact, type PendingMergeState, type SnapshotRow, type SplitwiseContactLink, type SplitwiseCredentialsInfo, type SplitwiseFriend, type SplitwiseStatus, type VaultBackupJob, type VaultRestoreJob } from './api'
 import { GETTING_STARTED_DASHBOARD_KEY, GETTING_STARTED_DONE_KEY } from './GettingStartedGuide'
 import { PlaidLinkButton } from './PlaidLink'
 import { SUPPORTED_CURRENCIES } from './currency'
@@ -28,6 +28,10 @@ interface SettingsData {
     drive_folder_name?: string | null
     drive_folder_id?: string | null
     google_drive_ready: boolean
+    // Verified against a real token refresh, not merely "a row exists".
+    token_row_present?: boolean
+    needs_reconnect?: boolean
+    reconnect_reason?: string | null
   }
   accounts: Array<{
     id: string
@@ -54,50 +58,22 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
 }) {
   const [data, setData] = useState<SettingsData | null>(null)
   const [vaultBusy, setVaultBusy] = useState(false)
-  const [backups, setBackups] = useState<VaultBackupRow[]>([])
-  const [discoveredVaults, setDiscoveredVaults] = useState<VaultDiscoveryRow[]>([])
   const [backupJob, setBackupJob] = useState<VaultBackupJob | null>(null)
   const [restoreJob, setRestoreJob] = useState<VaultRestoreJob | null>(null)
-  const [historyLoading, setHistoryLoading] = useState(false)
   const [signoutConfirm, setSignoutConfirm] = useState(false)
+  const [snapshotBusy, setSnapshotBusy] = useState(false)
+  const [snapshotError, setSnapshotError] = useState<string | null>(null)
+  //: Bumped after a backup so the list reloads without polling for it.
+  const [snapshotRefreshKey, setSnapshotRefreshKey] = useState(0)
   const backupRunning = backupJob?.status === 'running'
   const restoreRunning = restoreJob?.status === 'running'
 
-  const preferredRemoteVaultId =
-    discoveredVaults.find((vault) => Boolean(vault.latest_backup_id))?.vault_id ??
-    null
-  const selectedVaultId =
-    preferredRemoteVaultId ||
-    discoveredVaults[0]?.vault_id ||
-    data?.vault.vault_id ||
-    null
 
   useEffect(() => {
     if (open) {
       api.getSettings().then(setData)
-      api.discoverGoogleVaults().then((result) => setDiscoveredVaults(result.vaults)).catch(() => setDiscoveredVaults([]))
     }
   }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const targetVaultId = selectedVaultId
-    if (!data?.vault.connected) {
-      setBackups([])
-      setHistoryLoading(false)
-      return
-    }
-    if (!targetVaultId) {
-      setBackups([])
-      setHistoryLoading(true)
-      return
-    }
-    setHistoryLoading((prev) => prev || backups.length === 0)
-    api.listGoogleBackups(targetVaultId)
-      .then((result) => setBackups(result.backups))
-      .catch(() => setBackups([]))
-      .finally(() => setHistoryLoading(false))
-  }, [open, selectedVaultId, data?.vault.connected])
 
   useEffect(() => {
     if (!backupJob || backupJob.status !== 'running') return
@@ -110,21 +86,6 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           setVaultBusy(false)
           if (next.status === 'success' && next.result) {
             api.invalidateVaultPanelCache()
-            const completedBackup: VaultBackupRow = {
-              backup_id: next.result.backup_id,
-              parent_backup_id: null,
-              created_at: next.result.backup_created_at,
-              device_id: 'app',
-              device_label: 'app',
-              archive_name: next.result.backup_name,
-              archive_file_id: next.result.file_id,
-              manifest_file_id: next.result.manifest_file_id,
-              archive_sha256: null,
-            }
-            setBackups((current) => {
-              const deduped = current.filter((row) => row.backup_id !== completedBackup.backup_id)
-              return [completedBackup, ...deduped]
-            })
             setData((current) => current ? {
               ...current,
               vault: {
@@ -186,7 +147,6 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
     api.invalidateVaultPanelCache()
     onDataChange()
     api.getSettings({ fresh: true }).then(setData)
-    api.discoverGoogleVaults({ fresh: true }).then((result) => setDiscoveredVaults(result.vaults)).catch(() => setDiscoveredVaults([]))
   }
 
   const handleClearAll = async () => {
@@ -208,46 +168,17 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
     }, 750)
   }
 
-  const handleBackupNow = async () => {
-    setVaultBusy(true)
+  const handleSnapshotNow = async () => {
+    setSnapshotBusy(true)
+    setSnapshotError(null)
     try {
-      const job = await api.startGoogleDriveBackupJob()
-      setBackupJob(job)
-    } catch (err: any) {
-      if (err?.status === 401) {
-        if (confirm('Google Drive session expired. Reconnect now?')) {
-          handleConnectGoogleDrive()
-        }
-      } else {
-        const now = new Date().toISOString()
-        setBackupJob({
-          job_id: '',
-          status: 'error',
-          stage: 'error',
-          progress: 0,
-          message: '',
-          error: err?.message || 'Backup failed',
-          created_at: now,
-          updated_at: now,
-        })
-      }
+      await api.snapshotBackup()
+      setSnapshotRefreshKey((n) => n + 1)
+      refreshSettings()
+    } catch (err) {
+      setSnapshotError(err instanceof Error ? err.message : 'Backup failed')
     } finally {
-      if (!backupRunning) {
-        setVaultBusy(false)
-      }
-    }
-  }
-
-  const handleRestoreLatest = async () => {
-    const targetVaultId = selectedVaultId
-    if (!targetVaultId) return
-    if (!confirm(`Restore the latest backup for vault ${targetVaultId}? This will replace local app state.`)) return
-    setVaultBusy(true)
-    try {
-      const job = await api.startRestore(targetVaultId)
-      setRestoreJob(job)
-    } catch {
-      setVaultBusy(false)
+      setSnapshotBusy(false)
     }
   }
 
@@ -301,16 +232,7 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
     error: 'Backup failed',
   }
 
-  const currentVaultHistory = backups.slice(0, 5)
 
-  const otherVaultCount = data?.vault.connected
-    ? discoveredVaults.filter((vault) => vault.vault_id !== selectedVaultId && vault.latest_backup_id).length
-    : 0
-
-  const displayDevice = (backup: VaultBackupRow) => {
-    const label = backup.device_label || backup.device_id || 'Unknown device'
-    return label === 'app' ? 'This device' : label
-  }
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose} data-tour="tour-settings-panel">
@@ -351,8 +273,26 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
               Vault ID: <span className="font-medium">{data?.vault.vault_id ?? 'Not created yet'}</span>
             </p>
             <p className="text-sm">
-              Google Drive: <span className="font-medium">{data?.vault.connected ? `Connected${data?.vault.provider_email ? ` as ${data.vault.provider_email}` : ''}` : 'Not connected'}</span>
+              Google Drive:{' '}
+              {data?.vault.needs_reconnect ? (
+                // A stored token is not a working one. This read "Connected" for a week with a
+                // dead refresh token: no backups, no sync, green label.
+                <span className="font-medium" style={{ color: 'var(--color-negative)' }}>
+                  Reconnect needed{data?.vault.provider_email ? ` (${data.vault.provider_email})` : ''}
+                </span>
+              ) : (
+                <span className="font-medium">
+                  {data?.vault.connected
+                    ? `Connected${data?.vault.provider_email ? ` as ${data.vault.provider_email}` : ''}`
+                    : 'Not connected'}
+                </span>
+              )}
             </p>
+            {data?.vault.needs_reconnect && data?.vault.reconnect_reason ? (
+              <p className="text-xs" style={{ color: 'var(--color-negative)' }}>
+                {data.vault.reconnect_reason}
+              </p>
+            ) : null}
             <p className="text-sm">
               Drive folder: <span className="font-medium">{data?.vault.drive_folder_name ?? 'Will be created on first backup'}</span>
             </p>
@@ -382,22 +322,18 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
                 </p>
               </div>
             ) : null}
+            {snapshotError ? (
+              <p className="text-xs" style={{ color: 'var(--color-negative)' }}>{snapshotError}</p>
+            ) : null}
             <div className="flex gap-2 pt-1">
               {data?.vault.connected ? (
                 <>
                   <button
-                    onClick={handleBackupNow}
-                    disabled={vaultBusy || backupRunning}
+                    onClick={handleSnapshotNow}
+                    disabled={vaultBusy || snapshotBusy}
                     className="px-3 py-2 bg-emerald-500 text-white rounded text-sm hover:bg-emerald-600 disabled:opacity-50"
                   >
-                    {backupRunning || vaultBusy ? 'Backing up...' : 'Backup Vault Now'}
-                  </button>
-                  <button
-                    onClick={handleRestoreLatest}
-                    disabled={vaultBusy || backupRunning || restoreRunning || !selectedVaultId}
-                    className="px-3 py-2 bg-indigo-500 text-white rounded text-sm hover:bg-indigo-600 disabled:opacity-50"
-                  >
-                    {restoreRunning ? `Restoring ${restoreJob?.progress ?? 0}%` : 'Restore Latest'}
+                    {snapshotBusy ? 'Backing up…' : 'Back Up Now'}
                   </button>
                   <button
                     onClick={handleSignOutClick}
@@ -420,40 +356,11 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
         </div>
 
         <div className="mb-6">
-          <h3 className="font-medium mb-2">Vault History</h3>
-          <div className="rounded bg-[var(--app-surface-2)] dark:bg-gray-700 p-3 space-y-2">
-            {!data?.vault.connected ? (
-              <p className="text-xs text-gray-500 dark:text-gray-400">Connect Google Drive to see backup history.</p>
-            ) : historyLoading ? (
-              <p className="text-xs text-gray-500 dark:text-gray-400">Loading backup history...</p>
-            ) : currentVaultHistory.length ? (
-              <>
-                <ul className="space-y-2">
-                  {currentVaultHistory.map((backup) => (
-                    <li key={backup.backup_id} className="rounded border border-[var(--app-border-soft)] dark:border-gray-600 p-2 text-sm">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-medium">{new Date(backup.created_at).toLocaleString('en-US')}</span>
-                        <span className="text-xs rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-400">Successful</span>
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        {displayDevice(backup)}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        ID: <span className="font-mono break-all">{backup.backup_id}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                {otherVaultCount ? (
-                  <p className="pt-1 text-xs text-gray-500 dark:text-gray-400">
-                    Other vaults on Drive: {otherVaultCount}
-                  </p>
-                ) : null}
-              </>
-            ) : (
-              <p className="text-xs text-gray-500 dark:text-gray-400">No backups yet for this vault.</p>
-            )}
-          </div>
+          <SnapshotHistory
+            connected={Boolean(data?.vault.connected)}
+            refreshKey={snapshotRefreshKey}
+            onRestored={refreshSettings}
+          />
         </div>
 
         <div className="mb-6" data-tour="tour-plaid-section">
@@ -557,6 +464,10 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
             ) : null}
           </div>
         </div>
+
+        {/* Asks before absorbing another device's history. Above everything else on purpose:
+            until it is answered this device publishes but never merges. */}
+        <FirstMergePrompt />
 
         {/* Members */}
         <ContactsManager />
@@ -1020,5 +931,145 @@ function SplitwiseCredentialsForm({
       </div>
       {error ? <div className="mt-2 text-xs text-red-400">{error}</div> : null}
     </div>
+  )
+}
+
+function FirstMergePrompt() {
+  const [state, setState] = useState<PendingMergeState | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = () => {
+    api.getPendingMerge().then(setState).catch(() => setState(null))
+  }
+  useEffect(load, [])
+
+  const accept = async () => {
+    setBusy(true)
+    try {
+      await api.acceptPendingMerge()
+      load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const pending = state?.pending
+  if (!state || state.consent_given || !pending) return null
+
+  const label = pending.device_label || pending.device_id || 'Another device'
+  return (
+    <div className="mb-4 rounded-lg border border-blue-400/50 bg-blue-500/10 p-4">
+      <h3 className="mb-1 text-sm font-semibold">{label} has data to merge</h3>
+      <p className="mb-2 text-xs text-slate-600 dark:text-slate-300">
+        {pending.would_insert} new record{pending.would_insert === 1 ? '' : 's'}
+        {pending.would_update > 0 ? `, ${pending.would_update} updated` : ''}
+      </p>
+      <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+        Merging keeps everything from both devices. Amounts, dates and merchants are never
+        overwritten by another device &mdash; only categories, notes, tags and projects merge.
+        Anything either device deleted <em>before</em> sync existed may reappear.
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => void accept()}
+          disabled={busy}
+          className="rounded bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-60"
+        >
+          {busy ? 'Merging\u2026' : 'Merge'}
+        </button>
+        {/* No decline button: this device keeps publishing and asks again next round, which is
+            what "not now" means. A permanent no would be a different setting. */}
+        <span className="text-xs text-slate-500">Not now &mdash; leave this and it will ask again</span>
+      </div>
+    </div>
+  )
+}
+
+function SnapshotHistory({
+  connected,
+  refreshKey,
+  onRestored,
+}: {
+  connected: boolean
+  refreshKey: number
+  onRestored: () => void
+}) {
+  const [rows, setRows] = useState<SnapshotRow[] | null>(null)
+  const [retention, setRetention] = useState<number | null>(null)
+  const [restoring, setRestoring] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!connected) { setRows(null); return }
+    api.listSnapshots()
+      .then((r) => { setRows(r.snapshots); setRetention(r.retention) })
+      .catch((err) => setError(err instanceof Error ? err.message : 'Could not list backups'))
+  }, [connected, refreshKey])
+
+  const restore = async (row: SnapshotRow) => {
+    // Restore replaces the whole database, so it asks with the date in the message rather than a
+    // generic "are you sure": picking the wrong line here is the mistake worth preventing.
+    const when = new Date(row.created_at).toLocaleString('en-US')
+    if (!window.confirm(
+      `Replace all local data with the backup from ${when}?\n\n` +
+      'The database being replaced is kept on disk, and this device republishes afterwards so ' +
+      'other devices take the restored version.',
+    )) return
+    setRestoring(row.file_id)
+    setError(null)
+    try {
+      await api.restoreSnapshot(row.file_id)
+      onRestored()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Restore failed')
+    } finally {
+      setRestoring(null)
+    }
+  }
+
+  return (
+    <>
+      <h3 className="font-medium mb-2">Backups</h3>
+      <div className="rounded bg-[var(--app-surface-2)] dark:bg-gray-700 p-3 space-y-2">
+        {!connected ? (
+          <p className="text-xs text-gray-500 dark:text-gray-400">Connect Google Drive to see backups.</p>
+        ) : rows === null ? (
+          <p className="text-xs text-gray-500 dark:text-gray-400">Loading backups…</p>
+        ) : rows.length === 0 ? (
+          <p className="text-xs text-gray-500 dark:text-gray-400">No backups yet.</p>
+        ) : (
+          <>
+            <ul className="space-y-1">
+              {rows.map((row) => (
+                <li
+                  key={row.file_id}
+                  className="flex items-center justify-between gap-3 rounded border border-[var(--app-border-soft)] p-2 text-sm dark:border-gray-600"
+                >
+                  <span className="min-w-0">
+                    <span className="font-medium">{new Date(row.created_at).toLocaleString('en-US')}</span>
+                    <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
+                      {(row.size_bytes / 1048576).toFixed(1)} MB
+                    </span>
+                  </span>
+                  <button
+                    onClick={() => void restore(row)}
+                    disabled={restoring !== null}
+                    className="shrink-0 text-xs text-blue-500 hover:underline disabled:opacity-50"
+                  >
+                    {restoring === row.file_id ? 'Restoring…' : 'Restore'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {retention ? (
+              <p className="pt-1 text-xs text-gray-500 dark:text-gray-400">
+                Keeping the most recent {retention}. One device backs up per day, whichever is running.
+              </p>
+            ) : null}
+          </>
+        )}
+        {error ? <p className="text-xs" style={{ color: 'var(--color-negative)' }}>{error}</p> : null}
+      </div>
+    </>
   )
 }

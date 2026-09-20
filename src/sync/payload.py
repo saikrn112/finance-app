@@ -44,6 +44,7 @@ FORBIDDEN_TABLES = {
     "feedback_attachments": "device-local",
     "splitwise_commits": "records what this device pushed",
     "connected_accounts": "derived from sync_log, which is excluded",
+    "plaid_product_enrollments": "derived from sync_log, which is excluded",
 }
 
 #: Substrings that must not appear anywhere in a serialised payload.
