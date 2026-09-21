@@ -351,6 +351,127 @@ def retract_stale_tombstones_command(apply_changes: bool):
         db.close()
 
 
+@cli.command("copy-drive-vault")
+@click.option("--name", default=None, help="Name for the copy (defaults to a dated one)")
+def copy_drive_vault_command(name: str | None):
+    """Duplicate the whole Drive vault server-side, as a safety net before tidying."""
+    from datetime import datetime, timezone
+
+    from src.models import SessionLocal, init_db
+    from src.api.routes.settings import _google_access_ephemeral
+    from src.vault.drive_maintenance import copy_folder
+    from src.vault.google_drive import ensure_visible_app_folder
+
+    init_db()
+    db = SessionLocal()
+    try:
+        _, token, _ = _google_access_ephemeral(db)
+        root = ensure_visible_app_folder(token)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        target = name or f"Finance Vault copy {stamp}"
+        click.echo(f"Copying into {target!r} ...")
+        result = copy_folder(
+            token, root["id"], name=target,
+            on_progress=lambda msg, n: click.echo(f"  {msg}"),
+        )
+        click.echo(f"Done: {result}")
+    finally:
+        db.close()
+
+
+@cli.command("tidy-drive")
+@click.option("--apply", "apply_changes", is_flag=True, help="Trash the previewed files")
+@click.option("--keep-legacy", is_flag=True, help="Leave the old per-device vault folders alone")
+@click.option("--root-id", default=None, help="Tidy inside this folder instead of the vault root")
+def tidy_drive_command(apply_changes: bool, keep_legacy: bool, root_id: str | None):
+    """Remove duplicate statements and the superseded per-device vault folders."""
+    import json
+
+    from src.models import SessionLocal, init_db
+    from src.api.routes.settings import _google_access_ephemeral
+    from src.vault.drive_maintenance import preview_tidy, tidy
+
+    init_db()
+    db = SessionLocal()
+    try:
+        _, token, _ = _google_access_ephemeral(db)
+        click.echo(json.dumps(preview_tidy(token, root_id=root_id), indent=2))
+        if not apply_changes:
+            click.echo(
+                "Dry run only. Convert anything worth keeping first with convert-legacy-backups."
+            )
+            return
+        click.echo(f"Applied: {tidy(token, drop_legacy=not keep_legacy, root_id=root_id)}")
+        click.echo("Trashed, not deleted. Quota is released when Drive's trash is emptied.")
+    finally:
+        db.close()
+
+
+@cli.command("convert-legacy-backups")
+@click.option("--count", default=3, show_default=True, help="How many newest bundles to convert")
+@click.option("--monthly", is_flag=True, help="Take the newest bundle per month instead of --count")
+@click.option("--apply", "apply_changes", is_flag=True, help="Download and convert, not just list")
+def convert_legacy_backups_command(count: int, monthly: bool, apply_changes: bool):
+    """Turn legacy .fvault bundles into snapshots, before the old path is deleted."""
+    from src.models import SessionLocal, init_db
+    from src.api.routes.settings import _google_access_ephemeral
+    from src.vault.legacy_convert import convert_newest, find_legacy_archives, select_archives
+
+    init_db()
+    db = SessionLocal()
+    try:
+        _, token, _ = _google_access_ephemeral(db)
+        archives = find_legacy_archives(token)
+        total_gb = sum(a["size_bytes"] for a in archives) / 1073741824
+        chosen = select_archives(archives, count=count, monthly=monthly)
+        click.echo(f"Found {len(archives)} distinct legacy archive(s), {total_gb:.2f} GB total.")
+        click.echo(f"Would convert {len(chosen)}:")
+        for archive in chosen:
+            click.echo(f"  {archive['backup_at']}  {archive['size_bytes'] >> 20:5d} MB")
+        download_gb = sum(a["size_bytes"] for a in chosen) / 1073741824
+        click.echo(f"Download: {download_gb:.2f} GB")
+        if not apply_changes:
+            click.echo("Dry run only. Re-run with --apply to convert.")
+            return
+        result = convert_newest(
+            token, count=count, monthly=monthly, on_progress=lambda msg: click.echo(f"  {msg}")
+        )
+        for row in result["converted"]:
+            click.echo(
+                f"  {row['name']}  {row['transactions']} txns  "
+                f"{row['from_bytes'] >> 20} MB -> {row['size_bytes'] >> 20} MB"
+                + ("  (indexes rebuilt)" if row.get("repaired") else "")
+            )
+        click.echo(
+            f"Converted {len(result['converted'])}, skipped {len(result['skipped'])}, "
+            f"failed {len(result['failed'])}"
+        )
+        for failure in result["failed"]:
+            click.echo(f"  FAILED {failure['name'][:40]}: {failure['error']}")
+    finally:
+        db.close()
+
+
+@cli.command("restore-statements")
+@click.argument("destination")
+def restore_statements_command(destination: str):
+    """Rebuild the original statement tree from the Drive archive and its manifest."""
+    from pathlib import Path
+
+    from src.models import SessionLocal, init_db
+    from src.api.routes.settings import _google_access_ephemeral
+    from src.vault.snapshot import restore_statements
+
+    init_db()
+    db = SessionLocal()
+    try:
+        _, token, _ = _google_access_ephemeral(db)
+        click.echo(f"Restoring statements into {destination} ...")
+        click.echo(f"Done: {restore_statements(token, Path(destination))}")
+    finally:
+        db.close()
+
+
 @cli.command("sync")
 @click.option("--label", default=None, help="Label to publish for this device")
 @click.option("--status", "status_only", is_flag=True, help="Show what would be used, run nothing")
