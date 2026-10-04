@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -425,7 +425,20 @@ def _find_by_ref(db: Session, spec: schema.TableSpec, ref: str):
         criteria = []
         for attr, value in zip(spec.ref_attrs, parts):
             field = by_attr.get(attr)
-            criteria.append(getattr(model, attr) == (field.from_wire(value) if field else value))
+            decoded = field.from_wire(value) if field else value
+            column = getattr(model, attr)
+            if isinstance(decoded, datetime):
+                # The wire carries timestamps to the second; the originating device stored them to
+                # the microsecond. Equality would never match the original row, so every round
+                # inserted another copy of each Plaid account snapshot. Matching the whole second
+                # names the same row on both sides.
+                # Truncated here too: the reference itself is rendered from the column, so the
+                # originating device names it with microseconds and the copy names it without.
+                second = decoded.replace(microsecond=0)
+                criteria.append(column >= second)
+                criteria.append(column < second + timedelta(seconds=1))
+            else:
+                criteria.append(column == decoded)
         return db.query(model).filter(*criteria).first()
 
     ids = _resolve_link_ids(db, spec, parts)

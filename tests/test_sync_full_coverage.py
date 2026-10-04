@@ -264,6 +264,42 @@ class TestRoundTrip:
             source.close()
             target.close()
 
+    def test_microsecond_timestamps_in_a_key_do_not_duplicate_every_round(self, tmp_path):
+        """Found rehearsing the first real merge: account_snapshots grew by 5-14 rows per round.
+
+        Plaid snapshots are stamped with `utcnow()`, microseconds included; the wire carries
+        timestamps to the second. Looking the reference up by equality therefore never found the
+        originating row, on either device, so each round inserted another copy. Whole-second
+        fixtures hid it -- every other test here seeds `datetime(..., 10, 0, 0)`.
+        """
+        a = _database(tmp_path, "a")()
+        b = _database(tmp_path, "b")()
+        try:
+            snap = AccountSnapshot(
+                source="Example Bank", account_key="acct-1", account_name="Everyday",
+                account_group="bank_account", connection_state="plaid", currency="USD",
+                synced_at=datetime(2026, 10, 3, 19, 2, 57, 330072),
+            )
+            snap.current_value = Decimal("1234.56")
+            a.add(snap)
+            a.commit()
+            grant_merge_consent(a)
+            grant_merge_consent(b)
+
+            def relay(src, dst):
+                payload = json.loads(json.dumps(build_payload(src, device_id="x"), default=str))
+                merge_payload(dst, payload)
+
+            for _ in range(3):
+                relay(a, b)
+                relay(b, a)
+
+            assert a.query(AccountSnapshot).count() == 1, "the originating device duplicated it"
+            assert b.query(AccountSnapshot).count() == 1, "the receiving device duplicated it"
+        finally:
+            a.close()
+            b.close()
+
     def test_the_line_item_lands_under_its_own_payslip(self, tmp_path):
         """Its payslip_id is a local UUID, so it must be re-resolved against the peer's row."""
         source = _database(tmp_path, "a")()
