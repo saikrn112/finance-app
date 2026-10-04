@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 import json
 import time
 import logging
@@ -105,9 +106,28 @@ def _google_drive_log(db: Session) -> SyncLog | None:
 
 
 _TOKEN_CHECK_TTL_SECONDS = 60
-#: (checked_at, ok, reason). Cached because the settings panel polls, and refreshing a token on
-#: every poll would be both slow and rude to Google.
-_token_health: tuple[float, bool, str | None] = (0.0, False, None)
+#: (checked_at, token_fingerprint, ok, reason). Cached because the settings panel polls, and
+#: refreshing a token on every poll would be both slow and rude to Google.
+_token_health: tuple[float, str, bool, str | None] = (0.0, "", False, None)
+
+
+def _token_fingerprint(log: SyncLog | None) -> str:
+    """Identifies *which* token a cached verdict belongs to.
+
+    Keyed on the refresh token rather than the whole row: a successful refresh rewrites the access
+    token, and including that would invalidate the cache on every check, turning a 60-second cache
+    into a refresh on every poll.
+    """
+    if log is None:
+        return ""
+    refresh = str(dict(log.extra_data or {}).get("refresh_token") or "")
+    return hashlib.sha256(refresh.encode()).hexdigest()[:16] if refresh else ""
+
+
+def _invalidate_token_health() -> None:
+    """Forget the cached verdict, so the next read re-checks against whatever is stored now."""
+    global _token_health
+    _token_health = (0.0, "", False, None)
 
 
 def _google_token_health(log: SyncLog | None) -> tuple[bool, str | None]:
@@ -116,23 +136,29 @@ def _google_token_health(log: SyncLog | None) -> tuple[bool, str | None]:
     `bool(access_token)` only proves a row exists. That is what let the panel read "Connected" for
     a week while the refresh token was dead: no backups, no sync, green label. A refresh attempt is
     the only honest answer, so make one and cache it briefly.
+
+    The verdict is cached against the token it was made about. Keyed on time alone, a failure
+    recorded just before a reconnect kept answering "session expired" for up to a minute *after* a
+    working token was stored -- so the panel still said "Not connected", and reconnecting could not
+    clear it. Observed as three consent round trips in 35 seconds, every one of them successful.
     """
     global _token_health
     if log is None:
         return False, "not connected"
     now = time.monotonic()
-    checked_at, ok, reason = _token_health
-    if now - checked_at < _TOKEN_CHECK_TTL_SECONDS:
+    checked_at, fingerprint, ok, reason = _token_health
+    current = _token_fingerprint(log)
+    if fingerprint == current and now - checked_at < _TOKEN_CHECK_TTL_SECONDS:
         return ok, reason
     try:
         ensure_fresh_google_access_token(dict(log.extra_data or {}))
-        _token_health = (now, True, None)
+        _token_health = (now, current, True, None)
         return True, None
     except HTTPException as exc:
-        _token_health = (now, False, str(exc.detail))
+        _token_health = (now, current, False, str(exc.detail))
         return False, str(exc.detail)
     except Exception as exc:
-        _token_health = (now, False, str(exc))
+        _token_health = (now, current, False, str(exc))
         return False, str(exc)
 
 
@@ -523,6 +549,9 @@ def complete_google_drive_connect(code: str, state: str, db: Session) -> HTMLRes
         )
     db.commit()
     resume_dirty_tracking()
+    # A fresh consent is exactly the event that makes any cached verdict wrong. The fingerprint
+    # usually catches it, but Google may reissue the same refresh token, and then only this does.
+    _invalidate_token_health()
     return HTMLResponse(
         """
         <html>

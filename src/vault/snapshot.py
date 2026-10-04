@@ -34,6 +34,7 @@ on every backup is exactly the waste this module exists to remove.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import shutil
@@ -61,6 +62,14 @@ CONFIG_SUFFIX = ".yaml"
 #: How many snapshots to keep. Deletions propagate through sync within a poll, so a single
 #: overwritten file would give a one-round recovery window; a fortnight of dailies is the point.
 SNAPSHOT_RETENTION = 14
+
+#: Plus the newest snapshot from each earlier calendar month, for this many months.
+#:
+#: Count-based retention alone silently destroys depth. Fourteen dailies span a fortnight, so a
+#: backup from last quarter is pruned by ordinary use -- and the first thing that would have hit
+#: was the legacy history converted out of the old `.fvault` bundles: months old by name, and so
+#: first in line under a newest-N rule. A monthly tier costs about 10 MB a month.
+MONTHLY_RETENTION = 12
 
 _STAMP_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)")
 
@@ -228,6 +237,8 @@ def publish_snapshot(
         if on_progress:
             on_progress("pruning", 85)
         pruned = prune_snapshots(access_token, retention=retention)
+        if pruned:
+            logger.info("snapshot publish pruned %s", pruned)
 
         if on_progress:
             on_progress("done", 100)
@@ -243,8 +254,40 @@ def publish_snapshot(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def prune_snapshots(access_token: str, *, retention: int = SNAPSHOT_RETENTION) -> list[str]:
-    """Keep the newest `retention` snapshots; trash the rest, with their config siblings.
+def snapshots_to_keep(
+    snapshots: list[dict[str, Any]],
+    *,
+    retention: int = SNAPSHOT_RETENTION,
+    monthly: int = MONTHLY_RETENTION,
+) -> set[str]:
+    """Names worth keeping: the newest `retention`, plus one per earlier calendar month.
+
+    A month already represented in the newest-N window does not get a second keeper, so a run of
+    dailies inside one month prunes down to `retention` exactly as before. The monthly tier only
+    reaches back past where the daily window ends.
+    """
+    keep = {row["name"] for row in snapshots[:retention]}
+    covered = {(row["created_at"] or "")[:7] for row in snapshots[:retention]}
+    months_kept = 0
+    for row in snapshots[retention:]:
+        month = (row["created_at"] or "")[:7]
+        if month in covered:
+            continue
+        if months_kept >= monthly:
+            break
+        covered.add(month)
+        keep.add(row["name"])
+        months_kept += 1
+    return keep
+
+
+def prune_snapshots(
+    access_token: str,
+    *,
+    retention: int = SNAPSHOT_RETENTION,
+    monthly: int = MONTHLY_RETENTION,
+) -> list[str]:
+    """Keep the newest `retention` snapshots and a monthly tier; trash the rest, with configs.
 
     Trashed rather than hard-deleted: a snapshot is the thing you reach for when something has
     already gone wrong, and an accidental permanent delete of the wrong one is unrecoverable.
@@ -255,7 +298,8 @@ def prune_snapshots(access_token: str, *, retention: int = SNAPSHOT_RETENTION) -
     if retention <= 0:
         return []
     snapshots = list_snapshots(access_token)
-    doomed = snapshots[retention:]
+    keep = snapshots_to_keep(snapshots, retention=retention, monthly=monthly)
+    doomed = [row for row in snapshots if row["name"] not in keep]
     if not doomed:
         return []
 
@@ -328,6 +372,107 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+#: Maps content hashes back to the paths they came from. Without it the archive is write-only.
+STATEMENTS_MANIFEST = "manifest.json"
+
+
+def build_statements_manifest(source_dir: Path | None = None) -> dict[str, Any]:
+    """`{sha256+ext: [original relative paths]}` for everything under the statements root.
+
+    A **list** of paths per hash, not one: 454 real files are 231 unique documents, so a single
+    archived copy legitimately stands for several originals. Recording one path would silently
+    restore one file where three existed.
+    """
+    root = Path(source_dir) if source_dir else Path(settings.app.data_dir) / "raw"
+    paths: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*")) if root.exists() else []:
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        name = f"{_sha256(path)}{path.suffix.lower()}"
+        paths.setdefault(name, []).append(path.relative_to(root).as_posix())
+    return {
+        "version": 1,
+        "root": str(root.relative_to(settings.app.data_dir)) if root.is_relative_to(
+            Path(settings.app.data_dir)
+        ) else str(root),
+        "files": paths,
+    }
+
+
+def publish_statements_manifest(access_token: str, *, source_dir: Path | None = None) -> dict[str, Any]:
+    """Upload the manifest, replacing the previous one in place."""
+    from src.vault.google_drive import list_drive_files, upload_multipart_file
+
+    manifest = build_statements_manifest(source_dir)
+    parent = _folder_id(access_token, STATEMENTS_FOLDER)
+    existing = [
+        entry for entry in list_drive_files(access_token, parent_id=parent)
+        if entry.get("name") == STATEMENTS_MANIFEST
+    ]
+    upload_multipart_file(
+        access_token,
+        name=STATEMENTS_MANIFEST,
+        content_bytes=json.dumps(manifest, indent=1, sort_keys=True).encode(),
+        mime_type="application/json",
+        parent_id=parent,
+        file_id=existing[0]["id"] if existing else None,
+    )
+    return {
+        "documents": len(manifest["files"]),
+        "original_paths": sum(len(v) for v in manifest["files"].values()),
+    }
+
+
+def restore_statements(
+    access_token: str, dest_dir: Path, *, manifest: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Rebuild the statements tree under `dest_dir`, using the manifest for the original names.
+
+    Every path a hash stood for is written, so duplicates come back as duplicates rather than
+    collapsing to one file.
+    """
+    from src.vault.google_drive import download_file_to_path, list_drive_files
+
+    parent = _folder_id(access_token, STATEMENTS_FOLDER)
+    if manifest is None:
+        entry = next(
+            (e for e in list_drive_files(access_token, parent_id=parent)
+             if e.get("name") == STATEMENTS_MANIFEST),
+            None,
+        )
+        if entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No statements manifest on Drive; the archive cannot be mapped to filenames",
+            )
+        landing = Path(tempfile.mkdtemp(prefix="stmt-manifest-")) / STATEMENTS_MANIFEST
+        download_file_to_path(access_token, entry["id"], landing)
+        manifest = json.loads(landing.read_text())
+
+    by_name = {
+        e["name"]: e["id"] for e in list_drive_files(access_token, parent_id=parent)
+    }
+    dest = Path(dest_dir)
+    written = missing = 0
+    for name, originals in (manifest.get("files") or {}).items():
+        file_id = by_name.get(name)
+        if file_id is None:
+            missing += len(originals)
+            continue
+        first: Path | None = None
+        for relative in originals:
+            target = dest / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if first is None:
+                download_file_to_path(access_token, file_id, target)
+                first = target
+            else:
+                # Downloaded once, then copied locally: the bytes are identical by construction.
+                shutil.copy2(first, target)
+            written += 1
+    return {"written": written, "missing": missing}
+
+
 def archive_statements(access_token: str, *, source_dir: Path | None = None) -> dict[str, Any]:
     """Upload original statements, content-addressed, skipping any already there.
 
@@ -363,5 +508,14 @@ def archive_statements(access_token: str, *, source_dir: Path | None = None) -> 
         existing.add(name)
         uploaded += 1
         total_bytes += path.stat().st_size
+    # Published every time, cheap, and the thing that makes the archive restorable at all: the
+    # database refers to statements by their original filename, the archive by content hash, and
+    # nothing else connects the two.
+    manifest = publish_statements_manifest(access_token, source_dir=root)
     logger.info("statement archive uploaded %d, skipped %d", uploaded, skipped)
-    return {"uploaded": uploaded, "skipped": skipped, "bytes": total_bytes}
+    return {
+        "uploaded": uploaded,
+        "skipped": skipped,
+        "bytes": total_bytes,
+        "manifest": manifest,
+    }

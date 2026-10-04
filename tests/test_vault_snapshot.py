@@ -212,13 +212,14 @@ class TestPublish:
     def test_pruning_takes_the_config_sibling_with_it(self, live_db, drive, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         parent = drive.ensure_child_folder(None, parent_id="app-root", name=snap.SNAPSHOTS_FOLDER)["id"]
-        old = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        # Same month as the one kept, so the monthly tier does not reprieve it.
+        old = datetime(2026, 9, 1, tzinfo=timezone.utc)
         _seed_snapshot(drive, old)
         drive.upload_multipart_file(
             None, name=snap.config_name(snap.timestamp_slug(old)),
             content_bytes=b"cfg", mime_type="x", parent_id=parent,
         )
-        _seed_snapshot(drive, datetime(2026, 9, 1, tzinfo=timezone.utc))
+        _seed_snapshot(drive, datetime(2026, 9, 20, tzinfo=timezone.utc))
 
         snap.prune_snapshots("tok", retention=1)
 
@@ -229,6 +230,63 @@ class TestPublish:
         _seed_snapshot(drive, datetime(2026, 9, 1, tzinfo=timezone.utc))
         assert snap.prune_snapshots("tok", retention=0) == []
         assert len(snap.list_snapshots("tok")) == 1
+
+
+class TestMonthlyRetention:
+    """Count-based retention alone destroys depth.
+
+    Fourteen dailies span a fortnight, so anything older is pruned by ordinary use. The first
+    casualty would have been the history converted out of the legacy `.fvault` bundles: months old
+    by name, and therefore first in line under a newest-N rule.
+    """
+
+    def _rows(self, *stamps):
+        return [
+            {"name": snap.snapshot_name(s.replace(":", "-")), "created_at": s}
+            for s in sorted(stamps, reverse=True)
+        ]
+
+    def test_the_newest_in_each_earlier_month_survives_the_daily_window(self):
+        rows = self._rows(
+            "2026-09-19T23:01:38Z", "2026-09-18T22:48:17Z",
+            "2026-08-20T00:00:00Z", "2026-08-02T00:00:00Z",
+            "2026-06-05T01:22:43Z", "2026-04-17T08:06:53Z",
+        )
+
+        keep = snap.snapshots_to_keep(rows, retention=2, monthly=12)
+
+        assert snap.snapshot_name("2026-08-20T00-00-00Z") in keep, "August's newest"
+        assert snap.snapshot_name("2026-08-02T00-00-00Z") not in keep, "only one per month"
+        assert snap.snapshot_name("2026-06-05T01-22-43Z") in keep
+        assert snap.snapshot_name("2026-04-17T08-06-53Z") in keep
+
+    def test_dailies_within_one_month_still_prune_to_the_count(self):
+        """The monthly tier must not quietly keep an extra copy of a month already covered."""
+        rows = self._rows(*[f"2026-08-{day:02d}T00:00:00Z" for day in range(1, 7)])
+
+        assert len(snap.snapshots_to_keep(rows, retention=3, monthly=12)) == 3
+
+    def test_the_monthly_tier_is_bounded(self):
+        rows = self._rows(*[f"2025-{month:02d}-01T00:00:00Z" for month in range(1, 13)])
+
+        keep = snap.snapshots_to_keep(rows, retention=1, monthly=3)
+
+        assert len(keep) == 4, "one daily plus three monthlies, not every month ever taken"
+
+    def test_pruning_honours_the_monthly_tier_against_drive(self, live_db, drive, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        for when in (
+            datetime(2026, 4, 17, tzinfo=timezone.utc),
+            datetime(2026, 6, 5, tzinfo=timezone.utc),
+            datetime(2026, 9, 18, tzinfo=timezone.utc),
+            datetime(2026, 9, 19, tzinfo=timezone.utc),
+        ):
+            _seed_snapshot(drive, when)
+
+        removed = snap.prune_snapshots("tok", retention=2, monthly=12)
+
+        assert removed == [], "converted legacy history must survive an ordinary backup"
+        assert len(snap.list_snapshots("tok")) == 4
 
 
 # --- restore -------------------------------------------------------------------------------------
@@ -296,9 +354,12 @@ class TestStatements:
         second = snap.archive_statements("tok", source_dir=raw)
 
         assert first["uploaded"] == 2
-        assert second == {"uploaded": 0, "skipped": 2, "bytes": 0}, (
+        assert (second["uploaded"], second["skipped"], second["bytes"]) == (0, 2, 0), (
             "re-sending unchanged statements is most of what made the old bundle enormous"
         )
+        # The manifest is republished every time; it is what maps a content hash back to the
+        # filenames the database refers to.
+        assert second["manifest"]["documents"] == 2
 
     def test_names_are_content_addressed_so_identical_files_are_stored_once(self, drive, tmp_path):
         raw = tmp_path / "raw"
@@ -309,7 +370,11 @@ class TestStatements:
         result = snap.archive_statements("tok", source_dir=raw)
 
         assert result["uploaded"] == 1 and result["skipped"] == 1
-        assert len(drive.files) == 1
+        stored = [row["name"] for row in drive.files.values()]
+        assert len([n for n in stored if n != snap.STATEMENTS_MANIFEST]) == 1
+        assert result["manifest"]["original_paths"] == 2, (
+            "one archived copy has to record both paths it stood for"
+        )
 
     def test_the_extension_is_kept_so_the_files_stay_openable(self, drive, tmp_path):
         raw = tmp_path / "raw"
