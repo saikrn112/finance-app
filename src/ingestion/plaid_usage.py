@@ -20,12 +20,44 @@ _AUDIT_BUSY_TIMEOUT_MS = 50
 
 
 def _audit_session(db: Session) -> Session:
-    audit = sessionmaker(bind=db.get_bind())()
+    """A short-lived session on its own pooled connection, with a 50 ms busy timeout.
+
+    Bound to one explicit connection so the timeout can be put back on *that* connection when
+    `_close_audit` releases it. A plain session hands its connection back to the pool on commit
+    or rollback, which is what let the 50 ms setting escape.
+    """
+    connection = db.get_bind().connect()
     try:
-        audit.execute(text(f"PRAGMA busy_timeout={_AUDIT_BUSY_TIMEOUT_MS}"))
+        connection.exec_driver_sql(f"PRAGMA busy_timeout={_AUDIT_BUSY_TIMEOUT_MS}")
+        # Close the transaction the PRAGMA autobegan. A session joining an already-open
+        # transaction does not commit it, so audit rows would be silently discarded.
+        connection.commit()
     except SQLAlchemyError:
         pass
-    return audit
+    return Session(bind=connection)
+
+
+def _close_audit(audit: Session) -> None:
+    """Put the normal busy timeout back before the connection returns to the pool.
+
+    Without this the pool handed a 50 ms connection to whichever request came next, which then
+    failed with "database is locked" almost instantly whenever a write was in progress -- the
+    macOS app's intermittent Internal Server Errors, on whatever page drew that connection.
+    """
+    from src.models.database import SQLITE_BUSY_TIMEOUT_MS
+
+    connection = audit.get_bind()
+    audit.close()
+    try:
+        if connection.in_transaction():
+            connection.rollback()
+        connection.exec_driver_sql(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    except SQLAlchemyError:
+        # A connection whose timeout cannot be restored must not go back into the pool at all.
+        connection.invalidate()
+    finally:
+        connection.close()
+
 
 from src.models import AppMetadata, PlaidApiUsage, PlaidProductEnrollment
 from src.config import settings
@@ -103,7 +135,7 @@ def record_plaid_usage(
     except SQLAlchemyError:
         audit.rollback()
     finally:
-        audit.close()
+        _close_audit(audit)
 
     # Caller holds the write lock. Record on their transaction instead: it rolls back with
     # them, but losing telemetry or failing the sync would both be worse.
@@ -139,7 +171,7 @@ def finish_plaid_usage(db: Session, usage_id: str | None, *, success: bool, erro
     except SQLAlchemyError:
         audit.rollback()
     finally:
-        audit.close()
+        _close_audit(audit)
 
     try:
         if _apply(db):
