@@ -17,6 +17,9 @@ Path(settings.database.path).parent.mkdir(parents=True, exist_ok=True)
 # blocked request fails fast rather than pinning a pooled connection.
 SQLITE_BUSY_TIMEOUT_MS = int(os.environ.get("FINANCE_APP_SQLITE_BUSY_TIMEOUT_MS", "15000"))
 
+#: Set by the macOS bundle only; see `_set_sqlite_pragmas`.
+USE_WAL = bool(os.environ.get("FINANCE_APP_LOCAL_TOKEN"))
+
 engine = create_engine(f"sqlite:///{settings.database.path}", echo=False)
 
 
@@ -29,12 +32,21 @@ def _set_sqlite_pragmas(dbapi_connection, _connection_record):
     "database is locked" — which is how editing a category during a sync returned a 500.
     A few seconds covers those windows.
 
-    Note: deliberately *not* WAL. The database lives on a Finch/Lima bind mount, where
-    WAL's shared-memory file is unreliable and produces "disk I/O error".
+    WAL only for the macOS app. In the container the database lives on a Finch/Lima bind mount,
+    where WAL's shared-memory file is unreliable and produces "disk I/O error", so it stays in
+    rollback-journal mode there. The macOS bundle keeps its database on the local disk, where WAL
+    is safe -- and needed: in journal mode a background Plaid pull blocks every *read* until it
+    commits, which surfaced as Internal Server Errors on whatever page loaded during a sync.
+
+    Keyed on the bundle's own marker rather than "not in a container", because a host-side local
+    run opens the very file the container later bind-mounts, and a WAL file left on it is exactly
+    the case that breaks.
     """
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        if USE_WAL:
+            cursor.execute("PRAGMA journal_mode=WAL")
     finally:
         cursor.close()
 
