@@ -26,6 +26,8 @@ class FakeTransport:
         self.put_count = 0
         #: Set to raise from `fetch_others`, to test that a transport failure is survivable.
         self.fail_fetch: Exception | None = None
+        #: Payload downloads actually performed, per peer. What the skip exists to reduce.
+        self.downloads: dict[str, int] = {}
         self._clock = datetime(2026, 1, 1)
 
     def put(self, device_id: str, payload: dict) -> None:
@@ -34,19 +36,27 @@ class FakeTransport:
         self.modified[device_id] = self._clock
         self.put_count += 1
 
-    def fetch_others(self, device_id: str) -> list[RemotePayload]:
+    def fetch_others(
+        self, device_id: str, *, known_versions: dict[str, str] | None = None
+    ) -> list[RemotePayload]:
         if self.fail_fetch is not None:
             raise self.fail_fetch
         out: list[RemotePayload] = []
         for peer, raw in sorted(self.files.items()):
             if peer == device_id:
                 continue
+            modified = self.modified.get(peer)
+            version = f"{peer}@{modified.isoformat() if modified else ''}"
+            if known_versions and known_versions.get(peer) == version:
+                out.append(RemotePayload(peer, {}, modified, version, unchanged=True))
+                continue
+            self.downloads[peer] = self.downloads.get(peer, 0) + 1
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
                 # Mirrors the real transport: one unreadable peer must not stop the others.
                 continue
-            out.append(RemotePayload(peer, payload, self.modified.get(peer)))
+            out.append(RemotePayload(peer, payload, modified, version))
         return out
 
     def delete(self, device_id: str) -> None:

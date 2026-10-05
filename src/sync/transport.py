@@ -42,12 +42,22 @@ class RemotePayload:
     #: device clocks, so this is preferred over the payload's self-reported `written_at` when judging
     #: freshness.
     modified_at: datetime | None = None
+    #: Identifies this exact upload of the peer's file, so an unchanged one can be recognised from
+    #: the listing alone, without downloading it.
+    version: str | None = None
+    #: True when `version` matched what this device already merged: nothing was downloaded and
+    #: `payload` is empty. Still returned, so the peer stays visible as present.
+    unchanged: bool = False
 
 
 class SyncTransport(Protocol):
     def put(self, device_id: str, payload: dict) -> None: ...
 
-    def fetch_others(self, device_id: str) -> list[RemotePayload]: ...
+    def fetch_others(
+        self, device_id: str, *, known_versions: dict[str, str] | None = None
+    ) -> list[RemotePayload]:
+        """Every peer's payload. A peer whose version is in `known_versions` is not downloaded."""
+        ...
 
     def delete(self, device_id: str) -> None: ...
 
@@ -116,7 +126,9 @@ class DriveTransport:
             file_id=existing["id"] if existing else None,
         )
 
-    def fetch_others(self, device_id: str) -> list[RemotePayload]:
+    def fetch_others(
+        self, device_id: str, *, known_versions: dict[str, str] | None = None
+    ) -> list[RemotePayload]:
         from src.vault.google_drive import download_file_bytes, list_drive_files
         from src.sync.coding import datetime_from_wire
 
@@ -135,15 +147,22 @@ class DriveTransport:
 
         results: list[RemotePayload] = []
         for peer, entry in sorted(by_device.items()):
+            modified = datetime_from_wire(entry.get("modifiedTime"))
+            # File id plus Drive's own modifiedTime: every upload bumps it, and it is the server's
+            # clock rather than a device's, so it cannot be fooled by skew.
+            version = f"{entry['id']}@{entry.get('modifiedTime') or ''}"
+            if known_versions and known_versions.get(peer) == version:
+                # Already merged exactly this file. Downloading it again -- ~6 MB -- to learn
+                # "nothing new" was every round's main cost.
+                results.append(RemotePayload(peer, {}, modified, version, unchanged=True))
+                continue
             try:
                 raw = download_file_bytes(self.access_token, entry["id"])
                 payload = json.loads(raw)
             except Exception:
                 logger.warning("sync: could not read peer payload for %s", peer)
                 continue
-            results.append(
-                RemotePayload(peer, payload, datetime_from_wire(entry.get("modifiedTime")))
-            )
+            results.append(RemotePayload(peer, payload, modified, version))
         return results
 
     def delete(self, device_id: str) -> None:
