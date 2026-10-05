@@ -112,7 +112,10 @@ export function Dashboard() {
 
   const { data: settingsData, refetch: refetchSettings } = useQuery({
     queryKey: ['settings'],
-    queryFn: () => api.getSettings(),
+    // `fresh`, because React Query is already the cache here. Without it a refetch was answered
+    // from api.ts's own five-minute cache, so after a Google sign-in the onboarding gate re-read
+    // the pre-connect "not connected" and asked to connect again -- every time, until it expired.
+    queryFn: () => api.getSettings({ fresh: true }),
     staleTime: 60_000,
   })
 
