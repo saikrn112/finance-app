@@ -89,8 +89,12 @@ def run_sync(
     platform_name = device.detect_platform()
     result = SyncResult(device_id=device_id)
 
-    incoming = _fetch(transport, device_id, result)
+    incoming = _fetch(transport, device_id, result, known_versions=None if full else _merged_versions(db))
     for remote in incoming:
+        if remote.unchanged:
+            # The same file this device merged last time: nothing to download, merge or record.
+            result.merges[remote.device_id] = {"unchanged": True}
+            continue
         try:
             # Recorded whether or not the payload is merged. Knowing a peer exists is what lets the
             # UI offer the first-merge choice at all, and the lease timestamps are timestamps --
@@ -136,6 +140,10 @@ def run_sync(
                 last_seen_at=last_seen,
                 watermark=report.watermark,
             )
+            # Only after a real merge, in the same commit. Recorded during the consent preview, the
+            # payload would be skipped as "already merged" once consent arrived and never absorbed.
+            if remote.version:
+                _store_merged_version(db, remote.device_id, remote.version)
             db.commit()
         except Exception as exc:
             # One bad payload must not stop syncing with every other device.
@@ -195,9 +203,15 @@ def run_sync(
     return result
 
 
-def _fetch(transport: SyncTransport, device_id: str, result: SyncResult) -> list[RemotePayload]:
+def _fetch(
+    transport: SyncTransport,
+    device_id: str,
+    result: SyncResult,
+    *,
+    known_versions: dict[str, str] | None = None,
+) -> list[RemotePayload]:
     try:
-        remotes = transport.fetch_others(device_id)
+        remotes = transport.fetch_others(device_id, known_versions=known_versions)
     except Exception as exc:
         logger.exception("sync: could not list peers on %s", transport.describe())
         result.error = str(exc)
@@ -211,6 +225,63 @@ def _fetch(transport: SyncTransport, device_id: str, result: SyncResult) -> list
     )
     result.peers_seen = [r.device_id for r in remotes]
     return remotes
+
+
+# --- skipping peers that have not changed --------------------------------------------------------
+#
+# Payloads are full state, so re-reading an unchanged one is pure cost: a ~6 MB download and a merge
+# against every row, every round, to conclude "nothing new". The peer's file version is remembered
+# once merged, and the next round skips it from the listing alone.
+#
+# The remembered value is qualified by this build's schema. After an upgrade that syncs more tables,
+# a peer's unchanged file may hold rows this device has never applied -- so a schema change must
+# make every peer look new again, not leave those rows unread until the peer happens to edit
+# something.
+
+_MERGED_VERSION_PREFIX = "sync_merged_version:"
+
+
+def _schema_tag() -> str:
+    from src.sync.merge import schema_format_version
+
+    return f"f{schema_format_version()}-t{len(schema.TABLES)}"
+
+
+def _merged_versions(db: Session) -> dict[str, str]:
+    from src.models import AppMetadata
+
+    tag = _schema_tag()
+    known: dict[str, str] = {}
+    for row in db.query(AppMetadata).filter(AppMetadata.key.like(f"{_MERGED_VERSION_PREFIX}%")):
+        version, _, row_tag = (row.value or "").rpartition("|")
+        if row_tag == tag and version:
+            known[row.key[len(_MERGED_VERSION_PREFIX):]] = version
+    return known
+
+
+def _store_merged_version(db: Session, peer: str, version: str) -> None:
+    from src.models import AppMetadata
+
+    key = f"{_MERGED_VERSION_PREFIX}{peer}"
+    value = f"{version}|{_schema_tag()}"
+    row = db.get(AppMetadata, key)
+    if row is None:
+        db.add(AppMetadata(key=key, value=value))
+    else:
+        row.value = value
+
+
+def forget_merged_versions(db: Session) -> int:
+    """Make every peer look new again. For after a restore, which replaces what was merged."""
+    from src.models import AppMetadata
+
+    removed = (
+        db.query(AppMetadata)
+        .filter(AppMetadata.key.like(f"{_MERGED_VERSION_PREFIX}%"))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return removed
 
 
 # --- watermarks -------------------------------------------------------------------------------

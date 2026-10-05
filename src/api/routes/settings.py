@@ -849,8 +849,13 @@ def _republish_after_restore() -> dict:
     from src.models import SessionLocal
     from src.sync.runner import sync_once
 
+    from src.sync.engine import forget_merged_versions
+
     session = SessionLocal()
     try:
+        # The restored database has not necessarily absorbed what peers published since the
+        # snapshot, so nothing it remembers merging can be trusted to skip a download.
+        forget_merged_versions(session)
         return sync_once(session, force_publish=True)
     except Exception as exc:
         logger.warning("restore succeeded but republishing failed: %s", exc)

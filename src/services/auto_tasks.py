@@ -25,7 +25,10 @@ AUTO_SYNC_INTERVAL = timedelta(hours=24)
 #
 # So the schedule is decided by comparing persisted timestamps and the poll is short. A wake-up
 # with nothing due costs one primary-key lookup.
-POLL_INTERVAL = timedelta(minutes=15)
+# Five minutes: an edit reaches the other device in 5-10 minutes rather than 15-30. Affordable
+# because a quiet round is now a single Drive listing -- unchanged peers are not re-downloaded and
+# an unchanged device does not re-upload.
+POLL_INTERVAL = timedelta(minutes=5)
 
 # Multi-device sync runs on every poll, not on AUTO_SYNC_INTERVAL. Its whole value is promptness --
 # a change made on the phone should reach the Mac in minutes, not tomorrow -- and a round costs one
@@ -188,7 +191,7 @@ def _run_device_sync(db, *, trigger: str) -> None:
     result = sync_once(db)
     if not result.get("ran"):
         # Debug, not info: this is the normal state until someone enables sync, and logging it at
-        # info level every 15 minutes would bury everything else.
+        # info level every poll would bury everything else.
         logger.debug("auto-task device sync skipped", extra={"trigger": trigger, "result": result})
         return
     logger.info(
