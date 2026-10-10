@@ -127,3 +127,64 @@ class TestJournalMode:
             reader.close()
             writer.rollback()
             writer.close()
+
+
+class TestTelemetryCannotBreakTheSync:
+    """Found as "Sync incomplete" on the macOS app: Marcus failed at its final commit.
+
+    Another writer held the lock, so the usage row's fallback flush on the *caller's* session timed
+    out. That left the session "rolled back due to a previous exception", and the bank pull's own
+    commit then raised PendingRollbackError. Telemetry must never be able to do that.
+    """
+
+    def test_the_callers_commit_survives_a_failed_usage_write(self, engine, monkeypatch):
+        from src.ingestion.plaid_usage import record_plaid_usage
+        from src.models.transaction import Transaction
+
+        # Short timeouts so the contention resolves in milliseconds rather than 15 s.
+        monkeypatch.setattr(db_module, "SQLITE_BUSY_TIMEOUT_MS", 100)
+        engine.dispose()
+        path = engine.url.database
+
+        holder = sqlite3.connect(path, isolation_level=None)
+        holder.execute("BEGIN IMMEDIATE")  # the other writer
+
+        db = sessionmaker(bind=engine)()
+        try:
+            assert record_plaid_usage(db, endpoint="transactions_sync") is None, (
+                "the usage row cannot be written while another connection holds the lock"
+            )
+            holder.execute("ROLLBACK")  # the other writer finishes
+            holder.close()
+
+            txn = Transaction(source="Example Card", source_id="after-contention", origin="plaid",
+                              date=__import__("datetime").date(2026, 10, 8), merchant_raw="X",
+                              merchant_clean="X", category="Dining")
+            txn.amount = -5
+            db.add(txn)
+            db.commit()  # PendingRollbackError here is the bug
+        finally:
+            db.close()
+
+        check = sessionmaker(bind=engine)()
+        try:
+            assert check.query(Transaction).filter_by(source_id="after-contention").count() == 1
+        finally:
+            check.close()
+
+
+class TestDeviceSyncWaitsItsTurn:
+    def test_a_device_sync_round_is_deferred_while_a_plaid_pull_holds_the_job_lock(self, monkeypatch):
+        from src.services import auto_tasks, job_lock
+
+        ran = []
+        monkeypatch.setattr("src.sync.runner.sync_once", lambda db: ran.append(1) or {"ran": True})
+
+        with job_lock.try_acquire("plaid sync") as acquired:
+            assert acquired
+            auto_tasks._run_device_sync(None, trigger="test")
+
+        assert ran == [], "a merge must not write alongside a Plaid pull"
+
+        auto_tasks._run_device_sync(None, trigger="test")
+        assert ran == [1], "and it runs once the lock is free"

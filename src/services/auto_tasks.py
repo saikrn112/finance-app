@@ -186,9 +186,22 @@ def _run_device_sync(db, *, trigger: str) -> None:
     Silent and cheap when it is off, which is the state of every existing install: `sync_once` returns
     without touching the network rather than raising, because a missing setting is not a failure.
     """
+    from src.services import job_lock
     from src.sync.runner import sync_once
 
-    result = sync_once(db)
+    # Under the same lock as Plaid sync, backup and restore. A merge is a write transaction, and
+    # running one alongside a Plaid pull made the two contend for SQLite's single write lock until
+    # one timed out -- which failed a bank's pull with "Sync incomplete". Skipping a round costs
+    # nothing: the next poll is minutes away.
+    with job_lock.try_acquire("device sync") as acquired:
+        if not acquired:
+            logger.info(
+                "auto-task device sync deferred; %s is running",
+                job_lock.current_holder() or "another job",
+                extra={"trigger": trigger},
+            )
+            return
+        result = sync_once(db)
     if not result.get("ran"):
         # Debug, not info: this is the normal state until someone enables sync, and logging it at
         # info level every poll would bury everything else.

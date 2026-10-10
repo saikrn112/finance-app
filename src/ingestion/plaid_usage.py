@@ -139,10 +139,16 @@ def record_plaid_usage(
 
     # Caller holds the write lock. Record on their transaction instead: it rolls back with
     # them, but losing telemetry or failing the sync would both be worse.
+    #
+    # Inside a SAVEPOINT. A failed flush on the caller's session otherwise leaves the whole session
+    # in "rolled back due to a previous exception" -- which is how a lock timeout on a usage row
+    # failed the Marcus pull at its final commit and showed "Sync incomplete". The savepoint undoes
+    # only the usage row and leaves the caller's own work intact.
     try:
-        usage = _build(db, {"degraded": "shared_session"})
-        db.add(usage)
-        db.flush()
+        with db.begin_nested():
+            usage = _build(db, {"degraded": "shared_session"})
+            db.add(usage)
+            db.flush()
         logger.warning("Recorded Plaid usage for %s on the caller's session", endpoint)
         return usage.id
     except SQLAlchemyError:
@@ -174,8 +180,10 @@ def finish_plaid_usage(db: Session, usage_id: str | None, *, success: bool, erro
         _close_audit(audit)
 
     try:
-        if _apply(db):
-            db.flush()
+        # Savepoint for the same reason as record_plaid_usage: telemetry must not poison the caller.
+        with db.begin_nested():
+            if _apply(db):
+                db.flush()
     except SQLAlchemyError:
         logger.warning("Could not finalize Plaid usage %s; continuing", usage_id, exc_info=True)
 
