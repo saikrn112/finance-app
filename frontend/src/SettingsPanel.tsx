@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X, Trash2 } from 'lucide-react'
 import { api, type Contact, type PendingMergeState, type SnapshotRow, type SplitwiseContactLink, type SplitwiseCredentialsInfo, type SplitwiseFriend, type SplitwiseStatus, type VaultBackupJob, type VaultRestoreJob } from './api'
 import { GETTING_STARTED_DASHBOARD_KEY, GETTING_STARTED_DONE_KEY } from './GettingStartedGuide'
+import { DeviceSyncPanel } from './DeviceSyncPanel'
 import { PlaidLinkButton } from './PlaidLink'
 import { SUPPORTED_CURRENCIES } from './currency'
 import { useFilterStore } from './store'
@@ -56,11 +57,22 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
   onClose: () => void
   onDataChange: () => void 
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const confirmRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  const openRef = useRef(open)
+  const confirmOpenRef = useRef(false)
+  closeRef.current = onClose
+  openRef.current = open
+  const [section, setSection] = useState('general')
+  const [settingsLoading, setSettingsLoading] = useState(true)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
   const [data, setData] = useState<SettingsData | null>(null)
   const [vaultBusy, setVaultBusy] = useState(false)
   const [backupJob, setBackupJob] = useState<VaultBackupJob | null>(null)
   const [restoreJob, setRestoreJob] = useState<VaultRestoreJob | null>(null)
   const [signoutConfirm, setSignoutConfirm] = useState(false)
+  confirmOpenRef.current = signoutConfirm
   const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   //: Bumped after a backup so the list reloads without polling for it.
@@ -70,10 +82,60 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
 
 
   useEffect(() => {
-    if (open) {
-      api.getSettings().then(setData)
+    if (!open) return
+    let active = true
+    setSettingsError(null)
+    setSettingsLoading(true)
+    api.getSettings().then((next) => {
+      if (active) setData(next)
+    }).catch((err: unknown) => {
+      if (active) setSettingsError(err instanceof Error ? err.message : 'Could not load settings')
+    }).finally(() => { if (active) setSettingsLoading(false) })
+    return () => { active = false }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) { setSignoutConfirm(false); return }
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    dialogRef.current?.querySelector<HTMLButtonElement>('[aria-label="Close settings"]')?.focus()
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        if (confirmOpenRef.current) setSignoutConfirm(false)
+        else closeRef.current()
+      }
+      if (event.key !== 'Tab') return
+      const scope = confirmOpenRef.current
+        ? confirmRef.current
+        : dialogRef.current
+      const controls = Array.from(scope?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]',
+      ) ?? []).filter((element) => element.getClientRects().length > 0)
+      const first = controls[0]
+      const last = controls[controls.length - 1]
+      if (!first || !last) return
+      if (event.shiftKey && (document.activeElement === first || !scope?.contains(document.activeElement))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || !scope?.contains(document.activeElement))) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleKey, true)
+    return () => {
+      document.removeEventListener('keydown', handleKey, true)
+      previous?.focus()
     }
   }, [open])
+
+  useEffect(() => {
+    if (!open || !signoutConfirm) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    confirmRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    return () => { if (openRef.current && previous?.isConnected) previous.focus() }
+  }, [open, signoutConfirm])
 
   useEffect(() => {
     if (!backupJob || backupJob.status !== 'running') return
@@ -146,14 +208,19 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
   const refreshSettings = () => {
     api.invalidateVaultPanelCache()
     onDataChange()
-    api.getSettings({ fresh: true }).then(setData)
+    setSettingsLoading(true)
+    setSettingsError(null)
+    api.getSettings({ fresh: true }).then((next) => {
+      setData(next)
+      setSettingsError(null)
+    }).catch((err: unknown) => setSettingsError(err instanceof Error ? err.message : 'Could not load settings'))
+      .finally(() => setSettingsLoading(false))
   }
 
   const handleClearAll = async () => {
     if (confirm('Delete all transactions? This cannot be undone.')) {
       await api.clearTransactions()
-      onDataChange()
-      api.getSettings({ fresh: true }).then(setData)
+      refreshSettings()
     }
   }
 
@@ -237,16 +304,37 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose} data-tour="tour-settings-panel">
       <div
-        className="app-surface dark:bg-gray-800 rounded-lg p-6 w-full max-w-4xl max-h-[85vh] overflow-y-auto"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="finance-settings-title"
+        className="settings-dialog app-surface rounded-xl w-full max-w-4xl mx-4"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-lg font-semibold">Settings</h2>
-          <button onClick={onClose} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">
+        <div className="settings-header flex justify-between items-center">
+          <h2 id="finance-settings-title" className="text-base font-semibold">Settings</h2>
+          <button aria-label="Close settings" title="Close settings (Esc)" onClick={onClose} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">
             <X size={20} />
           </button>
         </div>
 
+        <div className="settings-layout">
+          <nav className="settings-navigation" aria-label="Settings sections">
+            {[
+              ['general', 'General'], ['banks', 'Banks'], ['backup', 'Backup'],
+              ['sharing', 'Sharing'], ['advanced', 'Advanced'],
+            ].map(([id, label]) => (
+              <button key={id} type="button" aria-current={section === id ? 'page' : undefined}
+                aria-controls={`settings-${id}`} onClick={() => setSection(id)}>{label}</button>
+            ))}
+          </nav>
+          <div className="settings-content">
+            {settingsError ? <div role="alert" className="mb-4 text-sm text-red-500">
+              <p>{settingsError}</p>
+              <button className="app-button-secondary mt-2 rounded px-3 py-1" onClick={refreshSettings}>Try again</button>
+            </div> : settingsLoading ? <p role="status" className="mb-4 text-sm text-gray-500">Loading settings…</p> : null}
+            <FirstMergePrompt />
+            <section id="settings-general" aria-label="General settings" hidden={section !== 'general'}>
         {/* Stats */}
         <div className="mb-6 p-3 bg-[var(--app-surface-2)] dark:bg-gray-700 rounded">
           <p className="text-sm">Total transactions: <span className="font-medium">{data?.stats.total_transactions ?? 0}</span></p>
@@ -263,6 +351,8 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           </div>
         </div>
 
+            </section>
+            <section id="settings-backup" aria-label="Backup settings" hidden={section !== 'backup'}>
         <div className="mb-6" data-tour="tour-vault-section">
           <h3 className="font-medium mb-2">Vault Backup</h3>
           <p className="mb-3 text-sm text-gray-500 dark:text-gray-400">
@@ -355,6 +445,7 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           </div>
         </div>
 
+        <DeviceSyncPanel />
         <div className="mb-6">
           <SnapshotHistory
             connected={Boolean(data?.vault.connected)}
@@ -363,6 +454,8 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           />
         </div>
 
+            </section>
+            <section id="settings-banks" aria-label="Bank settings" hidden={section !== 'banks'}>
         <div className="mb-6" data-tour="tour-plaid-section">
           <div className="mb-2 flex items-center justify-between gap-3">
             <div>
@@ -465,16 +558,16 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
           </div>
         </div>
 
-        {/* Asks before absorbing another device's history. Above everything else on purpose:
-            until it is answered this device publishes but never merges. */}
-        <FirstMergePrompt />
-
+            </section>
+            <section id="settings-sharing" aria-label="Sharing settings" hidden={section !== 'sharing'}>
         {/* Members */}
         <ContactsManager />
 
         {/* Splitwise (optional) */}
         <SplitwiseManager />
 
+            </section>
+            <section id="settings-advanced" aria-label="Advanced settings" hidden={section !== 'advanced'}>
         {/* Danger Zone */}
         <div className="border-t dark:border-gray-700 pt-4">
           <h3 className="font-medium mb-2 text-red-500">Danger Zone</h3>
@@ -485,11 +578,14 @@ export function SettingsPanel({ open, onClose, onDataChange }: {
             Clear All Transactions
           </button>
         </div>
+            </section>
+          </div>
+        </div>
       </div>
       {signoutConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setSignoutConfirm(false)}>
-          <div className="app-surface mx-4 max-w-sm rounded-xl p-6 shadow-xl dark:border-slate-700 dark:bg-slate-800" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-2">Sign Out</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={(event) => { event.stopPropagation(); setSignoutConfirm(false) }}>
+          <div ref={confirmRef} data-settings-confirm role="alertdialog" aria-modal="true" aria-labelledby="finance-signout-title" className="app-surface mx-4 max-w-sm rounded-xl p-6 shadow-xl dark:border-slate-700 dark:bg-slate-800" onClick={(e) => e.stopPropagation()}>
+            <h3 id="finance-signout-title" className="text-lg font-semibold mb-2">Sign Out</h3>
             {signoutPreflight?.needs_backup ? (
               <p className="text-sm text-rose-500 dark:text-rose-400 mb-5">
                 You have unsaved changes since your last backup. All local data will be deleted.

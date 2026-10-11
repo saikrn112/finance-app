@@ -3,7 +3,7 @@ import FinanceCore
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSToolbarDelegate {
     private var instanceGuard: SingleInstanceGuard?
     private var supervisor: BackendSupervisor?
     private var window: NSWindow?
@@ -14,8 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var appearanceObserver: NSKeyValueObservation?
     /// Read once at launch from the environment; see the note where it is set.
     private var privacyMask = false
+    private let isDemo = Bundle.main.object(forInfoDictionaryKey: "FinanceDemo") as? Bool == true
     /// `layout`, with any chosen data folder applied. What the backend actually gets.
     private lazy var activeLayout = layout
+    private var allowedNewDataDirectory: URL?
 
     private let layout = BundleLayout.forRunningApplication()
     private lazy var log = ShellLog(url: layout.shellLogURL)
@@ -88,19 +90,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// redo it: the backend imports plugins once at startup and reads the directory from its
     /// environment, so a new folder means a new child process.
     private func startSupervisorAndWindow() {
-        // Where the database lives. Resolved every launch, and it falls back to the app's own copy
-        // rather than refusing to start if a chosen folder has moved -- with the reason logged, and
-        // the folder actually in use shown in the diagnostics row.
-        let resolved = DataDirectory.resolved(default: layout.dataDirectory)
-        if let problem = resolved.problem {
-            log.write("data folder unusable, using the app's own copy: \(problem.explanation)")
+        let chosenData = isDemo ? nil : DataDirectory.remembered()
+        if let chosenData, chosenData != allowedNewDataDirectory,
+           let problem = DataDirectory.existingDatabaseProblem(chosenData) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Your Data Folder Is Unavailable"
+            alert.informativeText = problem.explanation + "\n\nFinanceApp has not opened another database. Choose the existing folder to continue."
+            alert.addButton(withTitle: "Choose Folder…")
+            alert.addButton(withTitle: "Quit").keyEquivalent = ""
+            if alert.runModal() == .alertFirstButtonReturn { chooseDataFolder(nil) }
+            else { NSApp.terminate(nil) }
+            return
         }
-        activeLayout = layout.withDataDirectory(
-            DataDirectory.remembered() != nil && resolved.problem == nil ? resolved.url : nil
-        )
+        activeLayout = layout.withDataDirectory(chosenData)
         log.write("database: \(activeLayout.databaseURL.path)")
 
-        let pluginStatus = PluginDirectory.status()
+        let pluginStatus: PluginDirectory.Status = isDemo ? .notConfigured : PluginDirectory.status()
         switch pluginStatus {
         case .notConfigured:
             log.write("private plugins: not configured; only the bundled templates will load")
@@ -120,9 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             layout: activeLayout,
             environment: BackendEnvironment(
                 layout: activeLayout,
+                mode: isDemo ? "demo" : "live",
                 privatePluginsDirectory: pluginStatus.usableDirectory,
                 privacyMask: privacyMask,
-                syncEnabled: SyncSettings.isEnabled()
+                syncEnabled: !isDemo && SyncSettings.isEnabled()
             )
         )
         self.supervisor = supervisor
@@ -139,10 +146,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let panel = NSOpenPanel()
         panel.title = "Choose the data folder"
         panel.message =
-            "The folder containing runtime/prod/finances.db. Point this at the same folder the "
-            + "container app uses and the two stop drifting apart. Nothing is copied or merged — "
-            + "only which database the app opens.\n\nDo not run both apps against it at once: "
-            + "SQLite allows one writer, and the second one fails with \"database is locked\"."
+            "The folder containing runtime/prod/finances.db. This changes which local database opens; "
+            + "it does not copy or merge records. Each app should keep its own folder and use Device "
+            + "Sync to exchange changes. Do not select another running app's database."
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
@@ -175,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         confirm.addButton(withTitle: "Cancel")
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
 
+        allowedNewDataDirectory = contents.databaseExists ? nil : chosen
         DataDirectory.remember(chosen)
         log.write("data folder set to \(chosen.path); restarting the backend")
         rebuildSupervisor()
@@ -205,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             backing: .buffered,
             defer: false
         )
-        window.title = "FinanceApp"
+        window.title = isDemo ? "FinanceApp — Demo" : "FinanceApp"
         // The ledger is a wide grid; below this it starts crushing columns into
         // ellipses (AGENTS.md caveat #6).
         window.minSize = NSSize(width: 900, height: 560)
@@ -222,7 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Safe only because the page insets itself: the shell sets --titlebar-height from
         // the real metric and macos.css pads the app shell by it, so the frontend's filter
         // row does not end up under the traffic lights.
-        window.styleMask.insert(.fullSizeContentView)
+        window.styleMask.remove(.fullSizeContentView)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         // Follow the system, so ⌘⇧D inside the app is a *preference* rather than the only
@@ -243,11 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // the page on a plain background and cannot show a window material at all. The
         // defect was invisible to the only check that was run.
         window.isOpaque = true
-        window.backgroundColor = NSColor(
-            // Matches the dark theme's --surface-page (#020617) so there is no flash of a
-            // different colour before the web content paints.
-            srgbRed: 0x02 / 255, green: 0x06 / 255, blue: 0x17 / 255, alpha: 1
-        )
+        window.backgroundColor = .windowBackgroundColor
         let root = RootViewController(supervisor: supervisor, layout: layout, log: log)
         rootController = root
         window.contentViewController = root
@@ -255,9 +258,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Restores size and position across launches. Cheap, and its absence is the
         // kind of thing that makes a webview app feel unfinished.
         window.setFrameAutosaveName("MainWindow")
+        let toolbar = NSToolbar(identifier: "FinanceNavigation")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconAndLabel
+        window.toolbar = toolbar
+        window.toolbarStyle = .unifiedCompact
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func showDeviceSync(_ sender: Any?) {
+        guard let endpoint = supervisor?.state.endpoint, let window else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let status = try await DeviceSyncClient(endpoint: endpoint).status()
+                let alert = NSAlert()
+                alert.messageText = "Device Sync"
+                var lines = [status.reason]
+                if let last = status.lastSuccess {
+                    let formatter = ISO8601DateFormatter()
+                    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                    let date = formatter.date(from: last)
+                    lines.append("Last successful sync: " + (date?.formatted(date: .abbreviated, time: .shortened) ?? last))
+                }
+                else { lines.append("No successful device sync yet.") }
+                lines.append("Known devices: \(status.peerCount)")
+                if status.busy { lines.append("Another job is running.") }
+                if let error = status.lastError { lines.append(error) }
+                if self.isDemo { lines.append("Demo mode uses only synthetic data. Cloud sync is unavailable.") }
+                alert.informativeText = lines.joined(separator: "\n\n")
+                alert.addButton(withTitle: "Close")
+                if !self.isDemo {
+                    alert.addButton(withTitle: status.enabled ? "Pause Sync" : "Enable Sync…").keyEquivalent = ""
+                    if status.enabled && status.configured { alert.addButton(withTitle: "Sync Now").keyEquivalent = "" }
+                }
+                alert.beginSheetModal(for: window) { [weak self] result in
+                    guard let self else { return }
+                    if result == .alertSecondButtonReturn {
+                        if status.enabled { self.changeDeviceSync(enabled: false) }
+                        else { self.confirmEnableDeviceSync() }
+                    } else if result == .alertThirdButtonReturn { self.syncDevicesNow(nil) }
+                }
+            } catch { self.presentSyncMessage(error.localizedDescription) }
+        }
+    }
+
+    private func confirmEnableDeviceSync() {
+        guard let window, !isDemo else { return }
+        let alert = NSAlert()
+        alert.messageText = "Enable Device Sync?"
+        alert.informativeText = "This publishes your financial history to your connected Google Drive and exchanges records with your other devices. Your devices keep separate databases. The first merge requires approval in Settings."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Enable Sync").keyEquivalent = ""
+        alert.beginSheetModal(for: window) { [weak self] result in
+            if result == .alertSecondButtonReturn { self?.changeDeviceSync(enabled: true) }
+        }
+    }
+    private func changeDeviceSync(enabled: Bool) {
+        SyncSettings.setEnabled(enabled)
+        rebuildSupervisor()
+    }
+    @objc func syncDevicesNow(_ sender: Any?) {
+        guard !isDemo, SyncSettings.isEnabled(), let endpoint = supervisor?.state.endpoint else {
+            showDeviceSync(sender); return
+        }
+        Task { @MainActor [weak self] in
+            do {
+                try await DeviceSyncClient(endpoint: endpoint).syncNow()
+                self?.rootController?.activeWebController?.dispatch(command: "refresh:settings")
+                self?.presentSyncMessage("Device sync completed.")
+            } catch { self?.presentSyncMessage(error.localizedDescription) }
+        }
+    }
+    private func presentSyncMessage(_ text: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Device Sync"
+        alert.informativeText = text
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
+    }
+
+    private let navigationItems: [(String, String, String)] = [
+        ("Dashboard", "house", "navigate:home"),
+        ("Net Worth", "chart.line.uptrend.xyaxis", "navigate:net-worth"),
+        ("Projects", "folder", "navigate:projects"),
+        ("Imports", "square.and.arrow.down", "open:imports"),
+        ("Settings", "gearshape", "open:settings")
+    ]
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        navigationItems.map { NSToolbarItem.Identifier($0.2) } + [.flexibleSpace, NSToolbarItem.Identifier("device-sync")]
+    }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        if identifier.rawValue == "device-sync" {
+            item.label = "Device Sync"
+            item.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Device sync status")
+            item.target = self; item.action = #selector(showDeviceSync(_:))
+            item.toolTip = "Review device sync status and preferences"
+            return item
+        }
+        guard let definition = navigationItems.first(where: { $0.2 == identifier.rawValue }) else { return nil }
+        item.label = definition.0
+        item.image = NSImage(systemSymbolName: definition.1, accessibilityDescription: definition.0)
+        item.target = self; item.action = #selector(dispatchToolbarCommand(_:))
+        item.toolTip = definition.0
+        return item
+    }
+    @objc private func dispatchToolbarCommand(_ item: NSToolbarItem) {
+        rootController?.activeWebController?.dispatch(command: item.itemIdentifier.rawValue)
     }
 
     // MARK: - View menu actions
@@ -338,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// From NSMenuItemValidation, not an override: NSObject has no such method, and
     /// spelling it `override` fails to compile rather than silently doing nothing.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if isDemo && [#selector(chooseDataFolder(_:)), #selector(choosePluginsFolder(_:))].contains(menuItem.action) { return false }
         let webIsLive = rootController?.activeWebController != nil
         switch menuItem.action {
         case #selector(dispatchAppCommand(_:)),

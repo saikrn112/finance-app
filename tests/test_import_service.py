@@ -57,14 +57,18 @@ def test_reimport_same_file_is_idempotent(db_session):
     assert len(rows) == 1
 
 
-def test_statement_vs_plaid_heuristic_dedup_still_works(db_session):
+def test_statement_vs_plaid_heuristic_dedup_still_works(db_session, monkeypatch):
+    from src.plugins.registry import get_csv_config
+    monkeypatch.setattr(get_csv_config("example_card"), "account_col", "Account")
     """A statement row that matches an existing Plaid row by heuristic (same source,
-    nearby date, same absolute amount, similar merchant) must still be suppressed."""
+    nearby date, same signed amount and currency/account identity, similar merchant) must still be suppressed."""
     db_session.add(
         Transaction(
             source="Example Card",
             source_id="plaid-example_card-1",
             origin="plaid",
+            account_last4="1001",
+            currency="USD",
             date=date(2026, 2, 16),
             amount=Decimal("-23.47"),
             merchant_raw="MOLLY TEA SUNNYVALE",
@@ -75,7 +79,7 @@ def test_statement_vs_plaid_heuristic_dedup_still_works(db_session):
     )
     db_session.commit()
 
-    content = b"Transaction Date,Amount,Description\n02/15/2026,-23.47,MOLLY TEA SUNNYVALE\n"
+    content = b"Transaction Date,Amount,Description,Account\n02/15/2026,-23.47,MOLLY TEA SUNNYVALE,1001\n"
     preview = preview_import(
         db_session,
         file_bytes=content,
@@ -89,12 +93,16 @@ def test_statement_vs_plaid_heuristic_dedup_still_works(db_session):
     assert result["skipped"] == 1
 
 
-def test_preview_import_marks_cross_source_duplicates(db_session):
+def test_preview_import_marks_cross_source_duplicates(db_session, monkeypatch):
+    from src.plugins.registry import get_csv_config
+    monkeypatch.setattr(get_csv_config("example_charge_card"), "account_col", "Account")
     db_session.add(
         Transaction(
             source="Example Charge Card",
             source_id="plaid-1",
             origin="plaid",
+            account_last4="1001",
+            currency="USD",
             date=date(2026, 2, 8),
             amount=Decimal("-132.65"),
             merchant_raw="Example Store",
@@ -105,7 +113,7 @@ def test_preview_import_marks_cross_source_duplicates(db_session):
     )
     db_session.commit()
 
-    content = b"Date,Amount,Description\n02/07/2026,132.65,EXAMPLE STORE 1234 ANYTOWN CA\n"
+    content = b"Date,Amount,Description,Account\n02/07/2026,132.65,EXAMPLE STORE 1234 ANYTOWN CA,1001\n"
     preview = preview_import(
         db_session,
         file_bytes=content,
@@ -147,12 +155,16 @@ def test_preview_import_marks_legacy_statement_duplicates(db_session):
     assert preview["duplicate_summary"]["items"][0]["duplicate_reason"]["type"] == "legacy_statement"
 
 
-def test_commit_import_skips_duplicates_and_inserts_new_rows(db_session):
+def test_commit_import_skips_duplicates_and_inserts_new_rows(db_session, monkeypatch):
+    from src.plugins.registry import get_csv_config
+    monkeypatch.setattr(get_csv_config("example_card"), "account_col", "Account")
     db_session.add(
         Transaction(
             source="Example Card",
             source_id="existing",
             origin="plaid",
+            account_last4="1001",
+            currency="USD",
             date=date(2026, 2, 16),
             amount=Decimal("-23.47"),
             merchant_raw="MOLLY TEA SUNNYVALE",
@@ -163,7 +175,7 @@ def test_commit_import_skips_duplicates_and_inserts_new_rows(db_session):
     )
     db_session.commit()
 
-    content = b"Transaction Date,Amount,Description\n02/15/2026,-23.47,MOLLY TEA SUNNYVALE\n02/17/2026,-18.00,PACIFIC COFFEE\n"
+    content = b"Transaction Date,Amount,Description,Account\n02/15/2026,-23.47,MOLLY TEA SUNNYVALE,1001\n02/17/2026,-18.00,PACIFIC COFFEE,1001\n"
     preview = preview_import(
         db_session,
         file_bytes=content,

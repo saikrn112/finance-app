@@ -113,6 +113,14 @@ class TableSpec:
 # it is named after. Contacts and projects first, then facts, then the links between them.
 TABLES: tuple[TableSpec, ...] = (
     TableSpec(
+        name="balances", kind="balance", behaviour=FACT, model_name="Balance",
+        immutable=(text("source"), day("date"), money("balance"), text("balance_type"),
+                   text("currency"), text("account_last4"), moment("created_at")),
+        # Unknown historical account/currency cannot safely identify a financial fact.
+        ref_attrs=("source", "date", "balance_type", "currency", "account_last4"),
+        ref_nullable=("balance_type",),
+    ),
+    TableSpec(
         name="contacts",
         kind=refs.KIND_CONTACT,
         behaviour=OWNED,
@@ -197,6 +205,9 @@ TABLES: tuple[TableSpec, ...] = (
             flag("pending"),
             text("pending_transaction_id"),
             text("origin"),
+            blob("provider_revision"),
+            blob("identity_aliases"),
+            blob("reconciled_ids"),
             moment("created_at"),
         ),
         # What the user changes about a transaction.

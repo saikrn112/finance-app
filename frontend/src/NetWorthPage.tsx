@@ -176,16 +176,6 @@ export function NetWorthPage({ onBack, snapshotSources }: Props) {
   const changeOverRange = (latestPoint?.total || 0) - (firstPoint?.total || 0)
   const latestOnlyCount = latestRows.filter((row) => row.history_mode === 'latest_only').length
 
-  const largestMover = useMemo(() => {
-    if (!chartData.length) return { label: 'No movement', delta: 0 }
-    const candidates: { label: string; delta: number }[] = (Object.keys(GROUP_META) as VisibleGroupKey[]).map((key) => ({
-      label: GROUP_META[key].label,
-      delta: (latestPoint?.[key] || 0) - (firstPoint?.[key] || 0),
-    }))
-    candidates.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
-    return candidates[0]
-  }, [chartData, firstPoint, latestPoint])
-
   const visibleGroups = (Object.keys(GROUP_META) as VisibleGroupKey[]).filter((key) => !hiddenGroups.has(key))
 
   const toggleGroup = (group: VisibleGroupKey) => {
@@ -429,15 +419,6 @@ function SummaryCard({
 
 function CardShell({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`app-surface rounded-lg p-5 dark:border-slate-800 dark:bg-slate-950 ${className}`}>{children}</section>
-}
-
-function CoverageItem({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-slate-500 dark:text-slate-400">{label}</span>
-      <span className="font-medium">{value}</span>
-    </div>
-  )
 }
 
 function NetWorthTooltip({ active, payload, label, visibleGroups, privacyMode, displayCurrency }: any) {

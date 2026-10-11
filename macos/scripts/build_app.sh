@@ -12,7 +12,7 @@
 
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-CONFIGURATION="${1:-debug}"
+CONFIGURATION="${1:-release}"
 case "$CONFIGURATION" in
   debug|release) ;;
   *) die "unknown configuration: $CONFIGURATION (want debug or release)" ;;
@@ -23,12 +23,12 @@ CONTENTS="$APP/Contents"
 
 # ------------------------------------------------------------------- the shell --
 log "building the Swift shell ($CONFIGURATION)"
-( cd "$MACOS_DIR" && swift build -c "$CONFIGURATION" )
-BINARY="$(cd "$MACOS_DIR" && swift build -c "$CONFIGURATION" --show-bin-path)/$APP_NAME"
+( cd "$MACOS_DIR" && swift build --disable-sandbox -c "$CONFIGURATION" -Xswiftc -gnone -Xswiftc -file-prefix-map -Xswiftc "$REPO_ROOT=/FinanceSource" )
+BINARY="$(cd "$MACOS_DIR" && swift build -c "$CONFIGURATION" --show-bin-path)/FinanceApp"
 [ -x "$BINARY" ] || die "shell binary not found: $BINARY"
 
 # ----------------------------------------------------------------- the backend --
-if [ ! -f "$BUILD_DIR/backend/bootstrap.py" ] || [ "${FORCE_BACKEND:-0}" = "1" ]; then
+if [ ! -f "$BUILD_DIR/backend/bootstrap.py" ] || [ "${FORCE_BACKEND:-0}" = "1" ] || [ "$(cat "$BUILD_DIR/backend/DEPENDENCIES.sha256" 2>/dev/null || true)" != "$DEPENDENCY_FINGERPRINT" ]; then
   bash "$MACOS_DIR/scripts/build_backend.sh"
 else
   # The interpreter and the wheelhouse are reused -- they take minutes and rarely change.
@@ -44,8 +44,14 @@ log "assembling $APP"
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
-cp "$BINARY" "$CONTENTS/MacOS/$APP_NAME"
+cp "$BINARY" "$CONTENTS/MacOS/FinanceApp"
+if [ "$CONFIGURATION" = "release" ]; then strip -S "$CONTENTS/MacOS/FinanceApp"; fi
 cp "$MACOS_DIR/Resources/Info.plist" "$CONTENTS/Info.plist"
+if [ "${FINANCE_DEMO_BUILD:-0}" = "1" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.local.financeapp.demo" "$CONTENTS/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName FinanceAppDemo" "$CONTENTS/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :FinanceDemo bool true" "$CONTENTS/Info.plist"
+fi
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 # The app icon. Regenerated when the generator changes, so the committed .icns and the
@@ -61,41 +67,14 @@ fi
 cp "$ICON" "$CONTENTS/Resources/AppIcon.icns"
 cp -R "$BUILD_DIR/backend" "$CONTENTS/Resources/backend"
 
-# The built frontend. Absent until phase 2; the shell shows the backend status
-# window in that case rather than a blank webview.
-# Build the frontend when the sources are newer than the last build.
-#
-# This script used to *copy* frontend/dist and never build it, which meant a bundle could ship a
-# frontend days older than the source with nothing complaining. It happened: a fix to the getting
-# started tour was edited, "verified" by grepping the bundle for a string that was already there, and
-# shipped four times without ever reaching the app. A build script that silently packages stale
-# artifacts is worse than one that fails.
-if [ -d "$REPO_ROOT/frontend/src" ]; then
-  newest_source="$(find "$REPO_ROOT/frontend/src" -type f -newer "$REPO_ROOT/frontend/dist/index.html" -print -quit 2>/dev/null || true)"
-  if [ ! -f "$REPO_ROOT/frontend/dist/index.html" ] || [ -n "$newest_source" ]; then
-    log "frontend/dist is stale (or missing) -- running the frontend build"
-    # `vite build`, not `npm run build`. The npm script is `tsc -b && vite build`, and this repo
-    # carries ~57 pre-existing type errors, so that script always fails -- which is exactly why
-    # frontend/dist sat four days stale while the bundle happily shipped it. Vite transpiles without
-    # type-checking, so it produces a correct bundle regardless.
-    #
-    # Types are still checked, just not here: `npx tsc -p tsconfig.app.json --noEmit`, compared
-    # against the recorded baseline (see AGENTS.md). Coupling the shippable artifact to a
-    # long-standing type debt only guaranteed a stale artifact.
-    ( cd "$REPO_ROOT/frontend" && npx vite build ) \
-      || die "the frontend build failed; refusing to ship a stale web UI"
-  else
-    log "frontend/dist is up to date"
-  fi
-fi
+# Always build the frontend from current source, lockfile, config and public resources.
+# Vite's own incremental work is cheap; a stale artifact is not a valid successful build.
+log "building current frontend inputs"
+( cd "$REPO_ROOT/frontend" && npx vite build --configLoader runner ) || die "frontend build failed"
+cp -R "$REPO_ROOT/frontend/dist" "$CONTENTS/Resources/web"
 
-if [ -d "$REPO_ROOT/frontend/dist" ]; then
-  rm -rf "$CONTENTS/Resources/web"
-  cp -R "$REPO_ROOT/frontend/dist" "$CONTENTS/Resources/web"
-  log "included frontend/dist as Resources/web"
-else
-  warn "no frontend/dist -- bundle has no web UI yet (phase 2)"
-fi
+# Distributable inputs must not identify the builder or include local financial data.
+python3 "$MACOS_DIR/scripts/bundle_manifest.py" "$APP" "$REPO_ROOT" "$DEPENDENCY_FINGERPRINT" "$CONFIGURATION"
 
 # --------------------------------------------------------------------- signing --
 bash "$MACOS_DIR/scripts/sign.sh" "$APP" "${MACOS_SIGN_IDENTITY:--}"

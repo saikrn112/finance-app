@@ -108,6 +108,14 @@ def _ensure_transaction_columns() -> None:
         statements.append("ALTER TABLE transactions ADD COLUMN payment_channel VARCHAR")
     if "currency" not in columns:
         statements.append("ALTER TABLE transactions ADD COLUMN currency VARCHAR(3) NOT NULL DEFAULT 'USD'")
+    for name in ("provider_revision", "identity_aliases", "reconciled_ids"):
+        if name not in columns:
+            statements.append(f"ALTER TABLE transactions ADD COLUMN {name} JSON")
+    if inspector.has_table("balances"):
+        balance_columns = {column["name"] for column in inspector.get_columns("balances")}
+        for name, sql_type in (("currency", "VARCHAR(3)"), ("account_last4", "VARCHAR(4)")):
+            if name not in balance_columns:
+                statements.append(f"ALTER TABLE balances ADD COLUMN {name} {sql_type}")
 
     # Account snapshots currency column
     if inspector.has_table("account_snapshots"):
@@ -192,6 +200,7 @@ def _ensure_transaction_columns() -> None:
 # and are merged by name, but keep a uid so a rename can be followed; the link tables get neither,
 # because they are identified by their parents' natural keys. See docs/multi_device_sync.md.
 _SYNC_IDENTITY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "balances": ("updated_at",),
     "projects": ("uid", "updated_at"),
     "contacts": ("uid", "updated_at"),
     "subscriptions": ("uid", "updated_at"),

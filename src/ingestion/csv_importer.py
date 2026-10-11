@@ -29,10 +29,11 @@ def _get_config(source: str) -> dict | None:
         "merchant_col": csv_config.merchant_col,
         "date_fmt": csv_config.date_fmt,
         "negate_amount": csv_config.negate_amount,
+        "account_col": csv_config.account_col,
     }
 
 
-def parse_csv(file_path: Path, source: str) -> Iterator[RawTransaction]:
+def parse_csv(file_path: Path, source: str, *, strict: bool = False) -> Iterator[RawTransaction]:
     """Parse CSV file using provider-specific config."""
     config = _get_config(source)
     if not config:
@@ -40,7 +41,7 @@ def parse_csv(file_path: Path, source: str) -> Iterator[RawTransaction]:
     
     with open(file_path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for row_number, row in enumerate(reader, start=2):
             try:
                 date_str = row.get(config["date_col"], "").strip()
                 if not date_str:
@@ -52,14 +53,20 @@ def parse_csv(file_path: Path, source: str) -> Iterator[RawTransaction]:
                 amount_str = amount_str.replace("$", "").replace(",", "")
                 amount = Decimal(amount_str) if amount_str else Decimal(0)
                 
-                if config.get("negate_amount") and amount > 0:
+                if not amount.is_finite():
+                    raise InvalidOperation()
+                if config.get("negate_amount"):
                     amount = -amount
                 
                 merchant = row.get(config["merchant_col"], "").strip()
                 
+                account_last4 = row.get(config["account_col"], "").strip() if config.get("account_col") else ""
+                if account_last4 and (len(account_last4) != 4 or not account_last4.isdigit()):
+                    raise ValueError("Account identity must be four digits")
+
                 # Generate source_id from content hash
                 source_id = hashlib.md5(
-                    f"{date_str}|{amount}|{merchant}".encode()
+                    (f"{date_str}|{amount}|{merchant}" + (f"|{account_last4}" if account_last4 else "")).encode()
                 ).hexdigest()[:16]
                 
                 yield RawTransaction(
@@ -67,8 +74,11 @@ def parse_csv(file_path: Path, source: str) -> Iterator[RawTransaction]:
                     date=txn_date,
                     amount=amount,
                     merchant_raw=merchant,
+                    account_last4=account_last4,
                 )
-            except (ValueError, KeyError, InvalidOperation):
+            except (ValueError, KeyError, InvalidOperation) as exc:
+                if strict:
+                    raise ValueError(f"CSV row {row_number} has an invalid date, amount or account identity; no rows were imported.") from exc
                 # InvalidOperation matters: it is an ArithmeticError, not a ValueError, so a
                 # single unparseable amount used to abort the entire file.
                 continue  # Skip malformed rows

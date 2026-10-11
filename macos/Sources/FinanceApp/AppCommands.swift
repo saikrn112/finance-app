@@ -40,7 +40,7 @@ enum AppCommands {
             title: "File",
             items: [
                 item("Import Statements…", "open:imports", "i"),
-                item("Sync Now", "sync", "s"),
+                item("Refresh Banks", "sync", "s"),
                 .separator,
                 // Shift-Cmd-F, not Cmd-F: Cmd-F is Find, and a note-taking panel stealing the
                 // find shortcut in an app full of searchable tables would be a bad trade.

@@ -24,6 +24,15 @@ def datetime_to_wire(value: datetime | None) -> str | None:
     return value.replace(microsecond=0).isoformat() + "Z"
 
 
+def edit_datetime_to_wire(value: datetime | None) -> str | None:
+    """Preserve edit ordering; natural references retain their stable second precision."""
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat(timespec="microseconds") + "Z"
+
+
 def datetime_from_wire(value: object) -> datetime | None:
     """Parse a wire timestamp to naive UTC. Unparseable reads as None, i.e. "unknown"."""
     if isinstance(value, datetime):

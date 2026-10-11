@@ -34,10 +34,11 @@ def matcher(temp_rules_file):
     return RuleMatcher(temp_rules_file)
 
 
-def _txn(db, source_id, *, source="Chase", origin="plaid", when=date(2026, 9, 10), amount="-40.00"):
+def _txn(db, source_id, *, source="Example Card", origin="plaid", when=date(2026, 9, 10), amount="-40.00"):
     txn = Transaction(
         source=source, source_id=source_id, origin=origin, date=when,
         merchant_raw="EXAMPLE STORE", merchant_clean="Example Store", category="Dining",
+        account_last4="7521", currency="USD",
     )
     txn.amount = Decimal(amount)
     db.add(txn)
@@ -78,7 +79,7 @@ class TestDeletingATransaction:
         _file_under_project(db_session, txn)
         db_session.commit()
 
-        removed = remove_plaid_transaction(db_session, "Chase", "gone-1")
+        removed = remove_plaid_transaction(db_session, "Example Card", "gone-1")
         db_session.commit()
 
         assert removed == 1
@@ -95,14 +96,14 @@ class TestDeletingATransaction:
         _file_under_project(db_session, keeper)
         db_session.commit()
 
-        remove_plaid_transaction(db_session, "Chase", "gone-2")
+        remove_plaid_transaction(db_session, "Example Card", "gone-2")
         db_session.commit()
 
         assert db_session.query(TransactionProject).filter_by(transaction_id=keeper.id).count() == 1
         assert db_session.query(TransactionSplit).filter_by(transaction_id=keeper.id).count() == 1
 
     def test_removing_a_transaction_that_is_not_there_is_harmless(self, db_session):
-        assert remove_plaid_transaction(db_session, "Chase", "never-existed") == 0
+        assert remove_plaid_transaction(db_session, "Example Card", "never-existed") == 0
 
     def test_a_plaid_removal_batch_leaves_nothing_dangling(self, db_session):
         txn = _txn(db_session, "removed-by-plaid")
@@ -110,7 +111,7 @@ class TestDeletingATransaction:
         db_session.commit()
 
         apply_plaid_sync_batch(
-            db_session, institution="Chase", added=[], modified=[],
+            db_session, institution="Example Card", added=[], modified=[],
             removed=["removed-by-plaid"],
         )
         db_session.commit()
@@ -127,7 +128,7 @@ class TestPromotionCarriesTheWork:
         db_session.commit()
 
         action = upsert_plaid_transaction(
-            db_session, "Chase",
+            db_session, "Example Card",
             {
                 "source_id": "posted-1", "pending_transaction_id": "pending-1", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
@@ -151,7 +152,7 @@ class TestPromotionCarriesTheWork:
         db_session.commit()
 
         upsert_plaid_transaction(
-            db_session, "Chase",
+            db_session, "Example Card",
             {
                 "source_id": "posted-2", "pending_transaction_id": "pending-2", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
@@ -172,7 +173,7 @@ class TestPromotionCarriesTheWork:
         db_session.commit()
 
         upsert_plaid_transaction(
-            db_session, "Chase",
+            db_session, "Example Card",
             {
                 "source_id": "posted-3", "pending_transaction_id": "pending-3", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
@@ -193,7 +194,7 @@ class TestPromotionCarriesTheWork:
         db_session.commit()
 
         upsert_plaid_transaction(
-            db_session, "Chase",
+            db_session, "Example Card",
             {
                 "source_id": "posted-4", "pending_transaction_id": "pending-4", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
@@ -217,7 +218,7 @@ class TestStatementOverlap:
         db_session.commit()
 
         action = upsert_plaid_transaction(
-            db_session, "Chase",
+            db_session, "Example Card",
             {
                 "source_id": "plaid-dup-1", "pending_transaction_id": None, "pending": False,
                 "date": date(2026, 9, 10), "amount": -40.00,

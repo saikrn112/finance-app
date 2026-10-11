@@ -13,6 +13,7 @@ BUILD_DIR="$MACOS_DIR/build"
 CACHE_DIR="$BUILD_DIR/cache"
 
 APP_NAME="FinanceApp"
+[ "${FINANCE_DEMO_BUILD:-0}" = "1" ] && APP_NAME="FinanceAppDemo"
 BUNDLE_ID="dev.local.financeapp"
 
 # Arm64-only for now. Intel support means universal2 wheels for every native
@@ -35,6 +36,8 @@ PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/
 #     imports it lazily (src/processing/categorizer.py), so the app degrades to
 #     "AI categorisation unavailable in this build" instead of failing.
 BUNDLE_REQUIREMENTS="fastapi uvicorn sqlalchemy plaid-python pydantic pydantic-settings python-multipart pdfplumber pyyaml click"
+
+DEPENDENCY_FINGERPRINT="$(printf '%s\n' "$TARGET_ARCH" "$PY_FULL" "$PBS_TAG" "$BUNDLE_REQUIREMENTS" | shasum -a 256 | cut -d ' ' -f1)"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m warn:\033[0m %s\n' "$*" >&2; }

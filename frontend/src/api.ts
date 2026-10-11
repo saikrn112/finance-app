@@ -782,7 +782,7 @@ export const api = {
     const form = new FormData()
     form.append('file', file)
     form.append('source', source)
-    return request(`/sync/csv`, { method: 'POST', body: form })
+    return request<{ imported: number; skipped: number }>(`/sync/csv`, { method: 'POST', body: form })
   },
   // Settings
   getSettings: (options?: { fresh?: boolean }) => {

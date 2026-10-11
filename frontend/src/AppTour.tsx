@@ -130,6 +130,19 @@ export function AppTour({ open, onClose, onComplete }: Props) {
     }
   }, [open, step])
 
+  // Settings panes stay mounted but hidden; reveal the pane for the current stop.
+  useEffect(() => {
+    if (!open) return
+    const stop = TOUR_STOPS[step]
+    const pane = document.querySelector(stop.selector)?.closest<HTMLElement>('section[hidden]')
+    if (pane?.id.startsWith('settings-')) {
+      document.querySelector<HTMLButtonElement>(`[aria-controls="${pane.id}"]`)?.click()
+    }
+    if (stop.selector === '[data-tour="tour-imports"]') {
+      document.querySelector<HTMLButtonElement>('[aria-label="Close settings"]')?.click()
+    }
+  }, [open, step])
+
   // Setup resize/scroll listeners and measure on step change
   useEffect(() => {
     if (!open) {

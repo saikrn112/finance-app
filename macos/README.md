@@ -596,3 +596,26 @@ where its `source .../common.sh` failed silently, so `log` resolved to macOS's `
 **Superseded by sync — do not run this.** Multi-device sync (`docs/multi_device_sync.md`) is how the
 two apps agree now: they each keep their own database and converge per record. A one-way file copy
 would overwrite whichever side happens to be newer, which is exactly what sync exists to avoid.
+
+
+## Current native controls and isolated demo verification
+
+The native toolbar and Go menu retain the shared web data views. File → Refresh Banks
+(⌘S) requests provider updates; File → Sync Devices Now (⇧⌘S) exchanges records through
+the existing device sync engine. FinanceApp → Device Sync shows local last-success/error
+state and provides an explicit opt-in consent before enabling cloud sync. It remains paused
+by default. Each app keeps a separate data directory; do not share a running SQLite file.
+A missing remembered data folder/database now opens recovery instead of falling back.
+
+`bash macos/scripts/build_app.sh` builds **release** by default, maps builder source paths,
+strips debug symbols, always rebuilds the frontend and verifies a hash manifest before
+signing. Cached dependency reuse is keyed by requirements/Python/architecture fingerprint.
+App source, rules and plugins are copied from Git's tracked allowlist only. New runtime
+source must be registered with Git before packaging. Private plugins stay external.
+
+`FINANCE_DEMO_BUILD=1 bash macos/scripts/build_app.sh release` creates FinanceAppDemo.app
+with a separate bundle identity, temporary support/data/log directories and synthetic mode.
+It does not use the production data/plugin preferences, implicit user plugin folder or cloud
+sync. Use this artifact for native interaction checks alongside the original app.
+`python3 macos/scripts/test_native_dialogs.py` tests the actual WKUIDelegate using generated
+HTML and synthetic responses only; no backend or financial operation is involved.

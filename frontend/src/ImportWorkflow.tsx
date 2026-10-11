@@ -547,7 +547,7 @@ function TransactionPreview({ preview, privacyMode, currency }: { preview: Impor
   )
 }
 
-function PayslipPreview({ preview, privacyMode }: { preview: ImportPreview; privacyMode: boolean; currency?: string }) {
+function PayslipPreview({ preview, privacyMode, currency }: { preview: ImportPreview; privacyMode: boolean; currency?: string }) {
   const payload = preview.payload || {}
   const taxes = Object.entries(payload.taxes || {}).filter(([key]) => !key.endsWith('_ytd')).slice(0, 4)
   const deductions = Object.entries(payload.deductions || {}).filter(([key]) => !key.endsWith('_ytd')).slice(0, 4)
@@ -581,8 +581,8 @@ function PayslipPreview({ preview, privacyMode }: { preview: ImportPreview; priv
             Parsed Lines
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
-            <MiniList title="Taxes" items={taxes} privacyMode={privacyMode} />
-            <MiniList title="Deductions" items={deductions} privacyMode={privacyMode} />
+            <MiniList title="Taxes" items={taxes} privacyMode={privacyMode} currency={currency} />
+            <MiniList title="Deductions" items={deductions} privacyMode={privacyMode} currency={currency} />
           </div>
         </div>
       </div>
@@ -590,7 +590,7 @@ function PayslipPreview({ preview, privacyMode }: { preview: ImportPreview; priv
   )
 }
 
-function RetirementPreview({ preview, privacyMode }: { preview: ImportPreview; privacyMode: boolean; currency?: string }) {
+function RetirementPreview({ preview, privacyMode, currency }: { preview: ImportPreview; privacyMode: boolean; currency?: string }) {
   const payload = preview.payload || {}
   const rows = (payload.transactions || []) as Array<any>
   const summary = payload.summary || {}
@@ -718,7 +718,7 @@ function RetirementPreview({ preview, privacyMode }: { preview: ImportPreview; p
   )
 }
 
-function InvestmentPreview({ preview, privacyMode }: { preview: ImportPreview; privacyMode: boolean; currency?: string }) {
+function InvestmentPreview({ preview, privacyMode, currency }: { preview: ImportPreview; privacyMode: boolean; currency?: string }) {
   const payload = preview.payload || {}
   const account = payload.account || {}
   const summary = payload.summary || {}
@@ -795,7 +795,7 @@ function MiniMetric({ icon, label, value }: { icon: ReactNode; label: string; va
   )
 }
 
-function MiniList({ title, items, privacyMode }: { title: string; items: Array<[string, unknown]>; privacyMode: boolean }) {
+function MiniList({ title, items, privacyMode, currency }: { title: string; items: Array<[string, unknown]>; privacyMode: boolean; currency?: string }) {
   return (
     <div>
       <div className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">{title}</div>

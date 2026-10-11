@@ -21,22 +21,18 @@ APP_DIR="$BACKEND_DIR/app"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR"
 
-for item in src rules; do
-  cp -R "$REPO_ROOT/$item" "$APP_DIR/$item"
-done
-
-# The tracked example, so src/config.py has defaults to fall back on when the user has no
-# config.yaml yet. Only the *example* ships -- config.yaml itself holds real Plaid and Google
-# secrets and is gitignored.
-cp "$REPO_ROOT/config.yaml.example" "$APP_DIR/config.yaml.example"
-
-mkdir -p "$APP_DIR/plugins"
-# Tracked template plugins only -- never whatever happens to be sitting in the working tree,
-# which on a real machine is the owner's private parsers.
-( cd "$REPO_ROOT" && git ls-files plugins ) | while read -r tracked; do
-  mkdir -p "$APP_DIR/$(dirname "$tracked")"
-  cp "$REPO_ROOT/$tracked" "$APP_DIR/$tracked"
-done
+# Use Git's tracked allowlist for every source/resource tree, not only plugins.
+# Local databases, private rules, scratch fixtures and ignored files cannot enter the payload.
+( cd "$REPO_ROOT" && git ls-files -z -- src rules plugins config.yaml.example ) | \
+  while IFS= read -r -d '' tracked; do
+    [ -f "$REPO_ROOT/$tracked" ] || die "tracked input missing: $tracked"
+    [ ! -L "$REPO_ROOT/$tracked" ] || die "symlink input refused: $tracked"
+    case "$tracked" in
+      */__pycache__/*|*.pyc|*.db|*.sqlite*|*/config.yaml|*/.env) die "private or generated input refused: $tracked" ;;
+    esac
+    mkdir -p "$APP_DIR/$(dirname "$tracked")"
+    cp "$REPO_ROOT/$tracked" "$APP_DIR/$tracked"
+  done
 
 find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +
 find "$APP_DIR" -name '*.pyc' -delete

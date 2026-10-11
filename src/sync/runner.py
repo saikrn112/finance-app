@@ -37,7 +37,7 @@ class TransportChoice:
 
 
 def sync_enabled() -> bool:
-    return (os.getenv(ENABLE_VAR) or "").strip() not in ("", "0", "false", "no")
+    return (os.getenv(ENABLE_VAR) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def choose_transport(db: Session) -> TransportChoice:
@@ -82,9 +82,31 @@ def sync_once(
     if choice.transport is None:
         return {"ran": False, "mode": choice.mode, "reason": choice.reason}
 
-    result: SyncResult = run_sync(
-        db, choice.transport, device_label=device_label, force_publish=force_publish
-    )
+    from src.services import device_sync_health
+    try:
+        result: SyncResult = run_sync(
+            db, choice.transport, device_label=device_label, force_publish=force_publish
+        )
+    except Exception:
+        db.rollback()
+        device_sync_health.record(db, successful=False)
+        raise
     summary = {"ran": True, "mode": choice.mode, "transport": choice.transport.describe()}
     summary.update(result.as_dict())
+    problem = convergence_problem(summary)
+    device_sync_health.record(db, successful=problem is None, problem=problem)
     return summary
+
+
+def convergence_problem(result: dict) -> str | None:
+    """A completed request is not proof that peer records converged."""
+    if not result.get("ran") or result.get("error") or result.get("peers_failed"):
+        return "Device sync did not complete. Check Google Drive and try again."
+    reports = list((result.get("merges") or {}).values())
+    if any(report.get("awaiting_consent") for report in reports):
+        return "Review the first device merge in Settings before these devices can converge."
+    if any(report.get("fact_conflicts") or report.get("rename_conflicts") for report in reports):
+        return "Some device records conflict and need review. No conflicting financial facts were overwritten."
+    if any(report.get("unresolved") for report in reports):
+        return "Some device links could not be resolved. Sync again after reviewing the peer devices."
+    return None

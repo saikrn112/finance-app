@@ -47,7 +47,7 @@ public struct BackendEnvironment: Sendable {
             // A minimal PATH. The backend shells out to nothing, but a completely
             // empty PATH makes any future subprocess fail in a puzzling way.
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+            "HOME": mode == "demo" ? layout.supportDirectory.path : FileManager.default.homeDirectoryForCurrentUser.path,
             "LANG": "en_US.UTF-8",
             // Unbuffered, so a crash traceback reaches the log file instead of dying
             // in a pipe buffer -- the difference between a diagnosable failure and

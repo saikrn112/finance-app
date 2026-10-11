@@ -207,3 +207,28 @@ class TestRawTransaction:
         assert txn.amount == Decimal("-99.99")
         assert txn.merchant_raw == "MERCHANT NAME"
         assert txn.account_last4 == "1234"
+
+
+def test_charge_card_refund_becomes_positive_ledger_credit(tmp_path):
+    path = tmp_path / 'synthetic.csv'
+    path.write_text('Date,Amount,Description\n02/01/2026,45,Synthetic purchase\n02/02/2026,-10,Synthetic refund\n')
+    rows = list(parse_csv(path, 'example_charge_card', strict=True))
+    assert [row.amount for row in rows] == [Decimal('-45'), Decimal('10')]
+
+
+def test_strict_preview_rejects_malformed_or_nonfinite_money(tmp_path):
+    for amount in ['not-a-number', 'NaN', 'Infinity']:
+        path = tmp_path / 'synthetic.csv'
+        path.write_text(f'Date,Amount,Description\n02/01/2026,{amount},Synthetic shop\n')
+        with pytest.raises(ValueError, match='CSV row 2'):
+            list(parse_csv(path, 'example_charge_card', strict=True))
+
+
+def test_csv_account_column_keeps_identical_charges_on_distinct_accounts(tmp_path, monkeypatch):
+    from src.plugins.registry import get_csv_config
+    monkeypatch.setattr(get_csv_config('example_bank'), 'account_col', 'Account')
+    path = tmp_path / 'synthetic.csv'
+    path.write_text('Date,Amount,Description,Account\n02/01/2026,-10,Synthetic shop,1001\n02/01/2026,-10,Synthetic shop,1002\n')
+    rows = list(parse_csv(path, 'example_bank', strict=True))
+    assert [row.account_last4 for row in rows] == ['1001', '1002']
+    assert rows[0].source_id != rows[1].source_id

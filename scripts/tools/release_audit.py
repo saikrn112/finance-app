@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import urllib.error
@@ -18,6 +19,17 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PROD_DB = REPO_ROOT / "data" / "runtime" / "prod" / "finances.db"
 DEFAULT_REPLAY_DB = REPO_ROOT / "data" / "runtime" / "replay" / "finances-replay.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+
+
+def _read_only_database(path: Path):
+    if not path.is_file():
+        raise FileNotFoundError(f"Audit database does not exist: {path}")
+    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+
+
+def _local_headers():
+    token = os.environ.get("FINANCE_APP_LOCAL_TOKEN")
+    return {"x-finance-token": token} if token else {}
 
 
 def first_existing(*paths: Path) -> Path:
@@ -47,7 +59,7 @@ def multipart_post(url: str, *, fields: dict[str, str], file_field: str, file_pa
     req = urllib.request.Request(
         url,
         data=b"".join(body_parts),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **_local_headers()},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=90) as resp:
@@ -62,7 +74,7 @@ def _print_result(name: str, ok: bool, details: dict) -> bool:
 
 
 def fetch_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=90) as resp:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=_local_headers()), timeout=90) as resp:
         return json.loads(resp.read())
 
 
@@ -174,8 +186,8 @@ def _payslip_sort_key(payslip: dict) -> tuple[str, str]:
     return (raw, raw)
 
 
-def run_payroll_integrity(base_url: str, tolerance: float = 1e-6) -> bool:
-    payload = fetch_json(f"{base_url.rstrip('/')}/api/payslips/")
+def run_payroll_integrity(base_url: str, tolerance: float = 1e-6, currency: str = "USD") -> bool:
+    payload = fetch_json(f"{base_url.rstrip('/')}/api/payslips/?currency={currency}")
     payslips = payload.get("payslips") or []
     failures: list[dict] = []
     ytd_failures: list[dict] = []
@@ -283,7 +295,7 @@ def run_payroll_integrity(base_url: str, tolerance: float = 1e-6) -> bool:
 
 
 def _load_monthly_totals(db_path: Path) -> dict[tuple[str, str], tuple[int, float]]:
-    conn = sqlite3.connect(db_path)
+    conn = _read_only_database(db_path)
     try:
         rows = conn.execute(
             """
@@ -303,7 +315,7 @@ def _load_monthly_totals(db_path: Path) -> dict[tuple[str, str], tuple[int, floa
 
 
 def _load_source_totals(db_path: Path) -> dict[str, tuple[int, float]]:
-    conn = sqlite3.connect(db_path)
+    conn = _read_only_database(db_path)
     try:
         rows = conn.execute(
             """
@@ -350,7 +362,7 @@ def run_parity(prod_db: Path, replay_db: Path) -> bool:
 
 
 def run_integrity(db_path: Path) -> bool:
-    conn = sqlite3.connect(db_path)
+    conn = _read_only_database(db_path)
     conn.row_factory = sqlite3.Row
     try:
         duplicate_source_ids = [
@@ -444,6 +456,7 @@ def main() -> int:
     parser_payroll = subparsers.add_parser("payroll-integrity")
     parser_payroll.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser_payroll.add_argument("--tolerance", type=float, default=1e-6)
+    parser_payroll.add_argument("--currency", default="USD")
 
     args = parser.parse_args()
 
@@ -454,7 +467,7 @@ def main() -> int:
     if args.command == "integrity":
         return 0 if run_integrity(args.db) else 1
     if args.command == "payroll-integrity":
-        return 0 if run_payroll_integrity(args.base_url, args.tolerance) else 1
+        return 0 if run_payroll_integrity(args.base_url, args.tolerance, args.currency) else 1
     if args.command == "all":
         ok = True
         ok = run_parser_regression(args.base_url) and ok

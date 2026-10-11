@@ -38,7 +38,7 @@ async function applyPlatformClass(page: Page) {
   await page.addInitScript(() => {
     const apply = () => {
       document.documentElement.classList.add('platform-macos')
-      document.documentElement.style.setProperty('--titlebar-height', '28px')
+      document.documentElement.style.setProperty('--titlebar-height', '0px')
     }
     if (document.documentElement) apply()
     else document.addEventListener('readystatechange', apply, { once: true })

@@ -1,6 +1,6 @@
 """Balance reconciliation — replay transactions against known balances."""
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from decimal import Decimal
 from collections import defaultdict
 
 from src.models import Transaction, Balance
@@ -15,11 +15,12 @@ def reconcile(db: Session, rate_map: dict[str, float] | None = None) -> dict:
     def _convert(txn: Transaction) -> float:
         raw = float(txn._amount)
         txn_currency = getattr(txn, "currency", None) or "USD"
-        rate = rate_map.get(txn_currency, 1.0)
-        return raw * rate
+        if txn_currency not in rate_map:
+            raise ValueError(f"No exchange rate available for {txn_currency}")
+        return raw * rate_map[txn_currency]
 
     # Get all transactions grouped by source
-    txns = db.query(Transaction).order_by(Transaction.date).all()
+    txns = db.query(Transaction).filter(Transaction.pending.is_(False)).order_by(Transaction.date).all()
 
     # Get known balances
     balances = db.query(Balance).order_by(Balance.date).all()
@@ -27,28 +28,30 @@ def reconcile(db: Session, rate_map: dict[str, float] | None = None) -> dict:
     for b in balances:
         balance_map[b.source].append({
             "date": b.date.isoformat(),
-            "balance": float(b.balance),
+            "balance": float(b.balance * Decimal(str(rate_map[b.currency]))) if b.currency in rate_map else None,
+            "observed_currency": b.currency,
+            "currency_verified": b.currency in rate_map,
+            "account_last4": b.account_last4,
             "type": b.balance_type,
         })
 
-    # Primary bank reconciliation — find the primary bank account source
-    # Use the first non-credit-card financial_accounts source as the "bank" source
     all_sources = get_all_sources()
-    bank_source_label = ""  # determined from registry
-    for p in all_sources.values():
-        if p.domain == "financial_accounts" and not p.is_credit_card:
-            bank_source_label = p.label
-            break
-
-    bank = _reconcile_bank(txns, balance_map.get(bank_source_label, []), bank_source_label, _convert)
+    bank_labels = [p.label for p in all_sources.values()
+                   if p.domain == "financial_accounts" and not p.is_credit_card]
+    banks = {label: _reconcile_bank(txns, balance_map.get(label, []), label, _convert)
+             for label in bank_labels}
+    bank_source_label = bank_labels[0] if bank_labels else ""
+    bank = banks.get(bank_source_label, _reconcile_bank([], [], "", _convert))
 
     # Per credit card reconciliation — use registry
     cc_labels = get_credit_card_sources()
     credit_cards = {}
     for cc in cc_labels:
-        credit_cards[cc] = _reconcile_cc(txns, cc, bank_source_label, _convert)
+        credit_cards[cc] = _reconcile_cc(txns, cc, bank_labels, _convert)
 
-    return {"bank": bank, "credit_cards": credit_cards}
+    return {"bank": bank, "banks": banks, "credit_cards": credit_cards,
+            "verification_method": "cumulative_posted_activity",
+            "statement_verified": False}
 
 
 def _reconcile_bank(txns: list, known_balances: list, bank_source: str = "", convert=None) -> dict:
@@ -104,7 +107,7 @@ def _reconcile_cc(txns: list, cc_source: str, bank_source: str = "", convert=Non
     # where sub could be the full name, a short alias, or partial match
     bank_payments = 0.0
     for t in txns:
-        if t.source != bank_source:
+        if t.source not in (bank_source if isinstance(bank_source, list) else [bank_source]):
             continue
         category = t.category or ""
         if not category.startswith("Credit Card/"):

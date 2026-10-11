@@ -88,11 +88,17 @@ class GeminiCategorizer:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self._model = None
+        self._unavailable = False
     
     @property
     def model(self):
-        if self._model is None and self.api_key:
-            import google.generativeai as genai
+        if self._model is None and self.api_key and not self._unavailable:
+            try:
+                import google.generativeai as genai
+            except ImportError:
+                self._unavailable = True
+                logger.warning("AI categorization is unavailable in this build; using local rules.")
+                return None
             genai.configure(api_key=self.api_key)
             self._model = genai.GenerativeModel("gemini-1.5-flash")
         return self._model

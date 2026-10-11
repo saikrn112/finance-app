@@ -549,3 +549,19 @@ body {
 /* Hide lightweight-charts watermark */
 [class*="apply-common-tooltip"] { display: none !important; }
 a[href*="tradingview"] { display: none !important; }
+
+/* Settings keep one focused section on screen while preserving in-progress forms. */
+.settings-dialog { overflow: hidden; }
+.settings-header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border-soft); }
+.settings-layout { display: grid; grid-template-columns: 160px minmax(0, 1fr); height: min(620px, 75vh); }
+.settings-navigation { padding: 0.75rem; background: var(--surface-secondary); border-right: 1px solid var(--border-soft); }
+.settings-navigation button { display: block; width: 100%; text-align: left; padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.25rem; color: var(--text-secondary); }
+.settings-navigation button:hover { background: var(--hover-bg); }
+.settings-navigation button[aria-current="page"] { background: var(--active-bg); color: var(--text-primary); font-weight: 600; }
+.settings-content { min-width: 0; padding: 1.25rem; overflow: auto; }
+.settings-content section[hidden] { display: none; }
+@media (max-width: 600px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-navigation { display: flex; flex-wrap: wrap; gap: 0.25rem; border-right: 0; border-bottom: 1px solid var(--border-soft); }
+  .settings-navigation button { width: auto; margin: 0; padding: 0.4rem 0.6rem; }
+}

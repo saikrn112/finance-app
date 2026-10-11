@@ -205,3 +205,101 @@ html.platform-macos textarea {
   -webkit-user-select: auto;
   user-select: auto;
 }
+
+/* Neutral macOS surfaces; financial meaning retains its semantic colour. */
+html.platform-macos {
+  color-scheme: light;
+  --neutral-50: #fafafa;
+  --neutral-100: #f2f2f4;
+  --neutral-200: #e5e5e8;
+  --neutral-300: #ceced2;
+  --neutral-400: #9a9aa0;
+  --neutral-500: #77777e;
+  --neutral-600: #626268;
+  --neutral-700: #48484e;
+  --neutral-800: #343439;
+  --neutral-900: #232327;
+  --neutral-950: #17171a;
+  --surface-page: #f5f5f7;
+  --surface-primary: #ffffff;
+  --surface-secondary: #f0f0f3;
+  --surface-elevated: #ffffff;
+  --border-default: #d8d8dd;
+  --border-soft: #e5e5e9;
+  --border-strong: #b7b7bf;
+  --text-primary: #202024;
+  --text-secondary: #505056;
+  --text-muted: #686870;
+  --hover-bg: #ebebef;
+  --active-bg: #dedee4;
+  --focus-ring: AccentColor;
+  --color-info: #0066cc;
+  --color-info-bg: rgb(0 102 204 / 8%);
+  --chart-bg: var(--surface-primary);
+  --chart-grid: var(--border-soft);
+  --chart-text: var(--text-muted);
+  --chart-bar-track: var(--surface-secondary);
+  --chart-tooltip-bg: var(--surface-elevated);
+  --chart-tooltip-border: var(--border-default);
+  --input-bg: var(--surface-primary);
+  --input-border: var(--border-default);
+  --input-border-focus: AccentColor;
+  --input-text: var(--text-primary);
+  --input-placeholder: var(--text-muted);
+  --sidebar-bg: var(--surface-secondary);
+  --sidebar-border: var(--border-soft);
+  --sidebar-hover: var(--hover-bg);
+  --sidebar-selected: var(--active-bg);
+  --sidebar-text: var(--text-primary);
+  --sidebar-text-muted: var(--text-muted);
+  --grid-bg: var(--surface-primary);
+  --grid-header-bg: var(--surface-secondary);
+  --grid-row-hover: var(--hover-bg);
+  --grid-row-selected: var(--active-bg);
+  --grid-border: var(--border-soft);
+  --grid-text: var(--text-primary);
+  --grid-text-secondary: var(--text-secondary);
+  --btn-primary-bg: AccentColor;
+  --btn-primary-text: AccentColorText;
+  --btn-primary-hover: color-mix(in srgb, AccentColor 88%, black);
+  --btn-secondary-text: var(--text-primary);
+  --btn-secondary-hover: var(--hover-bg);
+  --shadow-color: rgb(0 0 0 / 8%);
+}
+html.platform-macos.dark {
+  color-scheme: dark;
+  --neutral-50: #f6f6f7;
+  --neutral-100: #ededf0;
+  --neutral-200: #d8d8de;
+  --neutral-300: #bcbcc4;
+  --neutral-400: #a3a3ad;
+  --neutral-500: #777781;
+  --neutral-600: #55555d;
+  --neutral-700: #3a3a40;
+  --neutral-800: #2b2b30;
+  --neutral-900: #232327;
+  --neutral-950: #1c1c1f;
+  --surface-page: #1e1e21;
+  --surface-primary: #28282c;
+  --surface-secondary: #323237;
+  --surface-elevated: #36363c;
+  --border-default: #44444b;
+  --border-soft: #36363c;
+  --border-strong: #60606a;
+  --text-primary: #efeff2;
+  --text-secondary: #c4c4cd;
+  --text-muted: #a3a3ad;
+  --hover-bg: #3b3b42;
+  --active-bg: #494951;
+  --color-info: #64acff;
+  --color-info-bg: rgb(100 172 255 / 12%);
+}
+html.platform-macos .settings-dialog { max-width: 760px; }
+html.platform-macos .settings-header { padding: 0.75rem 1rem; }
+html.platform-macos .settings-content { padding: 1rem; }
+html.platform-macos .settings-navigation { padding: 0.5rem; }
+html.platform-macos .settings-navigation button { padding: 0.45rem 0.65rem; }
+html.platform-macos .settings-navigation button[aria-current="page"] {
+  background: AccentColor;
+  color: AccentColorText;
+}

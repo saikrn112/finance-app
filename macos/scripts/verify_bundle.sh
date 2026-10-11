@@ -42,7 +42,7 @@ if [ -f "$REPO_ROOT/frontend/dist/index.html" ] \
 fi
 
 rm -rf "$VERIFY_DIR"
-mkdir -p "$VERIFY_DIR/data/runtime/prod"
+mkdir -p "$VERIFY_DIR/data/runtime/prod" "$VERIFY_DIR/home"
 
 PY="$BACKEND/python/bin/python3"
 PORT="$("$PY" -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
@@ -62,9 +62,10 @@ MODE="${FINANCE_APP_MODE:-demo}"
 log "starting the bundled backend on 127.0.0.1:$PORT (mode: $MODE)"
 env -i \
   PATH=/usr/bin:/bin \
-  HOME="$HOME" \
+  HOME="$VERIFY_DIR/home" \
   LANG=en_US.UTF-8 \
   PYTHONUNBUFFERED=1 \
+  FINANCE_APP_DISABLE_AUTO_TASKS=1 \
   FINANCE_APP_MODE="$MODE" \
   FINANCE_APP_HOST=127.0.0.1 \
   FINANCE_APP_PORT="$PORT" \

@@ -49,6 +49,10 @@ class Transaction(Base):
     currency = Column(String(3), default="USD", nullable=False)
     pending = Column(Boolean, default=False, nullable=False)
     pending_transaction_id = Column(String)
+    # Causal provider revisions and durable identity/matching claims; no credentials.
+    provider_revision = Column(JSON)
+    identity_aliases = Column(JSON, default=list)
+    reconciled_ids = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -160,7 +164,10 @@ class Balance(Base):
     date = Column(Date, nullable=False)
     balance = Column(Numeric(10, 2), nullable=False)
     balance_type = Column(String)  # "opening", "closing", "statement"
+    currency = Column(String(3))  # NULL means the historical observation's currency is unknown.
+    account_last4 = Column(String(4))
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_balance_source_date", "source", "date"),

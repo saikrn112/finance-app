@@ -37,16 +37,20 @@ class TxnView:
     date: date
     amount: float
     merchant_raw: str
+    currency: str = "USD"
+    account_key: str | None = None
+    rate: float = 1.0
 
 
 def audit_source_overlaps(db: Session, source: str, window_days: int = 3, rate_map: dict[str, float] | None = None) -> dict:
     rows = db.query(Transaction).filter(Transaction.source == source).order_by(Transaction.date, Transaction.id).all()
 
-    # Determine the source currency for output conversion
-    source_currency = "USD"
-    if rows:
-        source_currency = getattr(rows[0], "currency", None) or "USD"
-    output_rate = (rate_map or {}).get(source_currency, 1.0)
+    def rate_for(currency: str) -> float:
+        if rate_map is None:
+            return 1.0
+        if currency not in rate_map:
+            raise ValueError(f"No exchange rate available for {currency}")
+        return rate_map[currency]
 
     txns = [
         TxnView(
@@ -57,6 +61,9 @@ def audit_source_overlaps(db: Session, source: str, window_days: int = 3, rate_m
             date=row.date,
             amount=float(row._amount),
             merchant_raw=row.merchant_raw,
+            currency=row.currency,
+            account_key=row.account_last4 or row.plaid_mask or row.plaid_account_id,
+            rate=rate_for(row.currency),
         )
         for row in rows
     ]
@@ -68,25 +75,22 @@ def audit_source_overlaps(db: Session, source: str, window_days: int = 3, rate_m
     cross_source_matches = _match_cross_origin(statement_txns, plaid_txns, window_days)
     plaid_duplicate_matches = _match_plaid_duplicates(plaid_txns, window_days)
 
-    def _conv(value: float) -> float:
-        return round(value * output_rate, 2)
-
     return {
         "source": source,
-        "db_balance": _conv(sum(txn.amount for txn in txns)),
-        "statement_balance": _conv(sum(txn.amount for txn in statement_txns)),
-        "plaid_balance_component": _conv(sum(txn.amount for txn in plaid_txns)),
+        "db_balance": round(sum(txn.amount * txn.rate for txn in txns), 2),
+        "statement_balance": round(sum(txn.amount * txn.rate for txn in statement_txns), 2),
+        "plaid_balance_component": round(sum(txn.amount * txn.rate for txn in plaid_txns), 2),
         "latest_statement_date": latest_statement_date.isoformat() if latest_statement_date else None,
-        "post_statement_plaid_total": _conv(
+        "post_statement_plaid_total": round(
             sum(
-                txn.amount
+                txn.amount * txn.rate
                 for txn in plaid_txns
                 if latest_statement_date and txn.date > latest_statement_date
-            ),
+            ), 2,
         ) if latest_statement_date else None,
-        "cross_source_overlap_total": _conv(sum(abs(match["amount"]) for match in cross_source_matches)),
+        "cross_source_overlap_total": round(sum(abs(match["amount"]) for match in cross_source_matches), 2),
         "cross_source_overlaps": cross_source_matches,
-        "plaid_duplicate_total": _conv(sum(abs(match["amount"]) for match in plaid_duplicate_matches)),
+        "plaid_duplicate_total": round(sum(abs(match["amount"]) for match in plaid_duplicate_matches), 2),
         "plaid_duplicates": plaid_duplicate_matches,
     }
 
@@ -106,7 +110,7 @@ def _match_cross_origin(statement_txns: list[TxnView], plaid_txns: list[TxnView]
     candidates = []
     for statement in statement_txns:
         for plaid in plaid_txns:
-            if not _amounts_match(statement.amount, plaid.amount):
+            if not _compatible(statement, plaid) or not _amounts_match(statement.amount, plaid.amount):
                 continue
             date_diff = abs((statement.date - plaid.date).days)
             if date_diff > window_days:
@@ -134,7 +138,7 @@ def _match_plaid_duplicates(plaid_txns: list[TxnView], window_days: int) -> list
         for right in plaid_txns[idx + 1 :]:
             if left.amount >= 0 and right.amount >= 0:
                 continue
-            if not _amounts_match(left.amount, right.amount):
+            if not _compatible(left, right) or not _amounts_match(left.amount, right.amount):
                 continue
             date_diff = abs((left.date - right.date).days)
             if date_diff > window_days:
@@ -155,14 +159,16 @@ def _match_plaid_duplicates(plaid_txns: list[TxnView], window_days: int) -> list
 
 def _format_match(left: TxnView, right: TxnView) -> dict:
     return {
-        "amount": round(left.amount, 2),
+        "amount": round(left.amount * left.rate, 2),
+        "candidate_only": True,
+        "account_key": left.account_key,
         "date_diff_days": abs((left.date - right.date).days),
         "left": {
             "id": left.id,
             "source_id": left.source_id,
             "origin": left.origin,
             "date": left.date.isoformat(),
-            "amount": round(left.amount, 2),
+            "amount": round(left.amount * left.rate, 2),
             "merchant_raw": left.merchant_raw,
         },
         "right": {
@@ -170,14 +176,20 @@ def _format_match(left: TxnView, right: TxnView) -> dict:
             "source_id": right.source_id,
             "origin": right.origin,
             "date": right.date.isoformat(),
-            "amount": round(right.amount, 2),
+            "amount": round(right.amount * right.rate, 2),
             "merchant_raw": right.merchant_raw,
         },
     }
 
 
+def _compatible(left: TxnView, right: TxnView) -> bool:
+    # Unknown account identity is reviewable evidence, never a duplicate assertion.
+    return bool(left.account_key and right.account_key
+                and left.account_key == right.account_key and left.currency == right.currency)
+
+
 def _amounts_match(left: float, right: float) -> bool:
-    return round(abs(left), 2) == round(abs(right), 2)
+    return round(left, 2) == round(right, 2)
 
 
 def _merchant_matches(left: str, right: str) -> bool:

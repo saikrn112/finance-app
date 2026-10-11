@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, BadgeDollarSign, CalendarRange, Clock3, Landmark, TrendingUp } from 'lucide-react'
+import { BadgeDollarSign, CalendarRange, Clock3, Landmark, TrendingUp } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { AgGridReact } from 'ag-grid-react'
 import { AllCommunityModule, ModuleRegistry, type ColDef, type SortDirection } from 'ag-grid-community'
@@ -145,7 +145,7 @@ function safeRatio(numerator: number, denominator: number) {
 }
 
 function numericValue(value: number | null | undefined) {
-  return Number.isFinite(value) ? value : 0
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
 function sumSelected(entries: Record<string, number>, keys: Set<string>) {
@@ -252,10 +252,7 @@ export function PayslipPage({ onBack }: { onBack: () => void }) {
     )
   }, [payslips, selectedPayslip])
 
-  const employerYearGross = employerYearPayslips.reduce((sum, item) => sum + numericValue(item.gross), 0)
   const employerYearNet = employerYearPayslips.reduce((sum, item) => sum + numericValue(item.net), 0)
-  const employerYearTaxes = employerYearPayslips.reduce((sum, item) => sum + numericValue(item.total_taxes), 0)
-  const employerYearDeductions = employerYearPayslips.reduce((sum, item) => sum + numericValue(item.total_deductions), 0)
 
   const currentTakeHome = safeRatio(selectedPayslip?.net || 0, selectedPayslip?.gross || 0)
   const currentTaxRate = safeRatio(selectedPayslip?.total_taxes || 0, selectedPayslip?.gross || 0)
@@ -801,7 +798,7 @@ export function PayslipPage({ onBack }: { onBack: () => void }) {
           </div>
           <div className="grid gap-4 xl:grid-cols-3">
             {employerComparison.map((item) => (
-              <EmployerSummaryCard key={item.employer} item={item} formatAmount={fmt} />
+              <EmployerSummaryCard key={item.employer} item={item} formatAmount={fmt} privacyMode={privacyMode} />
             ))}
           </div>
         </section>
@@ -950,9 +947,11 @@ function Chip({ label, tone = 'slate' }: { label: string; tone?: 'blue' | 'slate
 function EmployerSummaryCard({
   item,
   formatAmount,
+  privacyMode,
 }: {
   item: { employer: string; rows: number; gross: number; net: number; taxes: number; deductions: number }
   formatAmount: (value: number) => string
+  privacyMode: boolean
 }) {
   const chartData = [
     { label: 'Net', amount: item.net, color: '#22c55e' },
@@ -964,7 +963,7 @@ function EmployerSummaryCard({
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <h3 className="font-medium">{item.employer}</h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400">{formatCount(item.rows)} payslips</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">{formatCount(item.rows, privacyMode)} payslips</p>
         </div>
         <div className="text-right">
           <div className="text-xs text-slate-500 dark:text-slate-400">Gross total</div>
@@ -1046,8 +1045,8 @@ function PayrollTrendChart({
     chartApiRef.current = chart
 
     const seriesDefs = [
-      { key: 'gross', color: '#3b82f6', width: 2.5 },
-      { key: 'net', color: '#22c55e', width: 2.5 },
+      { key: 'gross', color: '#3b82f6', width: 3 },
+      { key: 'net', color: '#22c55e', width: 3 },
       { key: 'taxes', color: '#fb7185', width: 2 },
       { key: 'benefits', color: '#fbbf24', width: 2 },
       { key: 'retirement', color: '#6b7280', width: 2 },

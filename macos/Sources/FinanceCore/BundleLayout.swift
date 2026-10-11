@@ -90,6 +90,12 @@ public struct BundleLayout: Sendable {
             // `swift run` has no bundle Resources dir; fall back to the executable's
             // directory so the shell is debuggable outside a bundle.
             ?? bundle.bundleURL.appending(path: "Contents/Resources")
+        if bundle.object(forInfoDictionaryKey: "FinanceDemo") as? Bool == true {
+            let root = fileManager.temporaryDirectory.appending(path: "FinanceAppDemo")
+            return BundleLayout(resourcesDirectory: resources,
+                                supportDirectory: root.appending(path: "support"),
+                                logDirectory: root.appending(path: "logs"))
+        }
         let support = fileManager
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appending(path: applicationName)

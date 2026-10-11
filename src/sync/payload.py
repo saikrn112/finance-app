@@ -32,7 +32,8 @@ from src.sync.refs import RefResolver
 
 logger = logging.getLogger(__name__)
 
-FORMAT_VERSION = 1
+# Revision/retired-identity semantics must not be silently ignored by an older writer.
+FORMAT_VERSION = 2
 
 #: Tables that must never appear in a payload, and why. Checked, not just documented.
 FORBIDDEN_TABLES = {
@@ -82,7 +83,7 @@ def build_payload(
             _kind, ref = described
             record: dict[str, Any] = {
                 "ref": ref,
-                "updated_at": coding.datetime_to_wire(getattr(instance, "updated_at", None)),
+                "updated_at": coding.edit_datetime_to_wire(getattr(instance, "updated_at", None)),
             }
             for field in spec.all_fields:
                 record[field.name] = field.to_wire(getattr(instance, field.attribute, None))
@@ -96,7 +97,7 @@ def build_payload(
         {
             "kind": row.kind,
             "ref": row.ref,
-            "deleted_at": coding.datetime_to_wire(row.deleted_at),
+            "deleted_at": coding.edit_datetime_to_wire(row.deleted_at),
         }
         for row in db.query(Tombstone).all()
     ]

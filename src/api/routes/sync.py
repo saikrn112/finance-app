@@ -1227,6 +1227,39 @@ def sync_plaid(db: Session = Depends(get_db)):
         return _sync_plaid_locked(db)
 
 
+def _collect_plaid_transaction_patch(db: Session, log: SyncLog, access_token: str, institution: str) -> dict:
+    """Collect one consistent pagination patch before changing financial history.
+
+    Pending removal and its posted replacement can arrive on different pages. A mutation
+    invalidates every page in that attempt, so retry from the original committed cursor.
+    Telemetry is committed separately and no write transaction crosses a provider call.
+    """
+    original_cursor = log.plaid_cursor
+    for attempt in range(3):
+        cursor = original_cursor
+        patch = {"added": [], "modified": [], "removed": [], "cursor": cursor}
+        while True:
+            db.commit()
+            try:
+                page = sync_transactions(access_token, cursor)
+            except Exception as exc:
+                if _plaid_sync_error_payload(exc).get("code") == "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION" and attempt < 2:
+                    break
+                raise
+            record_plaid_usage(db, endpoint="transactions_sync", institution=institution,
+                               plaid_item_id=log.plaid_item_id)
+            for key in ("added", "modified", "removed"):
+                patch[key].extend(page.get(key) or [])
+            next_cursor = page["cursor"]
+            patch["cursor"] = next_cursor
+            if not page["has_more"]:
+                return patch
+            if next_cursor == cursor:
+                raise ValueError("Plaid pagination cursor did not advance")
+            cursor = next_cursor
+    raise RuntimeError("Plaid pagination could not produce a consistent patch")
+
+
 def _sync_plaid_locked(db: Session):
     logs = _connected_plaid_logs(db)
     
@@ -1267,46 +1300,21 @@ def _sync_plaid_locked(db: Session):
         }
         
         try:
-          cursor = log.plaid_cursor
-          has_more = True
+          result = _collect_plaid_transaction_patch(db, log, access_token, institution)
           destination = _plaid_activity_destination(log)
-          while has_more:
-              # Release the write lock before every network round-trip. Usage telemetry and
-              # the previous page's rows leave this session dirty, and holding SQLite's
-              # single writer across a multi-second Plaid call is what made concurrent
-              # requests fail with "database is locked".
-              db.commit()
-              result = sync_transactions(access_token, cursor)
-              record_plaid_usage(
-                  db,
-                  endpoint="transactions_sync",
-                  institution=institution,
-                  plaid_item_id=log.plaid_item_id,
-              )
-              if destination == "account_activity":
-                  counts = apply_account_activity_batch(
-                      db=db,
-                      institution=institution,
-                      added=result["added"],
-                      modified=result.get("modified", []),
-                      removed=result.get("removed", []),
-                  )
-              else:
-                  counts = apply_plaid_sync_batch(
-                      db=db,
-                      institution=institution,
-                      added=result["added"],
-                      modified=result.get("modified", []),
-                      removed=result.get("removed", []),
-                      matcher=matcher,
-                  )
-              for key, value in counts.as_dict().items():
-                  total_counts[key] = total_counts.get(key, 0) + value
-                  account_counts[key] = account_counts.get(key, 0) + value
-              cursor = result["cursor"]
-              has_more = result["has_more"]
-              log.plaid_cursor = cursor
-              db.commit()
+          apply_batch = apply_account_activity_batch if destination == "account_activity" else apply_plaid_sync_batch
+          kwargs = {"db": db, "institution": institution, "added": result["added"],
+                    "modified": result["modified"], "removed": result["removed"]}
+          if destination != "account_activity":
+              kwargs["matcher"] = matcher
+          counts = apply_batch(**kwargs)
+          for key, value in counts.as_dict().items():
+              total_counts[key] = total_counts.get(key, 0) + value
+              account_counts[key] = account_counts.get(key, 0) + value
+          cursor = result["cursor"]
+          log.plaid_cursor = cursor
+          # The complete financial patch and final cursor advance commit together.
+          db.commit()
           extra_data = dict(log.extra_data or {})
           plugin = get_all_sources().get(classify_source(institution))
           if plugin and plugin.domain == "investments" and _item_supports_investments(log):

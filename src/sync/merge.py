@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 
 from src.sync import coding, refs, schema
 from src.sync.tracking import pause_tombstones, record_tombstone, resume_tombstones
+from src.sync import provider_facts
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class MergeReport:
     rename_conflicts: int = 0
     deletions_applied: int = 0
     uid_converged: int = 0
+    fact_conflicts: dict[str, int] = field(default_factory=dict)
     watermark: datetime | None = None
 
     def _bump(self, bucket: dict[str, int], table: str) -> None:
@@ -74,6 +76,7 @@ class MergeReport:
             "rename_conflicts": self.rename_conflicts,
             "deletions_applied": self.deletions_applied,
             "uid_converged": self.uid_converged,
+            "fact_conflicts": self.fact_conflicts,
             "watermark": coding.datetime_to_wire(self.watermark),
         }
 
@@ -105,6 +108,7 @@ def merge_payload(db: Session, payload: dict[str, Any], *, dry_run: bool = False
     # `deleted_at` with our clock and make the same deletion look different on each device.
     pause_tombstones()
     try:
+        _adopt_transaction_identities(db, (payload.get("records") or {}).get("transactions") or [], report)
         _apply_tombstones(db, payload.get("tombstones") or [], report)
         deleted = _local_tombstones(db)
 
@@ -151,10 +155,11 @@ def _apply_tombstones(db: Session, tombstones: list[dict], report: MergeReport) 
         if existing is None:
             # Keep the *originating* deleted_at, not now: the timestamp is what orders this against
             # edits, and rewriting it would make the same deletion resolve differently per device.
-            db.add(Tombstone(kind=kind, ref=ref, deleted_at=deleted_at or datetime.utcnow()))
-        elif deleted_at and existing.deleted_at and deleted_at < existing.deleted_at:
-            # Keep the earliest: two devices deleting the same row should converge on one answer,
-            # and "earliest" is computable by both without knowing who went first.
+            existing = Tombstone(kind=kind, ref=ref, deleted_at=deleted_at or datetime.utcnow())
+            db.add(existing)
+        elif deleted_at and existing.deleted_at and deleted_at > existing.deleted_at:
+            # A later deletion also retires a row recreated after an earlier deletion.
+            # Both devices can choose the latest timestamp without depending on merge order.
             existing.deleted_at = deleted_at
 
         spec = schema.BY_KIND.get(kind)
@@ -162,7 +167,7 @@ def _apply_tombstones(db: Session, tombstones: list[dict], report: MergeReport) 
             # An unknown kind from a newer build. Stored above so it still relays, but nothing here
             # knows how to act on it.
             continue
-        if _delete_local(db, spec, ref):
+        if _delete_local(db, spec, ref, existing.deleted_at):
             report.deletions_applied += 1
 
 
@@ -175,10 +180,23 @@ def _local_tombstones(db: Session) -> dict[tuple[str, str], datetime | None]:
     }
 
 
-def _delete_local(db: Session, spec: schema.TableSpec, ref: str) -> bool:
+def _delete_local(db: Session, spec: schema.TableSpec, ref: str, deleted_at: datetime | None = None) -> bool:
     instance = _find_by_ref(db, spec, ref)
     if instance is None:
         return False
+    if deleted_at and instance.updated_at and instance.updated_at > deleted_at:
+        return False  # A legitimate newer recreation survives an older relayed tombstone.
+    # Delete dependent links before their parent, even where SQLite FK enforcement is off.
+    parent_table = instance.__table__
+    for child_spec in schema.TABLES:
+        child = schema.model_for(child_spec)
+        for column in child.__table__.columns:
+            for foreign_key in column.foreign_keys:
+                if foreign_key.column.table is parent_table:
+                    value = getattr(instance, foreign_key.column.name)
+                    for link in db.query(child).filter(getattr(child, column.name) == value).all():
+                        db.delete(link)
+    db.flush()
     db.delete(instance)
     return True
 
@@ -197,6 +215,17 @@ def _apply_record(
     if not ref:
         return
     incoming_at = coding.datetime_from_wire(record.get("updated_at"))
+
+    if spec.name == "transactions":
+        representative = _transaction_representative(db, record.get("source"), record.get("source_id"))
+        if representative is not None:
+            # Retired identities cannot recreate money, even if a stale peer edited one later.
+            # Its newer annotations still belong to the surviving economic event.
+            if _apply_mutable(spec, record, representative, incoming_at):
+                report._bump(report.updated, spec.name)
+            else:
+                report._bump(report.skipped_deleted, spec.name)
+            return
 
     tombstoned_at = deleted.get((spec.kind, ref), _MISSING)
     if tombstoned_at is not _MISSING:
@@ -224,11 +253,117 @@ def _apply_fact(db, spec, record, ref, incoming_at, report) -> None:
         report._bump(report.inserted, spec.name)
         return
 
-    # Present already: the money and the provider's own description are never rewritten by a peer.
-    if _apply_mutable(spec, record, existing, incoming_at):
+    facts_changed = False
+    if spec.name == "transactions":
+        facts_changed = _apply_provider_revision(spec, record, existing, report)
+        for name in ("identity_aliases", "reconciled_ids"):
+            merged = sorted(set(getattr(existing, name) or []) | set(record.get(name) or []))
+            if merged != (getattr(existing, name) or []):
+                setattr(existing, name, merged)
+                facts_changed = True
+    # Money changes only through a verified provider revision; annotations use their own LWW rule.
+    annotation_changed = _apply_mutable(spec, record, existing, incoming_at)
+    if facts_changed and not annotation_changed:
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(existing, "updated_at")
+    if annotation_changed or facts_changed:
         report._bump(report.updated, spec.name)
     else:
         report._bump(report.skipped_older, spec.name)
+
+
+def _transaction_representative(db, source, source_id):
+    """A durable alias/one-to-one reconciliation claim, scoped to an institution."""
+    from sqlalchemy import exists, func, literal, or_, select
+    from src.models import Transaction
+    if not source or not source_id:
+        return None
+    aliases = func.json_each(Transaction.identity_aliases).table_valued("value")
+    claims = func.json_each(Transaction.reconciled_ids).table_valued("value")
+    return db.query(Transaction).filter(
+        Transaction.source == source,
+        Transaction.source_id != source_id,
+        or_(exists(select(literal(1)).select_from(aliases).where(aliases.c.value == source_id)),
+            exists(select(literal(1)).select_from(claims).where(claims.c.value == source_id))),
+    ).first()
+
+
+def _apply_provider_revision(spec, record, existing, report) -> bool:
+    revision = record.get("provider_revision")
+    if revision is None:
+        return False  # A legacy peer has no authority to change existing provider facts.
+    if not provider_facts.valid_revision(record):
+        report._bump(report.fact_conflicts, spec.name)
+        return False
+    local_digest = provider_facts.row_digest(existing)
+    if revision["digest"] == local_digest:
+        ancestors = sorted(set((existing.provider_revision or {}).get("ancestors") or []) |
+                           set(revision["ancestors"]))
+        combined = {"provider": "plaid", "digest": local_digest, "ancestors": ancestors}
+        if existing.provider_revision != combined:
+            existing.provider_revision = combined
+            return True
+        return False
+    if existing.origin != "plaid" or local_digest not in revision["ancestors"]:
+        if revision["digest"] not in (existing.provider_revision or {}).get("ancestors", []):
+            report._bump(report.fact_conflicts, spec.name)
+        return False
+    # Preserve the annotation clock: receiving a fact revision is not a local user edit.
+    from sqlalchemy.orm.attributes import flag_modified
+    annotation_at = existing.updated_at
+    for field_spec in spec.immutable:
+        if field_spec.attribute in provider_facts.FIELDS and field_spec.name in record:
+            setattr(existing, field_spec.attribute, field_spec.from_wire(record[field_spec.name]))
+    existing.provider_revision = revision
+    existing.updated_at = annotation_at
+    flag_modified(existing, "updated_at")
+    return True
+
+
+def _adopt_transaction_identities(db, records, report):
+    """Move local parents before applying their old tombstones, retaining all local links."""
+    from src.models import Transaction
+    from src.ingestion.plaid_sync import _transfer_user_attributes, _delete_transaction_links
+    spec = next(spec for spec in schema.TABLES if spec.name == "transactions")
+    for record in records:
+        aliases = record.get("identity_aliases") or []
+        claims = record.get("reconciled_ids") or []
+        if not aliases and not claims:
+            continue
+        current = db.query(Transaction).filter_by(source=record.get("source"), source_id=record.get("source_id")).first()
+        if aliases and not provider_facts.valid_revision(record):
+            report._bump(report.fact_conflicts, spec.name)
+            continue
+        for old_id in aliases:
+            old = db.query(Transaction).filter_by(source=record.get("source"), source_id=old_id, origin="plaid").first()
+            if old is None or old is current:
+                continue
+            if current is None:
+                if not _apply_provider_revision(spec, record, old, report):
+                    continue
+                current = old
+                current.identity_aliases = sorted(set(current.identity_aliases or []) | set(aliases))
+                db.flush()
+                report._bump(report.updated, spec.name)
+            else:
+                _transfer_user_attributes(db, old, current)
+                _delete_transaction_links(db, old.id)
+                db.delete(old)
+                db.flush()
+        if claims and record.get("origin") == "statements":
+            if current is None:
+                current = _construct(spec, record, include_immutable=True)
+                db.add(current)
+                db.flush()
+                report._bump(report.inserted, spec.name)
+            for old_id in claims:
+                old = db.query(Transaction).filter_by(source=current.source, source_id=old_id, origin="plaid").first()
+                if old is not None:
+                    _transfer_user_attributes(db, old, current)
+                    _delete_transaction_links(db, old.id)
+                    db.delete(old)
+            current.reconciled_ids = sorted(set(current.reconciled_ids or []) | set(claims))
+            db.flush()
 
 
 def _apply_owned(db, spec, record, ref, incoming_at, report) -> None:
@@ -334,6 +469,9 @@ def _apply_mutable(
             # here would let an older build erase a column it cannot even see.
             continue
         value = field_spec.from_wire(record.get(field_spec.name))
+        if spec.name == "transactions" and field_spec.name in ("category", "category_source"):
+            if existing.category_source == "user" and record.get("category_source") != "user":
+                continue
 
         if field_spec.name == "name" and spec.behaviour == schema.OWNED:
             if not _rename_is_possible(db, spec_obj or spec, existing, value, report):
@@ -358,7 +496,8 @@ def _content_key(spec: schema.TableSpec, record: dict[str, Any]) -> str:
     """
     import json
 
-    return json.dumps(
+    priority = "1" if spec.name == "transactions" and record.get("category_source") == "user" else "0"
+    return priority + json.dumps(
         {f.name: record.get(f.name) for f in spec.mutable}, sort_keys=True, default=str
     )
 
@@ -371,7 +510,8 @@ def _local_content_key(spec: schema.TableSpec, existing) -> str:
     """
     import json
 
-    return json.dumps(
+    priority = "1" if spec.name == "transactions" and getattr(existing, "category_source", None) == "user" else "0"
+    return priority + json.dumps(
         {f.name: f.to_wire(getattr(existing, f.attribute, None)) for f in spec.mutable},
         sort_keys=True,
         default=str,

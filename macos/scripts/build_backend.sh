@@ -97,6 +97,7 @@ find "$BACKEND_DIR/site-packages" -name '__pycache__' -type d -prune -exec rm -r
 rm -rf "$BACKEND_DIR/site-packages/bin"
 
 bash "$MACOS_DIR/scripts/sync_app_source.sh" "$BACKEND_DIR"
+printf '%s\n' "$DEPENDENCY_FINGERPRINT" > "$BACKEND_DIR/DEPENDENCIES.sha256"
 
 # ------------------------------------------------------------------ manifest --
 {

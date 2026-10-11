@@ -56,6 +56,7 @@ class NormalizedImportTransaction:
     account_last4: str | None = None
     merchant_clean: str | None = None
     origin: str = "csv"
+    currency: str = "USD"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +68,7 @@ class NormalizedImportTransaction:
             "account_last4": self.account_last4,
             "merchant_clean": self.merchant_clean,
             "origin": self.origin,
+            "currency": self.currency,
         }
 
 
@@ -89,6 +91,11 @@ def preview_import(
     existing_log = _find_successful_file_import(db, file_hash)
     parsed = _parse_upload(upload_path, source, resolved_kind)
     transactions = parsed["transactions"]
+    plugin = get_all_sources().get(source)
+    currency = plugin.currency if plugin else "USD"
+    for txn in transactions:
+        txn.currency = currency
+    transactions = _assign_stable_ids(transactions)
     duplicate_summary = _preview_duplicates(
         db,
         transactions,
@@ -100,10 +107,6 @@ def preview_import(
         source=source_meta["label"],
         kind=resolved_kind,
     )
-
-    all_sources = get_all_sources()
-    plugin = all_sources.get(source)
-    currency = plugin.currency if plugin else "USD"
 
     manifest = {
         "import_id": workspace.name,
@@ -156,9 +159,10 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
     if manifest["record_type"] == "transactions":
         matcher = RuleMatcher()
         txns_to_import: list[NormalizedImportTransaction] = []
+        used_ids: set[str] = set()
         for payload in manifest["transactions"]:
             txn = _txn_from_manifest(payload)
-            if _duplicate_reason(db, txn):
+            if _duplicate_reason(db, txn, used_ids=used_ids):
                 skipped += 1
             else:
                 txns_to_import.append(txn)
@@ -467,7 +471,7 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
 def _parse_upload(file_path: Path, source: str, kind: str) -> dict[str, Any]:
     source_meta = _source_meta(source)
     if kind == "csv":
-        parsed = list(parse_csv(file_path, source))
+        parsed = list(parse_csv(file_path, source, strict=True))
         normalized = [
             NormalizedImportTransaction(
                 source=source_meta["label"],
@@ -521,6 +525,7 @@ def _parse_upload(file_path: Path, source: str, kind: str) -> dict[str, Any]:
                     date=date.fromisoformat(txn["date"]),
                     amount=amount,
                     merchant_raw=txn["description"],
+                    account_last4=txn.get("account_last4") or parsed.get("account_last4"),
                     origin="statements",
                 )
             )
@@ -616,7 +621,8 @@ def _assign_stable_ids(txns: list[NormalizedImportTransaction]) -> list[Normaliz
         occurrence = counts[dedup_key]
         counts[dedup_key] += 1
         txn.source_id = hashlib.sha1(
-            f"{txn.source}|{dedup_key[0]}|{dedup_key[1]}|{dedup_key[2]:.2f}|{txn.account_last4 or ''}|{occurrence}".encode("utf-8")
+            (f"{txn.source}|{dedup_key[0]}|{dedup_key[1]}|{dedup_key[2]:.2f}|{txn.account_last4 or ''}|{occurrence}"
+             + (f"|{txn.currency}" if txn.currency != "USD" else "")).encode("utf-8")
         ).hexdigest()[:32]
     return ordered
 
@@ -663,8 +669,9 @@ def _preview_duplicates(
 
     items = []
     duplicate_count = 0
+    used_ids: set[str] = set()
     for txn in txns:
-        reason = _duplicate_reason(db, txn)
+        reason = _duplicate_reason(db, txn, used_ids=used_ids)
         if reason:
             duplicate_count += 1
         items.append({**txn.as_dict(), "duplicate_reason": reason})
@@ -859,12 +866,14 @@ def _preview_investment_duplicates(
     }
 
 
-def _duplicate_reason(db: Session, txn: NormalizedImportTransaction) -> dict[str, Any] | None:
+def _duplicate_reason(db: Session, txn: NormalizedImportTransaction, *, used_ids: set[str] | None = None) -> dict[str, Any] | None:
+    used_ids = used_ids if used_ids is not None else set()
     exact = db.query(Transaction).filter(
         Transaction.source == txn.source,
         Transaction.source_id == txn.source_id,
     ).first()
-    if exact:
+    if exact and exact.currency == txn.currency and exact.account_last4 == txn.account_last4:
+        used_ids.add(exact.id)
         return {
             "type": "source_id",
             "existing_id": exact.id,
@@ -877,10 +886,13 @@ def _duplicate_reason(db: Session, txn: NormalizedImportTransaction) -> dict[str
         Transaction.origin == "statements",
     ).all()
     for existing in legacy_statement:
+        if existing.id in used_ids or existing.currency != txn.currency or existing.account_last4 != txn.account_last4:
+            continue
         if round(float(existing._amount), 2) != round(txn.amount, 2):
             continue
         if not _merchant_matches(existing.merchant_raw, txn.merchant_raw):
             continue
+        used_ids.add(existing.id)
         return {
             "type": "legacy_statement",
             "existing_id": existing.id,
@@ -899,10 +911,15 @@ def _duplicate_reason(db: Session, txn: NormalizedImportTransaction) -> dict[str
         Transaction.origin == "plaid",
     ).all()
     for existing in nearby:
-        if round(abs(float(existing._amount)), 2) != round(abs(txn.amount), 2):
+        if existing.id in used_ids or existing.currency != txn.currency:
+            continue
+        if not txn.account_last4 or existing.account_last4 != txn.account_last4:
+            continue
+        if round(float(existing._amount), 2) != round(txn.amount, 2):
             continue
         if not _merchant_matches(existing.merchant_raw, txn.merchant_raw):
             continue
+        used_ids.add(existing.id)
         return {
             "type": "heuristic",
             "existing_id": existing.id,
@@ -924,6 +941,7 @@ def _txn_from_manifest(payload: dict[str, Any]) -> NormalizedImportTransaction:
         account_last4=payload.get("account_last4"),
         merchant_clean=payload.get("merchant_clean"),
         origin=payload["origin"],
+        currency=payload.get("currency", "USD"),
     )
 
 

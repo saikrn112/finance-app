@@ -532,8 +532,20 @@ class TestDeletions:
         a = device_a()
         try:
             assert a.query(Project).count() == 1
+            recreated_id = a.query(Project).one().id
         finally:
             a.close()
+
+        # An old tombstone travels with each later publication. It must not delete
+        # and recreate the newer parent on every round, stranding child links.
+        for _ in range(3):
+            _sync(device_a, device_b)
+            _sync(device_b, device_a, device_id="dev-b")
+            a = device_a()
+            try:
+                assert a.query(Project).one().id == recreated_id
+            finally:
+                a.close()
 
 
 class TestTiedTimestamps:

@@ -51,13 +51,7 @@ final class AppWebViewController: NSViewController {
 
     /// Measured rather than hardcoded: a standard title bar and a large one differ, and
     /// this value positions the app's own header clear of the traffic lights.
-    private var titlebarHeight: CGFloat {
-        let contentRect = NSWindow.contentRect(
-            forFrameRect: NSRect(x: 0, y: 0, width: 800, height: 600),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable]
-        )
-        return 600 - contentRect.height
-    }
+    private var titlebarHeight: CGFloat { 0 } // NSToolbar owns native titlebar layout.
 
     override func loadView() {
         let configuration = WKWebViewConfiguration()
@@ -436,6 +430,63 @@ final class ExternalNavigationHandler: NSObject, WKNavigationDelegate, WKUIDeleg
         if url.scheme == "about" || url.scheme == "blob" || url.scheme == "data" { return true }
         guard let host = url.host, host == "127.0.0.1" || host == "localhost" else { return false }
         return url.port == Int(allowedPort)
+    }
+
+    // Only the authenticated app frame may ask the host to present a dialog. Third-party
+    // frames (including hosted bank-link flows) must not impersonate an app confirmation.
+    private func acceptsDialog(from frame: WKFrameInfo) -> Bool {
+        frame.isMainFrame && isLocalApp(frame.request.url)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping @MainActor () -> Void) {
+        guard acceptsDialog(from: frame), let window = webView.window else {
+            completionHandler(); return
+        }
+        let alert = NSAlert()
+        alert.messageText = "FinanceApp"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping @MainActor (Bool) -> Void) {
+        guard acceptsDialog(from: frame), let window = webView.window else {
+            completionHandler(false); return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Confirm Action"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Cancel")
+        let proceed = alert.addButton(withTitle: "Continue")
+        proceed.keyEquivalent = ""
+        alert.beginSheetModal(for: window) { response in
+            completionHandler(response == .alertSecondButtonReturn)
+        }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping @MainActor (String?) -> Void) {
+        guard acceptsDialog(from: frame), let window = webView.window else {
+            completionHandler(nil); return
+        }
+        let alert = NSAlert()
+        alert.messageText = "FinanceApp"
+        alert.informativeText = prompt
+        let field = NSTextField(string: defaultText ?? "")
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "OK").keyEquivalent = ""
+        alert.beginSheetModal(for: window) { response in
+            completionHandler(response == .alertSecondButtonReturn ? field.stringValue : nil)
+        }
+        window.attachedSheet?.makeFirstResponder(field)
     }
 
     // The decisionHandler's exact type matters. A near-miss signature compiles, emits

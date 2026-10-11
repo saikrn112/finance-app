@@ -64,7 +64,7 @@ def record_tombstone(db: Session, kind: str, ref: str, *, device_id: str | None 
         Tombstone(
             kind=kind,
             ref=ref,
-            deleted_at=datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0),
+            deleted_at=datetime.now(timezone.utc).replace(tzinfo=None),
             device_id=device_id,
         )
     )

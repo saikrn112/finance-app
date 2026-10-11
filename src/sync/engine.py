@@ -345,38 +345,28 @@ _SIGNATURE_KEY = "sync_last_published_signature"
 
 
 def _content_signature(db: Session) -> str:
-    """A cheap fingerprint of everything that would go into a payload.
+    """Hash actual synced content, including revisions whose annotation clock is unchanged.
 
-    Per synced table: row count, newest `updated_at`, **and the sum of all `updated_at` values**.
-    Not a hash of the payload itself -- building one is the expensive step this exists to avoid.
-
-    The sum is the part that makes this safe, and leaving it out was a real bug. Count-and-maximum
-    misses the most ordinary edit there is: re-categorising an *old* transaction moves that row's
-    `updated_at` but changes neither the row count nor the table maximum, so the signature looked
-    unchanged and the edit was **never published at all**. Caught by
-    `test_a_merged_update_relays_even_when_the_signature_does_not_move`, which failed on the wrong
-    side -- the peer never published, rather than the relay being skipped.
-
-    Any change to any row's timestamp moves the sum. Two edits cancelling out exactly would defeat it,
-    which requires one row's timestamp to move backwards by precisely what another moved forward; not
-    a thing monotonic clocks do.
+    Counts and timestamp aggregates miss provider corrections, same-second edits and
+    edits to older rows. A local scan is inexpensive for a personal ledger and avoids
+    publishing the complete payload to the network when nothing changed.
     """
-    from sqlalchemy import func
-
+    import hashlib
+    import json
     from src.models import Tombstone
 
-    parts: list[str] = []
+    content = {}
     for spec in schema.TABLES:
         model = schema.model_for(spec)
-        count, newest, total = db.query(
-            func.count(model.updated_at),
-            func.max(model.updated_at),
-            # strftime rather than arithmetic on the column: these are stored as datetime strings.
-            func.sum(func.strftime("%s", model.updated_at)),
-        ).one()
-        parts.append(f"{spec.name}:{count}:{newest}:{total}")
-    parts.append(f"tombstones:{db.query(func.count(Tombstone.ref)).scalar()}")
-    return "|".join(parts)
+        values = [
+            {"updated_at": coding.edit_datetime_to_wire(row.updated_at),
+             **{field.name: field.to_wire(getattr(row, field.attribute, None)) for field in spec.all_fields}}
+            for row in db.query(model).all()
+        ]
+        content[spec.name] = sorted(json.dumps(value, sort_keys=True, default=str) for value in values)
+    content["tombstones"] = sorted((row.kind, row.ref, coding.datetime_to_wire(row.deleted_at))
+                                     for row in db.query(Tombstone).all())
+    return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _stored_signature(db: Session) -> str | None:

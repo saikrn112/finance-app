@@ -14,6 +14,7 @@ from src.models import (
 )
 from src.processing.categorizer import RuleMatcher
 from src.processing.overlap_diagnostics import _merchant_matches
+from src.sync.provider_facts import observe, row_digest
 
 
 @dataclass
@@ -90,9 +91,17 @@ def upsert_plaid_transaction(
         # The statement row already represents this expense, so the Plaid copy goes -- but anything
         # the user attached to it moves onto the survivor first. Deleting outright discarded real
         # work: a project assignment and a split nobody had a second copy of.
+        annotation_at = statement_twin.updated_at
         doomed = _find_plaid_txn(db, institution, txn_data["source_id"])
         if doomed is not None:
             _transfer_user_attributes(db, doomed, statement_twin)
+        statement_twin.reconciled_ids = sorted(set(statement_twin.reconciled_ids or []) | {txn_data["source_id"]})
+        from sqlalchemy.orm.attributes import flag_modified
+        statement_twin.updated_at = statement_twin.updated_at if doomed is not None else annotation_at
+        flag_modified(statement_twin, "updated_at")
+        from src.sync.tracking import record_tombstone
+        from src.sync.refs import KIND_TRANSACTION, transaction_ref
+        record_tombstone(db, KIND_TRANSACTION, transaction_ref(institution, txn_data["source_id"]))
         remove_plaid_transaction(db, institution, txn_data["source_id"])
         return "skipped_statement_overlap"
 
@@ -110,16 +119,16 @@ def upsert_plaid_transaction(
         return "updated"
 
     if pending_existing:
-        pending_existing.source_id = txn_data["source_id"]
-        _apply_txn_data(pending_existing, txn_data, matcher)
+        previous = _retire_identity(db, pending_existing, txn_data["source_id"])
+        _apply_txn_data(pending_existing, txn_data, matcher, previous=previous)
         return "pending_promoted"
 
     replaced_item_txn = _find_replaced_item_txn(db, institution, txn_data)
     if replaced_item_txn:
         # Plaid IDs change when the same account is linked through a new Item.
         # Reuse the enriched row so user categories and projects survive.
-        replaced_item_txn.source_id = txn_data["source_id"]
-        _apply_txn_data(replaced_item_txn, txn_data, matcher)
+        previous = _retire_identity(db, replaced_item_txn, txn_data["source_id"])
+        _apply_txn_data(replaced_item_txn, txn_data, matcher, previous=previous)
         return "item_replaced"
 
     txn = Transaction(
@@ -130,6 +139,25 @@ def upsert_plaid_transaction(
     _apply_txn_data(txn, txn_data, matcher)
     db.add(txn)
     return "added"
+
+
+def _retire_identity(db: Session, txn: Transaction, new_source_id: str) -> str:
+    """Retire the old natural references while keeping local row/link IDs intact."""
+    from src.sync.refs import RefResolver, KIND_TRANSACTION, transaction_ref
+    from src.sync.tracking import record_tombstone
+
+    previous = row_digest(txn)
+    old_id = txn.source_id
+    resolver = RefResolver(db)
+    for model in (TransactionProject, TransactionSplit, TransactionProjectSplit):
+        for link in db.query(model).filter(model.transaction_id == txn.id).all():
+            described = resolver.describe(link)
+            if described:
+                record_tombstone(db, *described)
+    record_tombstone(db, KIND_TRANSACTION, transaction_ref(txn.source, old_id))
+    txn.identity_aliases = sorted(set(txn.identity_aliases or []) | {old_id})
+    txn.source_id = new_source_id
+    return previous
 
 
 def remove_plaid_transaction(db: Session, institution: str, source_id: str) -> int:
@@ -150,13 +178,9 @@ def _delete_transaction_links(db: Session, transaction_id: str) -> int:
     cannot be named cannot be put in a payload -- which is how 77 of them accumulated unnoticed.
     """
     removed = 0
+    from src.sync.tracking import bulk_delete
     for model in (TransactionProject, TransactionSplit, TransactionProjectSplit):
-        removed += (
-            db.query(model).filter(model.transaction_id == transaction_id).delete(
-                synchronize_session=False
-            )
-            or 0
-        )
+        removed += bulk_delete(db, model, transaction_id=transaction_id)
     db.flush()
     return removed
 
@@ -177,7 +201,7 @@ def _find_replaced_item_txn(
     txn_data: dict[str, Any],
 ) -> Transaction | None:
     account_id = txn_data.get("plaid_account_id")
-    if not account_id:
+    if not account_id or not txn_data.get("account_last4"):
         return None
     merchant = (txn_data.get("merchant_clean") or txn_data.get("merchant_raw") or "").strip().casefold()
     candidates = db.query(Transaction).filter(
@@ -188,12 +212,11 @@ def _find_replaced_item_txn(
         Transaction.account_last4 == txn_data.get("account_last4"),
         Transaction.date == txn_data["date"],
         Transaction._amount == txn_data["amount"],
+        Transaction.currency == txn_data.get("currency", "USD"),
     ).order_by(Transaction.created_at.asc()).all()
-    for candidate in candidates:
-        candidate_merchant = (candidate.merchant_clean or candidate.merchant_raw or "").strip().casefold()
-        if candidate_merchant == merchant:
-            return candidate
-    return None
+    matches = [candidate for candidate in candidates
+               if (candidate.merchant_clean or candidate.merchant_raw or "").strip().casefold() == merchant]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _transfer_user_attributes(db: Session, src: Transaction, dest: Transaction) -> None:
@@ -204,6 +227,8 @@ def _transfer_user_attributes(db: Session, src: Transaction, dest: Transaction) 
         dest.notes = src.notes
     if src.tags:
         dest.tags = src.tags
+    if src.updated_at and (dest.updated_at is None or src.updated_at > dest.updated_at):
+        dest.updated_at = src.updated_at
     project_links = db.query(TransactionProject).filter(
         TransactionProject.transaction_id == src.id
     ).all()
@@ -243,7 +268,9 @@ def _transfer_user_attributes(db: Session, src: Transaction, dest: Transaction) 
     db.flush()
 
 
-def _apply_txn_data(txn: Transaction, txn_data: dict[str, Any], matcher: RuleMatcher) -> None:
+def _apply_txn_data(txn: Transaction, txn_data: dict[str, Any], matcher: RuleMatcher, *, previous: str | None = None) -> None:
+    previous = previous or (row_digest(txn) if txn.id else None)
+    annotation_at = txn.updated_at if txn.id else None
     category = matcher.match(txn_data["merchant_raw"])
     if not category and txn_data.get("merchant_clean"):
         category = matcher.match(txn_data["merchant_clean"])
@@ -268,9 +295,17 @@ def _apply_txn_data(txn: Transaction, txn_data: dict[str, Any], matcher: RuleMat
     elif not txn.category or txn.category == "Uncategorized":
         txn.category = "Uncategorized"
         txn.category_source = "default"
+    observe(txn, previous)
+    if annotation_at is not None:
+        # A provider refresh must not become a newer user-annotation edit on peers.
+        from sqlalchemy.orm.attributes import flag_modified
+        txn.updated_at = annotation_at
+        flag_modified(txn, "updated_at")
 
 
 def _find_statement_boundary_overlap(db: Session, institution: str, txn_data: dict[str, Any]) -> Transaction | None:
+    if txn_data.get("pending"):
+        return None
     latest_statement = db.query(Transaction).filter(
         Transaction.source == institution,
         Transaction.origin == "statements",
@@ -288,9 +323,19 @@ def _find_statement_boundary_overlap(db: Session, institution: str, txn_data: di
         Transaction.date >= txn_date - timedelta(days=3),
         Transaction.date <= txn_date + timedelta(days=3),
     ).all()
+    candidates = []
     for statement_txn in nearby:
-        if round(abs(float(statement_txn._amount)), 2) != round(abs(float(txn_data["amount"])), 2):
+        if statement_txn.currency != txn_data.get("currency", "USD"):
+            continue
+        # Missing account identity is not evidence that two accounts are the same.
+        if not statement_txn.account_last4 or statement_txn.account_last4 != txn_data.get("account_last4"):
+            continue
+        claims = statement_txn.reconciled_ids or []
+        if claims and txn_data["source_id"] not in claims:
+            continue
+        if round(float(statement_txn._amount), 2) != round(float(txn_data["amount"]), 2):
             continue
         if _merchant_matches(statement_txn.merchant_raw, txn_data["merchant_raw"]):
-            return statement_txn
-    return None
+            candidates.append(statement_txn)
+    # Several plausible statement rows require a review, not an arbitrary first-row deletion.
+    return candidates[0] if len(candidates) == 1 else None

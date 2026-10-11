@@ -112,7 +112,6 @@ export function FlowChart({ data, excludedCategories = new Set(), dark, filterBu
   const spendingDataRef = useRef(spendingData)
   spendingDataRef.current = spendingData
 
-  const [localRange, setLocalRange] = useState<{ from: string; to: string } | null>(null)
   const bracketRef = useRef<HTMLDivElement>(null)
   const dimLeftRef = useRef<HTMLDivElement>(null)
   const dimRightRef = useRef<HTMLDivElement>(null)
@@ -265,13 +264,6 @@ export function FlowChart({ data, excludedCategories = new Set(), dark, filterBu
 
   // Sync store → chart
   const { startDate, endDate } = useFilterStore()
-
-  const hasDataInRange = useMemo(() => {
-    if (!spendingData.length) return false
-    const first = spendingData[0].time as string
-    const last = spendingData[spendingData.length - 1].time as string
-    return startDate <= last && endDate >= first
-  }, [spendingData, startDate, endDate])
 
   // Fill every day in range so chart shows full date range
   const paddedData = useMemo(() => {

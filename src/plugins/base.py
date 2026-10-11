@@ -27,6 +27,7 @@ class CsvColumnConfig:
     merchant_col: str
     date_fmt: str = "%m/%d/%Y"
     negate_amount: bool = False
+    account_col: str | None = None
 
 
 @dataclass

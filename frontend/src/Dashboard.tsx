@@ -129,7 +129,11 @@ export function Dashboard() {
   const sidebarAccounts = sidebarAccountsData?.accounts || []
   const exchangeRates = sidebarAccountsData?.exchange_rates || []
   const filterableAccounts = useMemo(
-    () => sidebarAccounts.filter((account) => account.filter_source),
+    // Ledger filters are by source; multiple accounts at one source share one option.
+    () => Array.from(new Map(
+      sidebarAccounts.filter((account) => account.filter_source)
+        .map((account) => [account.filter_source, account]),
+    ).values()),
     [sidebarAccounts],
   )
   const snapshotSources = useMemo(
@@ -355,7 +359,7 @@ export function Dashboard() {
           className="app-input text-xs rounded px-2 py-1.5">
           <option value="">All Accounts</option>
           {filterableAccounts.map((account) => (
-            <option key={account.source} value={account.filter_source || account.source}>{account.source}</option>
+            <option key={account.filter_source} value={account.filter_source || account.source}>{account.source}</option>
           ))}
         </select>
         <select value={category || ''} onChange={e => setCategory(e.target.value || null)}

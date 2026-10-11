@@ -178,7 +178,7 @@ public final class BackendSupervisor: ObservableObject {
 
         let process = try SpawnedProcess.spawn(
             executable: layout.interpreterURL,
-            arguments: ["-I", layout.bootstrapURL.path],
+            arguments: ["-I", "-B", layout.bootstrapURL.path],
             environment: environment.variables(port: port, token: token),
             // bootstrap.py chdirs into the app directory itself; passing it here too
             // would be a second place to keep in sync.

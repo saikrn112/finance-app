@@ -60,6 +60,7 @@ enum MainMenu {
             action: #selector(AppDelegate.chooseDataFolder(_:)),
             keyEquivalent: ""
         )
+        menu.addItem(withTitle: "Device Sync…", action: #selector(AppDelegate.showDeviceSync(_:)), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Hide \(applicationName)",
@@ -118,6 +119,11 @@ enum MainMenu {
         let container = NSMenuItem()
         let menu = NSMenu(title: definition.title)
         append(definition.items, to: menu)
+        if definition.title == "File" {
+            let sync = NSMenuItem(title: "Sync Devices Now", action: #selector(AppDelegate.syncDevicesNow(_:)), keyEquivalent: "s")
+            sync.keyEquivalentModifierMask = [.command, .shift]
+            menu.insertItem(sync, at: 2)
+        }
         container.submenu = menu
         return container
     }

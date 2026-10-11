@@ -12,7 +12,7 @@ const CHIPS: { value: Granularity; label: string }[] = [
   { value: 'alltime', label: 'A' },
 ]
 
-function formatPeriodLabel(g: Granularity, start: string, end: string): string {
+function formatPeriodLabel(start: string, end: string): string {
   const s = parse(start, 'yyyy-MM-dd', new Date())
   const e = parse(end, 'yyyy-MM-dd', new Date())
   return `${format(s, 'MMM d, yyyy')} – ${format(e, 'MMM d, yyyy')}`
@@ -60,7 +60,7 @@ export function PeriodNav() {
       <div className="relative">
         <button onClick={() => setPopover(!popover)}
           className="px-1 py-0.5 text-xs font-medium hover:underline whitespace-nowrap w-52 text-center">
-          {formatPeriodLabel(granularity, startDate, endDate)}
+          {formatPeriodLabel(startDate, endDate)}
         </button>
         {popover && (
           <div ref={popRef} className="app-surface absolute top-8 left-0 z-50 dark:bg-slate-800 border dark:border-slate-700 rounded-lg shadow-lg p-3 flex flex-col gap-2">

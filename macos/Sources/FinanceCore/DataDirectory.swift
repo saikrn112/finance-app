@@ -24,6 +24,7 @@ public enum DataDirectory {
 
     public enum Problem: Equatable, Sendable {
         case missing
+        case databaseMissing
         case notADirectory
         case notWritable
         /// No `runtime/prod` and it cannot be created. Usually the repository root rather than its
@@ -33,6 +34,7 @@ public enum DataDirectory {
         public var explanation: String {
             switch self {
             case .missing: "That folder does not exist."
+            case .databaseMissing: "The chosen folder no longer contains runtime/prod/finances.db. Choose the existing data folder; no new database has been created."
             case .notADirectory: "That is a file, not a folder."
             case .notWritable: "It is not writable, and the database has to be written."
             case .runtimeDirectoryUnavailable:
@@ -87,6 +89,17 @@ public enum DataDirectory {
             return (fallback, problem)
         }
         return (chosen, nil)
+    }
+
+    /// Startup must not replace a remembered database with an empty one or create folders.
+    public static func existingDatabaseProblem(_ url: URL, fileManager: FileManager = .default) -> Problem? {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return .missing }
+        guard isDirectory.boolValue else { return .notADirectory }
+        guard fileManager.isWritableFile(atPath: url.path) else { return .notWritable }
+        let database = url.appending(path: "runtime/prod/finances.db")
+        guard fileManager.fileExists(atPath: database.path) else { return .databaseMissing }
+        return nil
     }
 
     // MARK: - Validation
