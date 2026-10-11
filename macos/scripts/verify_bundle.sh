@@ -36,9 +36,17 @@ trap cleanup EXIT
 # alone changes nothing here. That is a silent failure: the suite passes against the
 # previous build and the result looks like the change had no effect -- which is exactly what
 # happened while auditing the palette.
-if [ -f "$REPO_ROOT/frontend/dist/index.html" ] \
-   && [ "$REPO_ROOT/frontend/dist/index.html" -nt "$WEB/index.html" ]; then
-  die "frontend/dist is newer than the bundle's copy. Run: bash macos/scripts/build_app.sh"
+if [ -d "$REPO_ROOT/frontend/dist" ] && ! python3 - "$REPO_ROOT/frontend/dist" "$WEB" <<'PYCODE'
+import hashlib
+import sys
+from pathlib import Path
+def contents(root):
+    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*") if path.is_file()}
+sys.exit(0 if contents(Path(sys.argv[1])) == contents(Path(sys.argv[2])) else 1)
+PYCODE
+then
+  die "frontend/dist differs from the bundle. Run: bash macos/scripts/build_app.sh"
 fi
 
 rm -rf "$VERIFY_DIR"
