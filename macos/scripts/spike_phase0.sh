@@ -65,7 +65,7 @@ print(s.getsockname()[1])
 s.close()
 PY
 )"
-TOKEN="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+TOKEN="$("$PY" -I -B -c 'import secrets; print(secrets.token_urlsafe(32))')"
 
 # Poison the environment on purpose. With `-I` none of this may take effect.
 POISON="$SPIKE_DIR/poison"

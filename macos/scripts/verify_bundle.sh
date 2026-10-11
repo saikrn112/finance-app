@@ -53,8 +53,8 @@ rm -rf "$VERIFY_DIR"
 mkdir -p "$VERIFY_DIR/data/runtime/prod" "$VERIFY_DIR/home"
 
 PY="$BACKEND/python/bin/python3"
-PORT="$("$PY" -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
-TOKEN="$("$PY" -c 'import secrets;print(secrets.token_urlsafe(32))')"
+PORT="$("$PY" -I -B -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+TOKEN="$("$PY" -I -B -c 'import secrets;print(secrets.token_urlsafe(32))')"
 
 # Demo mode by default, for two reasons.
 #
