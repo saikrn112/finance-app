@@ -207,6 +207,10 @@ html.platform-macos textarea {
 }
 
 /* Neutral macOS surfaces; financial meaning retains its semantic colour. */
+html.platform-macos body,
+html.platform-macos .app-shell {
+  background: var(--surface-page);
+}
 html.platform-macos {
   color-scheme: light;
   --neutral-50: #fafafa;

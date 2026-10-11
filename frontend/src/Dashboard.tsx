@@ -348,7 +348,7 @@ export function Dashboard() {
     <>
       {appMeta?.mode === 'demo' && (
         <div className="app-badge-warning mb-4 rounded-lg border px-3 py-2 text-xs" style={{ borderColor: 'var(--color-warning)' }}>
-          Demo mode is active. The app is using isolated data at `{appMeta.database_path}`.
+          Demo mode is active. The app is using isolated sample data.
         </div>
       )}
       {/* Global Filters. data-app-toolbar lets the macOS shell lift this row into the

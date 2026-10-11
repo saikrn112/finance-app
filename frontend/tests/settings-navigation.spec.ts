@@ -121,6 +121,7 @@ for (const theme of ['light', 'dark']) {
       await page.evaluate(() => window.__financeCommandBus?.dispatch('set:appearance', 'light'))
     }
     await expect(page.locator('html')).toHaveClass(/platform-macos/)
+    await expect(page.locator('.app-shell')).toHaveCSS('background-image', 'none')
     if (theme === 'light') await expect(page.locator('html')).not.toHaveClass(/dark/)
     else await expect(page.locator('html')).toHaveClass(/dark/)
     await dialog.getByRole('navigation').getByRole('button', { name: 'Sharing' }).click()
