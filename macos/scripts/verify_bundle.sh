@@ -83,7 +83,7 @@ env -i \
   FINANCE_APP_DATA_DIR="$VERIFY_DIR/data" \
   FINANCE_APP_RUNTIME_DIR="$VERIFY_DIR/data/runtime/prod" \
   FINANCE_APP_DB_PATH="$VERIFY_DIR/data/runtime/prod/finances.db" \
-  /bin/sh -c "exec \"$PY\" -I \"$BACKEND/bootstrap.py\"" \
+  /bin/sh -c "exec \"$PY\" -I -B \"$BACKEND/bootstrap.py\"" \
   > "$LOG" 2>&1 &
 BACKEND_PID=$!
 

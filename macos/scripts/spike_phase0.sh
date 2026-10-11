@@ -86,7 +86,7 @@ env -i \
   FINANCE_APP_RUNTIME_DIR="$DATA_DIR/runtime/prod" \
   FINANCE_APP_DB_PATH="$DATA_DIR/runtime/prod/finances.db" \
   FINANCE_APP_LOCAL_TOKEN="$TOKEN" \
-  /bin/sh -c "exec \"$PY\" -I \"$BACKEND_DIR/bootstrap.py\"" \
+  /bin/sh -c "exec \"$PY\" -I -B \"$BACKEND_DIR/bootstrap.py\"" \
   > "$LOG" 2>&1 &
 BACKEND_PID=$!
 set -e
@@ -110,7 +110,7 @@ log "3/5 isolation from the user's Python"
 check "PYTHONPATH shadow did not take effect" \
   sh -c "! grep -q \"shadowed a bundled package\" '$LOG'"
 sp="$(curl -fsS -H "x-finance-token: $TOKEN" "http://127.0.0.1:$PORT/api/health" >/dev/null && \
-      "$PY" -I -c "import sys; print('ok')")"
+      "$PY" -I -B -c "import sys; print('ok')")"
 check "interpreter runs under -I" test "$sp" = "ok"
 
 # ------------------------------------------------------------- 4. token gate --
@@ -156,7 +156,7 @@ check "codesign --verify --deep --strict" \
 # only fail at dlopen time, so run the signed interpreter and import everything.
 log "5b/5 importing every native module from the signed bundle"
 signed_py="$APP/Contents/Resources/backend/python/bin/python3"
-if "$signed_py" -I "$APP/Contents/Resources/backend/import_smoke.py" > "$SPIKE_DIR/imports.log" 2>&1; then
+if "$signed_py" -I -B "$APP/Contents/Resources/backend/import_smoke.py" > "$SPIKE_DIR/imports.log" 2>&1; then
   printf '  \033[32mPASS\033[0m all bundled modules import under the signed interpreter\n'
   sed 's/^/    /' "$SPIKE_DIR/imports.log"
 else
