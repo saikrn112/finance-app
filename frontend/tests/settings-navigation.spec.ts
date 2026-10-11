@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 
-async function setup(page: Page, options: { failSettings?: boolean; macos?: boolean; syncEnabled?: boolean; syncCompleted?: boolean } = {}) {
+async function setup(page: Page, options: { failSettings?: boolean; macos?: boolean; syncEnabled?: boolean; syncCompleted?: boolean; delayedDemoMode?: boolean } = {}) {
   const errors: string[] = []
   const writes: string[] = []
   let fail = options.failSettings ?? false
@@ -19,7 +19,7 @@ async function setup(page: Page, options: { failSettings?: boolean; macos?: bool
       if (fail) return route.fulfill({ status: 503, json: { detail: 'Synthetic settings unavailable' } })
       // Keep loading visible long enough to verify retry state.
       await new Promise(resolve => setTimeout(resolve, 250))
-      json = { stats: { total_transactions: 12, connected_accounts: 0 }, accounts: [], plaid_usage: { month_start: '2026-01-01', month_end_exclusive: '2026-02-01', total_estimated_cost: 0, billing_lines: [], devices: [], endpoints: [], scope: 'synthetic', scope_note: 'Synthetic usage only' }, vault: { connected: true, vault_id: 'synthetic-vault', provider: 'synthetic', provider_email: null, last_backup_at: null, google_drive_ready: true } }
+      json = { stats: { total_transactions: 12, connected_accounts: 0 }, accounts: [], plaid_usage: { month_start: '2026-01-01', month_end_exclusive: '2026-02-01', total_estimated_cost: 0, billing_lines: [], devices: [], endpoints: [], scope: 'synthetic', scope_note: 'Synthetic usage only' }, vault: { connected: !options.delayedDemoMode, vault_id: 'synthetic-vault', provider: 'synthetic', provider_email: null, last_backup_at: null, google_drive_ready: true } }
     } else if (url.pathname === '/api/settings/device-sync/status') json = { enabled: options.syncEnabled ?? false, configured: true, reason: options.syncEnabled ? 'Device sync is enabled.' : 'Device sync is paused.', last_success: null, last_error: null, peer_count: 2, busy: false }
     else if (url.pathname === '/api/settings/device-sync/run') json = { ran: true, completed: options.syncCompleted ?? true }
     else if (url.pathname === '/api/settings/signout/preflight') json = { needs_backup: true, transaction_count: 12, last_backup_at: null }
@@ -27,7 +27,10 @@ async function setup(page: Page, options: { failSettings?: boolean; macos?: bool
     else if (url.pathname.includes('/analytics/summary')) json = { income: 100, spending: 50, core_spending: 50, core_spending_excluding_rent: 50, transfers: 0, spend_income_ratio: 50, net_flow: 50, total_balance: 100, subscriptions_monthly: 0 }
     else if (url.pathname.includes('/transactions')) json = { transactions: [], total: 0 }
     else if (url.pathname.includes('/sync/sidebar-accounts')) json = { accounts: [], exchange_rates: [] }
-    else if (url.pathname === '/api/meta') json = { mode: 'demo', database_path: 'synthetic' }
+    else if (url.pathname === '/api/meta') {
+      if (options.delayedDemoMode) await new Promise(resolve => setTimeout(resolve, 750))
+      json = { mode: 'demo', database_path: 'synthetic' }
+    }
     else if (url.pathname === '/api/splitwise/status') json = { connected: false, configured: false, credentials: { usable: false, auth_mode: 'none', api_key_present: false, client_id_present: false, client_secret_present: false } }
     else if (url.pathname === '/api/splitwise/links') json = { contacts: [] }
     else if (url.pathname.includes('/contacts')) json = [{ id: 'synthetic-person', name: 'Synthetic Person', color: '#123456' }]
@@ -197,4 +200,14 @@ test('period controls expose hover help, selected state and labeled date inputs'
   await expect(page.getByLabel('To', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(choose).toHaveAttribute('aria-expanded', 'false')
+})
+
+
+test('demo mode arriving after disconnected Settings never opens the live Google gate', async ({ page }) => {
+  const { dialog, errors } = await setup(page, { delayedDemoMode: true })
+  await expect(page.getByText('Demo mode is active. The app is using isolated sample data.')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Connect your Google account', exact: true })).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'Close settings', exact: true }).click()
+  await page.getByRole('button', { name: 'All time', exact: true }).click()
+  expect(errors).toEqual([])
 })

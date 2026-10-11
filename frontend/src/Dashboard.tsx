@@ -149,7 +149,8 @@ export function Dashboard() {
   }, [dark])
 
   useEffect(() => {
-    if (needsOnboarding !== null || !settingsData) return
+    // Mode and Settings arrive independently; await both before choosing the live gate.
+    if (needsOnboarding !== null || !settingsData || !appMeta) return
     if (appMeta?.mode === 'demo') {
       setNeedsOnboarding(false)
       return
