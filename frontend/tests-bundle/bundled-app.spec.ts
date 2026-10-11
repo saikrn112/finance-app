@@ -14,25 +14,15 @@ import { test, expect, Page, Response, request as playwrightRequest } from '@pla
 const TOKEN = process.env.BUNDLE_TOKEN || ''
 const BASE = process.env.BUNDLE_URL || 'http://127.0.0.1:8000'
 
-/**
- * Warm the exchange-rate table with one sequential request before anything parallel.
- *
- * There is a pre-existing race in `_ensure_identity_rates` (src/services/exchange_rates.py):
- * concurrent requests each see the identity rates missing and each insert them, and the
- * loser gets a 500 from `UNIQUE constraint failed: exchange_rates.…`. Reproduced on an
- * unmodified `main` at 4b847fd: 11 of 12 concurrent `/api/analytics/summary` requests
- * returned 500. It is not specific to the macOS bundle and it is not fixed here.
- *
- * Warming it sequentially is a fixture, not a workaround for a bug of ours: it makes the
- * database look the way it does for every page load after the first, so the 5xx
- * assertions below can stay strict and a *new* server error still fails the suite.
- */
+// Exercise concurrent startup requests instead of concealing rate-initialization races.
 test.beforeAll(async () => {
   const context = await playwrightRequest.newContext({
     baseURL: BASE,
     extraHTTPHeaders: { 'x-finance-token': TOKEN },
   })
-  await context.get('/api/analytics/summary', { params: { range: 'month', currency: 'USD' } })
+  const results = await Promise.all(Array.from({ length: 12 }, () =>
+    context.get('/api/analytics/summary', { params: { range: 'month', currency: 'USD' } })))
+  expect(results.map(response => response.status())).toEqual(Array(12).fill(200))
   await context.dispose()
 })
 

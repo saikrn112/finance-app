@@ -180,3 +180,20 @@ for (const completed of [true, false]) {
     expect(errors).toEqual([])
   })
 }
+
+test('period controls expose hover help, selected state and labeled date inputs', async ({ page }) => {
+  const { dialog } = await setup(page)
+  await dialog.getByRole('button', { name: 'Close settings', exact: true }).click()
+  const allTime = page.getByRole('button', { name: 'All time', exact: true })
+  await allTime.hover()
+  await expect(allTime).toHaveAttribute('title', 'All time')
+  await allTime.click()
+  await expect(allTime).toHaveAttribute('aria-pressed', 'true')
+  const choose = page.getByRole('button', { name: 'Choose date range' })
+  await choose.click()
+  await expect(choose).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.getByLabel('From', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('To', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(choose).toHaveAttribute('aria-expanded', 'false')
+})

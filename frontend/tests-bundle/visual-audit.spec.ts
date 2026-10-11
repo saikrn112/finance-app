@@ -142,6 +142,12 @@ test.describe('visual audit', () => {
         await page.goto(`/${view.hash}`)
         await page.waitForLoadState('networkidle')
         await setAppearance(page, appearance === 'dark')
+        // Include the seeded historical records rather than photographing an empty current month.
+        const allTime = page.getByRole('button', { name: 'All time', exact: true })
+        if (await allTime.count()) {
+          await allTime.click()
+          await page.waitForLoadState('networkidle')
+        }
         // Charts animate in; a screenshot taken during that is not comparable between runs.
         await page.waitForTimeout(1200)
 
