@@ -80,3 +80,56 @@ class TestMaskedResponseFraming:
         # 404 either way; the point is that it is not mangled into a JSON body with a
         # mismatched length.
         assert response.status_code == 404
+
+
+# --- fail closed --------------------------------------------------------------------------------
+#
+# Private mode showed the dashboard's real Inflow/Outflow/Core/Net Flow and the I/O chart, because
+# only keys on a fixed allowlist were masked. Every number is now masked unless structural.
+
+import json as _json
+
+import src.privacy_mask as _pm
+
+
+@pytest.fixture
+def masking(monkeypatch):
+    monkeypatch.setattr(_pm, "PRIVACY_MASK_ENABLED", True)
+
+
+def _mask(payload):
+    return _json.loads(_pm.mask_json_body(_json.dumps(payload).encode(), seed="/api/x"))
+
+
+def test_the_dashboard_summary_fields_are_masked(masking):
+    real = {"income": 11841.94, "spending": 9082.09, "net_flow": 2759.85,
+            "core_spending": 4487.09, "subscriptions_monthly": 80.08, "total_balance": 175000.0}
+    masked = _mask(real)
+    for key, value in real.items():
+        assert masked[key] != value, f"{key} leaked its real value"
+
+
+def test_a_field_nobody_has_named_yet_is_private_by_default(masking):
+    assert _mask({"brand_new_money_field": 1234.56})["brand_new_money_field"] != 1234.56
+
+
+def test_bare_numbers_in_a_chart_series_are_masked(masking):
+    out = _mask({"series": {"inflow": [1600.0, 0.0, 4000.0], "outflow": [100.0, 250.5]}})
+    assert out["series"]["inflow"][0] != 1600.0 and out["series"]["inflow"][2] != 4000.0
+    assert out["series"]["outflow"] != [100.0, 250.5]
+
+
+def test_structure_survives_so_the_ui_still_works(masking):
+    payload = {"id": 42, "transaction_id": 7, "count": 3, "page": 2, "year": 2026,
+               "pending": True, "is_recurring": False, "peer_count": 2, "time": 1760000000,
+               "format_version": 1, "rows": [{"id": 1, "amount": -12.34}]}
+    out = _mask(payload)
+    for key in ("id", "transaction_id", "count", "page", "year", "pending", "is_recurring",
+                "peer_count", "time", "format_version"):
+        assert out[key] == payload[key], f"{key} is structural and must not change"
+    assert out["rows"][0]["id"] == 1 and out["rows"][0]["amount"] != -12.34
+
+
+def test_masking_keeps_sign_and_is_deterministic(masking):
+    a = _mask({"net_flow": -2759.85})["net_flow"]
+    assert a < 0 and a == _mask({"net_flow": -2759.85})["net_flow"]

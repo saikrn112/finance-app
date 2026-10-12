@@ -98,11 +98,46 @@ def mask_amount(value: float, seed: str = "") -> float:
     return round(sign * masked, 2)
 
 
-def mask_row(row_dict: dict, seed: str = "") -> dict:
-    """Mask all financial amount fields in a dict.
+#: Numbers that describe structure, not money, and must survive masking for the UI to work.
+#:
+#: Masking used to be opt-in: only keys in AMOUNT_FIELDS were replaced. Any money field named
+#: anything else went through as-is, and the dashboard's own cards did exactly that --
+#: `income`, `spending`, `net_flow`, `core_spending`, and the I/O chart's series -- so "private
+#: mode" showed real totals on its most prominent screen. Now every number is masked unless its
+#: key says it is structural. A new money field is private by default; a new structural field at
+#: worst shows a scrambled count, which is the right way round for a privacy feature.
+STRUCTURAL_KEYS = frozenset({
+    "id", "count", "n", "page", "pages", "limit", "offset", "page_size", "total_count",
+    "total_pages", "year", "month", "day", "week", "quarter", "index", "rank", "order",
+    "position", "version", "format_version", "retry", "port", "time", "timestamp",
+    "peer_count", "rows", "length", "width", "height", "decimals", "precision", "days",
+    "hours", "minutes", "seconds", "age_days", "status_code", "code",
+})
+STRUCTURAL_SUFFIXES = (
+    "_id", "_ids", "_count", "_index", "_year", "_month", "_day", "_days", "_at", "_ts",
+    "_version", "_pages", "_rank", "_order", "_seconds", "_minutes", "_hours", "_ms",
+)
+STRUCTURAL_PREFIXES = ("num_", "n_", "is_", "has_")
 
-    Handles nested dicts and lists of dicts recursively.
-    """
+
+def _is_structural(key: str | None) -> bool:
+    if not key:
+        return False
+    k = key.lower()
+    return k in STRUCTURAL_KEYS or k.endswith(STRUCTURAL_SUFFIXES) or k.startswith(STRUCTURAL_PREFIXES)
+
+
+def _mask_value(key: str | None, value, seed: str):
+    # bool is an int subclass; True/False are flags, never amounts.
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return value
+    if _is_structural(key):
+        return value
+    return mask_amount(float(value), seed=f"{key}:{seed}")
+
+
+def mask_row(row_dict: dict, seed: str = "") -> dict:
+    """Mask every numeric value in a dict that is not structurally named. Recurses."""
     if not PRIVACY_MASK_ENABLED:
         return row_dict
     if not isinstance(row_dict, dict):
@@ -110,27 +145,26 @@ def mask_row(row_dict: dict, seed: str = "") -> dict:
 
     masked = {}
     for key, value in row_dict.items():
-        if key in AMOUNT_FIELDS and isinstance(value, (int, float, Decimal)):
-            masked[key] = mask_amount(float(value), seed=f"{key}:{seed}")
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             masked[key] = mask_row(value, seed=seed)
         elif isinstance(value, list):
-            masked[key] = _mask_list(value, seed=seed)
+            masked[key] = _mask_list(value, seed=f"{key}:{seed}", key=key)
         else:
-            masked[key] = value
+            masked[key] = _mask_value(key, value, seed)
     return masked
 
 
-def _mask_list(items: list, seed: str = "") -> list:
-    """Mask financial amounts in a list of items."""
+def _mask_list(items: list, seed: str = "", key: str | None = None) -> list:
+    """Mask a list. Bare numbers take the list's own key -- a chart series of raw values leaked
+    entirely before, because only dict entries were ever inspected."""
     result = []
     for i, item in enumerate(items):
         if isinstance(item, dict):
             result.append(mask_row(item, seed=f"{seed}[{i}]"))
         elif isinstance(item, list):
-            result.append(_mask_list(item, seed=f"{seed}[{i}]"))
+            result.append(_mask_list(item, seed=f"{seed}[{i}]", key=key))
         else:
-            result.append(item)
+            result.append(_mask_value(key, item, f"{seed}[{i}]"))
     return result
 
 
