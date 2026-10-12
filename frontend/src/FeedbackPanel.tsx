@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Circle, ImagePlus, MessageSquare, Pencil, Trash2, X } from 'lucide-react'
 import { api, type FeedbackAttachment, type FeedbackNote } from './api'
+import { useApiImage } from './useApiImage'
 
 /**
  * Notes written while using the app, and the screenshots attached to them.
@@ -51,9 +52,12 @@ function Thumbnail({
   onOpen?: () => void
 }) {
   const [broken, setBroken] = useState(false)
+  // Through useApiImage so the macOS app's token reaches the request; a bare <img src> 401s there
+  // and every screenshot showed as "missing".
+  const image = useApiImage(src)
   return (
     <div className="relative shrink-0">
-      {broken ? (
+      {broken || image.failed ? (
         // A row can outlive its file — a restored database whose images were not restored. That
         // is expected, not a failure, so it gets a placeholder rather than a broken-image icon.
         <div className="flex h-10 w-14 items-center justify-center rounded border border-slate-300 text-[9px] text-slate-500 dark:border-slate-600">
@@ -61,7 +65,7 @@ function Thumbnail({
         </div>
       ) : (
         <img
-          src={src}
+          src={image.url ?? undefined}
           alt={alt}
           onError={() => setBroken(true)}
           onClick={onOpen}

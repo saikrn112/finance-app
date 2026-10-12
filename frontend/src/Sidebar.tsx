@@ -4,6 +4,7 @@ import type { SidebarAccount } from './api'
 import { useFilterStore } from './store'
 import { formatCurrency } from './privacy'
 import { formatCompact } from './currency-config'
+import { useApiImage } from './useApiImage'
 
 interface ExchangeRate {
   from_currency: string
@@ -59,7 +60,18 @@ function AccountIcon({ account }: { account: SidebarAccount }) {
     setFailed(false)
   }, [account.icon_url])
 
-  if (!account.icon_url || failed) {
+  const separator = account.icon_url?.includes('?') ? '&' : '?'
+  const requested = account.icon_url ? (retry ? `${account.icon_url}${separator}retry=${retry}` : account.icon_url) : null
+  // Through useApiImage so the macOS app's token reaches the request; a bare <img src> 401s there.
+  const image = useApiImage(requested)
+
+  useEffect(() => {
+    if (!image.failed) return
+    if (retry === 0) setRetry(Date.now())
+    else setFailed(true)
+  }, [image.failed, retry])
+
+  if (!account.icon_url || failed || !image.url) {
     return (
       <span className="w-4 h-4 rounded-full shrink-0 flex items-center justify-center text-[8px] font-bold" style={{ background: 'var(--surface-secondary)', color: 'var(--text-muted)' }}>
         {account.source.charAt(0)}
@@ -67,9 +79,7 @@ function AccountIcon({ account }: { account: SidebarAccount }) {
     )
   }
 
-  const separator = account.icon_url.includes('?') ? '&' : '?'
-  const src = retry ? `${account.icon_url}${separator}retry=${retry}` : account.icon_url
-  return <img src={src} alt="" className="w-4 h-4 rounded-full shrink-0 object-contain" onError={() => retry === 0 ? setRetry(Date.now()) : setFailed(true)} />
+  return <img src={image.url} alt="" className="w-4 h-4 rounded-full shrink-0 object-contain" onError={() => retry === 0 ? setRetry(Date.now()) : setFailed(true)} />
 }
 
 
