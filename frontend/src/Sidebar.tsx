@@ -79,7 +79,7 @@ function AccountIcon({ account }: { account: SidebarAccount }) {
     )
   }
 
-  return <img src={image.url} alt="" className="w-4 h-4 rounded-full shrink-0 object-contain" onError={() => retry === 0 ? setRetry(Date.now()) : setFailed(true)} />
+  return <img src={image.url} alt="" className="w-4 h-4 max-w-none rounded-full shrink-0 object-contain" onError={() => retry === 0 ? setRetry(Date.now()) : setFailed(true)} />
 }
 
 
