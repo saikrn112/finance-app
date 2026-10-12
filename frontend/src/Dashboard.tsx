@@ -21,6 +21,7 @@ import { api } from './api'
 import { GETTING_STARTED_DONE_KEY } from './AppTour'
 import { AppTour } from './AppTour'
 import { OnboardingGate } from './OnboardingGate'
+import { DeviceSyncBanner } from './DeviceSyncBanner'
 import { formatCurrency } from './privacy'
 import { SUPPORTED_CURRENCIES } from './currency'
 import { installCommandBus, registerCommands } from './commandBus'
@@ -566,6 +567,7 @@ export function Dashboard() {
         className="p-4 transition-all duration-200"
         style={{ marginRight: (sidebarExpanded ? SIDEBAR_EXPANDED_WIDTH : SIDEBAR_COLLAPSED_WIDTH) + 12 }}
       >
+        <DeviceSyncBanner onOpenSettings={() => setSettingsOpen(true)} />
         {syncError ? (
           <div className="mb-3 rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-600 dark:text-rose-300" role="alert">
             <strong>Sync incomplete:</strong> {syncError}

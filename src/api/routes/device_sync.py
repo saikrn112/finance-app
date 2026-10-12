@@ -8,18 +8,34 @@ from src.sync.runner import convergence_problem, sync_enabled, sync_once
 
 router = APIRouter()
 
+
+def _google_known_expired(google) -> bool:
+    """True only when a recent real check found this exact token dead. Makes no network call."""
+    from src.api.routes import settings as settings_routes
+
+    if google is None:
+        return False
+    _checked_at, fingerprint, ok, _reason = settings_routes._token_health
+    return bool(fingerprint) and fingerprint == settings_routes._token_fingerprint(google) and not ok
+
 @router.get("/status")
 def status(db: Session = Depends(get_db)):
     enabled = sync_enabled()
     google = db.query(SyncLog).filter(SyncLog.source == "vault_google", SyncLog.sync_type == "google_drive", SyncLog.status == "connected").order_by(SyncLog.created_at.desc()).first()
     configured = bool(google and (google.extra_data or {}).get("refresh_token"))
     state = device_sync_health.read(db)
+    peer_count = db.query(SyncDevice).count()
     return {"enabled": enabled, "configured": configured,
+            # Never refreshes a token here (see the tests): this reuses the settings panel's cached
+            # verdict, which is a real refresh attempt at most a minute old.
+            "attention": device_sync_health.attention(
+                state, enabled=enabled, configured=configured, peer_count=peer_count,
+                google_expired=_google_known_expired(google)),
             "reason": "Device sync is paused." if not enabled else
                       ("Connect Google Drive in Settings to sync devices." if not configured else "Google Drive is configured."),
             "last_success": state.get("last_success"), "last_attempt": state.get("last_attempt"),
             "last_error": state.get("last_error"),
-            "peer_count": db.query(SyncDevice).count(), "busy": job_lock.current_holder() is not None}
+            "peer_count": peer_count, "busy": job_lock.current_holder() is not None}
 
 @router.post("/run")
 def run(db: Session = Depends(get_db)):

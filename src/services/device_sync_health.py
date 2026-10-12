@@ -1,5 +1,5 @@
 """Local, safe status for device convergence; never returns provider tokens or payloads."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from src.models.transaction import AppMetadata
 
 KEY = "device_sync_health"
@@ -30,3 +30,58 @@ def read(db) -> dict:
         return state if isinstance(state, dict) else {}
     except (ValueError, TypeError):
         return {}
+
+
+#: Twelve missed five-minute rounds. Long enough that a slow network or one failed round never
+#: raises the alarm, short enough that a dead Google sign-in is noticed the same day -- not a
+#: week later, which is how long it went unnoticed before this existed.
+STALE_AFTER_MINUTES = 60
+
+RECONNECT_REASON = "Google Drive sign-in expired. Reconnect it in Settings → Vault so your devices can sync."
+
+
+def _parse(value):
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def attention(
+    state: dict,
+    *,
+    enabled: bool,
+    configured: bool,
+    peer_count: int,
+    google_expired: bool = False,
+    now: datetime | None = None,
+) -> dict:
+    """Whether the user should be told device sync has stopped, and why.
+
+    Decided here rather than in each client, so the container, the macOS app and a future iOS app
+    raise the same alarm from the same facts. Every branch answers "is data still moving between
+    devices?" -- a stored token, or one successful round days ago, is not evidence that it is.
+    """
+    now = now or datetime.now(timezone.utc)
+    last_success = _parse(state.get("last_success"))
+    last_attempt = _parse(state.get("last_attempt"))
+    quiet = {"needed": False, "reason": None, "last_success": state.get("last_success")}
+
+    if not enabled:
+        return quiet  # paused on purpose is not a fault
+    if google_expired:
+        return {**quiet, "needed": True, "reason": RECONNECT_REASON}
+    if not configured:
+        return {**quiet, "needed": True, "reason": "Connect Google Drive in Settings → Vault so your devices can sync."}
+    if state.get("last_error") and (last_success is None or (last_attempt and last_attempt > last_success)):
+        return {**quiet, "needed": True, "reason": state["last_error"]}
+    if last_success is None:
+        if peer_count:
+            return {**quiet, "needed": True, "reason": "This device has not completed a sync with your other devices yet."}
+        return quiet  # a lone device with nothing to sync with
+    if now - last_success > timedelta(minutes=STALE_AFTER_MINUTES):
+        return {**quiet, "needed": True, "reason": "No device sync has succeeded recently. Check Google Drive in Settings."}
+    return quiet
