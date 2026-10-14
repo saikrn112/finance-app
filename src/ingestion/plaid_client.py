@@ -35,7 +35,33 @@ def get_plaid_client():
             "secret": plaid_config.get("secret", ""),
         }
     )
-    return plaid_api.PlaidApi(plaid.ApiClient(configuration))
+    api_client = plaid.ApiClient(configuration)
+    _apply_default_timeout(api_client)
+    return plaid_api.PlaidApi(api_client)
+
+
+#: (connect, read) seconds. Plaid's own calls take a few seconds; a read idle for two minutes is a
+#: dead connection, not a slow bank.
+PLAID_TIMEOUT = (10, 120)
+
+
+def _apply_default_timeout(api_client) -> None:
+    """Give every Plaid call a timeout unless the caller passed one.
+
+    plaid-python sends `timeout=None` to urllib3 when no `_request_timeout` is given, which means
+    *wait forever* -- and it overrides any process-wide socket default, so that backstop does not
+    reach it. A connection cut mid-response (a Mac going to sleep) then hangs the pull indefinitely
+    while it holds the shared job lock, and every later sync and backup is skipped as "busy".
+    """
+    rest = api_client.rest_client
+    original = rest.request
+
+    def request(*args, **kwargs):
+        if not kwargs.get("_request_timeout"):
+            kwargs["_request_timeout"] = PLAID_TIMEOUT
+        return original(*args, **kwargs)
+
+    rest.request = request
 
 
 def create_link_token(user_id: str = "user-1", products: list[str] = None, access_token: str | None = None) -> str:

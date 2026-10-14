@@ -30,12 +30,14 @@ def status(db: Session = Depends(get_db)):
             # verdict, which is a real refresh attempt at most a minute old.
             "attention": device_sync_health.attention(
                 state, enabled=enabled, configured=configured, peer_count=peer_count,
-                google_expired=_google_known_expired(google)),
+                google_expired=_google_known_expired(google),
+                busy_job=job_lock.current_holder(), busy_seconds=job_lock.held_for_seconds()),
             "reason": "Device sync is paused." if not enabled else
                       ("Connect Google Drive in Settings to sync devices." if not configured else "Google Drive is configured."),
             "last_success": state.get("last_success"), "last_attempt": state.get("last_attempt"),
             "last_error": state.get("last_error"),
-            "peer_count": peer_count, "busy": job_lock.current_holder() is not None}
+            "peer_count": peer_count, "busy": job_lock.current_holder() is not None,
+            "busy_job": job_lock.current_holder(), "busy_seconds": job_lock.held_for_seconds()}
 
 @router.post("/run")
 def run(db: Session = Depends(get_db)):

@@ -24,6 +24,11 @@ GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 GOOGLE_DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
 GOOGLE_DRIVE_DOWNLOAD_URL = "https://www.googleapis.com/drive/v3/files"
+
+#: Per socket operation, not per transfer: a large upload is fine as long as bytes keep moving.
+#: Without it a connection cut while the Mac slept left a read waiting forever -- inside a job that
+#: holds the shared job lock, so every later sync and backup was skipped as "busy" for 22 hours.
+DRIVE_TIMEOUT_SECONDS = 60
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 GOOGLE_SCOPES = [
     "openid",
@@ -308,7 +313,7 @@ def upload_file_resumable(
     )
 
     try:
-        with urlopen(init_request) as response:
+        with urlopen(init_request, timeout=DRIVE_TIMEOUT_SECONDS) as response:
             upload_url = response.headers.get("Location")
         if not upload_url:
             raise HTTPException(status_code=500, detail="Google resumable upload session did not return a Location header")
@@ -365,7 +370,7 @@ def download_file_bytes(access_token: str, file_id: str) -> bytes:
         method="GET",
     )
     try:
-        with urlopen(request) as response:
+        with urlopen(request, timeout=DRIVE_TIMEOUT_SECONDS) as response:
             return response.read()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Google file download failed: {exc}") from exc
@@ -385,7 +390,7 @@ def download_file_to_path(
         method="GET",
     )
     try:
-        with urlopen(request) as response:
+        with urlopen(request, timeout=DRIVE_TIMEOUT_SECONDS) as response:
             total = expected_size or int(response.headers.get("Content-Length") or 0)
             downloaded = 0
             with dest.open("wb") as fh:
@@ -446,7 +451,7 @@ def _expiry_timestamp(expires_in_seconds: int) -> str:
 
 def _json_request(request: Request) -> dict[str, Any]:
     try:
-        with urlopen(request) as response:
+        with urlopen(request, timeout=DRIVE_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode())
     except HTTPException:
         raise

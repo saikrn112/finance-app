@@ -13,17 +13,25 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _holder: str | None = None
+_held_since: float | None = None
 
 
 def current_holder() -> str | None:
     """Name of the job currently holding the lock, if any."""
     return _holder
+
+
+def held_for_seconds() -> float | None:
+    """How long the current holder has held the lock. A job stuck on a dead connection held it for
+    22 hours once, and "busy" was all anyone could see; this makes "stuck" distinguishable."""
+    return None if _held_since is None else time.monotonic() - _held_since
 
 
 @contextmanager
@@ -39,9 +47,12 @@ def try_acquire(job_name: str):
         logger.info("%s skipped: %s already running", job_name, _holder)
         yield False
         return
+    global _held_since
     _holder = job_name
+    _held_since = time.monotonic()
     try:
         yield True
     finally:
         _holder = None
+        _held_since = None
         _lock.release()

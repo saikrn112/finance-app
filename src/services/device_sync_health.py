@@ -37,6 +37,9 @@ def read(db) -> dict:
 #: week later, which is how long it went unnoticed before this existed.
 STALE_AFTER_MINUTES = 60
 
+#: No job legitimately holds the lock this long: a full Plaid pull or snapshot takes a minute or two.
+STUCK_AFTER_MINUTES = 15
+
 RECONNECT_REASON = "Google Drive sign-in expired. Reconnect it in Settings → Vault so your devices can sync."
 
 
@@ -57,6 +60,8 @@ def attention(
     configured: bool,
     peer_count: int,
     google_expired: bool = False,
+    busy_job: str | None = None,
+    busy_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Whether the user should be told device sync has stopped, and why.
@@ -72,6 +77,11 @@ def attention(
 
     if not enabled:
         return quiet  # paused on purpose is not a fault
+    if busy_job and busy_seconds is not None and busy_seconds > STUCK_AFTER_MINUTES * 60:
+        # Checked before staleness: the honest reason sync stopped is not Google but a job that
+        # never finished. Seen as a Plaid pull hung on a dead connection for 22 hours.
+        return {**quiet, "needed": True,
+                "reason": f"A {busy_job} has been stuck for {int(busy_seconds // 60)} minutes. Quit and reopen the app."}
     if google_expired:
         return {**quiet, "needed": True, "reason": RECONNECT_REASON}
     if not configured:

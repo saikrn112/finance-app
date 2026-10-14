@@ -15,6 +15,14 @@ from src.api.static_web import index_file, mount_static_frontend
 import os
 from pathlib import Path
 
+# Backstop for any network call that sets no timeout of its own: urllib, http.client and the
+# libraries built on them fall back to this. Without one, a connection cut while the machine slept
+# left a read waiting forever. Calls that need longer pass their own timeout.
+import socket as _socket
+
+if _socket.getdefaulttimeout() is None:
+    _socket.setdefaulttimeout(120)
+
 app = FastAPI(title="Finance App API")
 
 if PRIVACY_MASK_ENABLED:

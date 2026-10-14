@@ -166,3 +166,66 @@ def test_a_known_dead_token_is_named_in_the_banner(control_client, monkeypatch):
     monkeypatch.setattr(settings_routes, "_token_health", (1.0, fingerprint, False, "expired"))
 
     assert "Reconnect" in client.get("/device-sync/status").json()["attention"]["reason"]
+
+
+class TestStuckJobs:
+    """A Plaid pull hung on a dead connection held the job lock for 22 hours; the banner blamed Google."""
+
+    def test_a_job_holding_the_lock_too_long_is_named(self):
+        v = _verdict({"last_success": (NOW - timedelta(hours=22)).isoformat()},
+                     busy_job="plaid sync", busy_seconds=22 * 3600)
+        assert v["needed"] is True and "plaid sync" in v["reason"] and "stuck" in v["reason"]
+
+    def test_a_normal_length_job_is_not_called_stuck(self):
+        v = _verdict({"last_success": (NOW - timedelta(minutes=3)).isoformat()},
+                     busy_job="plaid sync", busy_seconds=90)
+        assert v["needed"] is False
+
+
+def test_the_lock_reports_how_long_it_has_been_held():
+    from src.services import job_lock
+
+    assert job_lock.held_for_seconds() is None
+    with job_lock.try_acquire("test job") as acquired:
+        assert acquired and job_lock.held_for_seconds() >= 0
+    assert job_lock.held_for_seconds() is None
+
+
+def test_plaid_calls_get_a_timeout_by_default(monkeypatch):
+    """plaid-python sends timeout=None (wait forever) unless told otherwise."""
+    from src.ingestion import plaid_client
+
+    seen = {}
+
+    class FakeRest:
+        def request(self, *args, **kwargs):
+            seen.update(kwargs)
+
+    class FakeClient:
+        rest_client = FakeRest()
+
+    client = FakeClient()
+    plaid_client._apply_default_timeout(client)
+    client.rest_client.request("POST", "https://example.invalid")
+    assert seen["_request_timeout"] == plaid_client.PLAID_TIMEOUT
+
+    client.rest_client.request("POST", "https://example.invalid", _request_timeout=5)
+    assert seen["_request_timeout"] == 5, "an explicit timeout is respected"
+
+
+def test_every_drive_call_has_a_timeout():
+    import inspect
+    import re
+
+    from src.vault import google_drive
+
+    calls = re.findall(r"urlopen\(([^)]*)\)", inspect.getsource(google_drive))
+    assert calls and all("timeout=" in c for c in calls), calls
+
+
+def test_the_process_has_a_socket_timeout_backstop():
+    import socket
+
+    import src.api.server  # noqa: F401  (sets it on import)
+
+    assert socket.getdefaulttimeout() is not None
