@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import dataclasses
 import logging
 import os
 from pathlib import Path
@@ -89,10 +90,46 @@ def load_plugins() -> list[ParserPlugin]:
                 logger.info("Loaded %d plugin(s) from %s", len(loaded), py_file.name)
                 plugins.extend(loaded)
 
-    _registry = plugins
+    _registry = _merge_same_key(plugins)
     _loaded = True
     logger.info("Plugin loading complete: %d plugins registered", len(_registry))
     return _registry
+
+
+def _merge_same_key(plugins: list[ParserPlugin]) -> list[ParserPlugin]:
+    """Combine plugins that share a source_key: later ones extend earlier ones, field by field.
+
+    Private plugins load after the bundled templates, and a private plugin with no parser is the
+    documented way to add provider metadata. But the registry kept whichever plugin came last,
+    whole -- so a private `bank_chase.py` that only meant to add Plaid account names replaced the
+    bundled Chase plugin outright: no statement parser (imports broke), CSV no longer allowed, and
+    Chase filed under Bank Accounts. Now a later plugin overrides only the fields it actually sets;
+    anything left at its default -- the parser, the CSV config, the hint -- comes from the earlier.
+    """
+    merged: dict[str, ParserPlugin] = {}
+    for plugin in plugins:
+        base = merged.get(plugin.source_key)
+        if base is None:
+            merged[plugin.source_key] = plugin
+            continue
+        updates = {}
+        for field in dataclasses.fields(ParserPlugin):
+            value = getattr(plugin, field.name)
+            if field.default is not dataclasses.MISSING:
+                default = field.default
+            elif field.default_factory is not dataclasses.MISSING:
+                default = field.default_factory()
+            else:
+                updates[field.name] = value  # required fields: the later plugin states them
+                continue
+            if value != default:
+                updates[field.name] = value
+        # allowed_kinds is a required field, so every plugin restates it; an extension adding
+        # metadata must not thereby take away an import kind the template supports.
+        updates["allowed_kinds"] = set(base.allowed_kinds) | set(plugin.allowed_kinds)
+        merged[plugin.source_key] = dataclasses.replace(base, **updates)
+        logger.info("plugin %s: later definition extends the earlier one", plugin.source_key)
+    return list(merged.values())
 
 
 def get_registry() -> list[ParserPlugin]:
