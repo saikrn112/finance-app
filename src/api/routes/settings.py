@@ -516,6 +516,28 @@ def finish_google_drive_connect(
     return complete_google_drive_connect(code=code, state=state, db=db)
 
 
+def _sync_devices_soon() -> None:
+    """Run a device-sync round now, off the request thread.
+
+    Reconnecting Google is usually done *because* sync stopped, and waiting up to a poll interval
+    for the next round reads as "it still isn't working". Takes the job lock like every round, so it
+    defers harmlessly if something else is running.
+    """
+    def run() -> None:
+        from src.models import SessionLocal
+        from src.services.auto_tasks import _run_device_sync
+
+        session = SessionLocal()
+        try:
+            _run_device_sync(session, trigger="google-connected")
+        except Exception:
+            logger.warning("device sync after Google connect failed", exc_info=True)
+        finally:
+            session.close()
+
+    threading.Thread(target=run, name="sync-after-connect", daemon=True).start()
+
+
 def complete_google_drive_connect(code: str, state: str, db: Session) -> HTMLResponse:
     try:
         pending_state = validate_google_state(state)
@@ -552,6 +574,7 @@ def complete_google_drive_connect(code: str, state: str, db: Session) -> HTMLRes
     # A fresh consent is exactly the event that makes any cached verdict wrong. The fingerprint
     # usually catches it, but Google may reissue the same refresh token, and then only this does.
     _invalidate_token_health()
+    _sync_devices_soon()
     return HTMLResponse(
         """
         <html>

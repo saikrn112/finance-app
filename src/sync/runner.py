@@ -78,11 +78,17 @@ def sync_once(
     after a restore -- so the restored state wins on peers deliberately rather than being merged
     back over -- and as the recovery path when a payload has gone missing from the transport.
     """
+    from src.services import device_sync_health
+
     choice = choose_transport(db)
     if choice.transport is None:
+        if sync_enabled():
+            # Enabled but unable to reach Drive -- almost always an expired Google sign-in. Recorded,
+            # because returning quietly left the last attempt days old with no error: the banner
+            # could only say "nothing succeeded recently" while the real cause was one click away.
+            device_sync_health.record(db, successful=False, problem=_transport_problem(choice.reason))
         return {"ran": False, "mode": choice.mode, "reason": choice.reason}
 
-    from src.services import device_sync_health
     try:
         result: SyncResult = run_sync(
             db, choice.transport, device_label=device_label, force_publish=force_publish
@@ -96,6 +102,15 @@ def sync_once(
     problem = convergence_problem(summary)
     device_sync_health.record(db, successful=problem is None, problem=problem)
     return summary
+
+
+def _transport_problem(reason: str | None) -> str:
+    from src.services.device_sync_health import RECONNECT_REASON
+
+    text = (reason or "").lower()
+    if "expired" in text or "reconnect" in text or "connect google" in text or "invalid_grant" in text:
+        return RECONNECT_REASON
+    return "Device sync could not reach Google Drive. Check the connection in Settings → Vault."
 
 
 def convergence_problem(result: dict) -> str | None:

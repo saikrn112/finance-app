@@ -229,3 +229,53 @@ def test_the_process_has_a_socket_timeout_backstop():
     import src.api.server  # noqa: F401  (sets it on import)
 
     assert socket.getdefaulttimeout() is not None
+
+
+def test_an_unreachable_drive_is_recorded_not_silently_skipped(temp_db, monkeypatch):
+    """Expired Google sign-in: rounds returned early and recorded nothing for 34 hours, so the banner
+    could only say "nothing succeeded recently" instead of "reconnect Google"."""
+    from src.sync import runner
+
+    Session, _ = temp_db
+    monkeypatch.setenv("FINANCE_APP_SYNC", "1")
+    monkeypatch.setattr(runner, "choose_transport", lambda db: runner.TransportChoice(
+        runner.MODE_OFF, None, "no transport available: Google Drive session expired. Please reconnect."))
+    with Session() as db:
+        assert runner.sync_once(db)["ran"] is False
+        state = device_sync_health.read(db)
+    assert state["last_attempt"] and "Reconnect" in state["last_error"]
+    verdict = device_sync_health.attention(state, enabled=True, configured=True, peer_count=1)
+    assert verdict["needed"] and "Reconnect" in verdict["reason"]
+
+
+def test_paused_sync_records_nothing(temp_db, monkeypatch):
+    from src.sync import runner
+
+    Session, _ = temp_db
+    monkeypatch.delenv("FINANCE_APP_SYNC", raising=False)
+    with Session() as db:
+        runner.sync_once(db)
+        assert device_sync_health.read(db) == {}
+
+
+def test_reconnecting_google_starts_a_sync_round(monkeypatch):
+    import inspect
+
+    from src.api.routes import settings as settings_routes
+
+    assert "_sync_devices_soon()" in inspect.getsource(settings_routes.complete_google_drive_connect)
+
+    started = []
+
+    class FakeThread:
+        def __init__(self, target, **kw):
+            self.target = target
+        def start(self):
+            started.append(self.target)
+
+    monkeypatch.setattr(settings_routes.threading, "Thread", FakeThread)
+    ran = []
+    monkeypatch.setattr("src.services.auto_tasks._run_device_sync", lambda db, trigger: ran.append(trigger))
+    settings_routes._sync_devices_soon()
+    started[0]()
+    assert ran == ["google-connected"]
