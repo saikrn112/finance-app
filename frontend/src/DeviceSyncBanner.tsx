@@ -2,8 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 
 type Attention = { needed: boolean; reason: string | null; last_success: string | null }
 
-/** How often to re-ask. Matches the backend's sync poll, so the banner is never more than one round stale. */
+/** How often to re-ask while all is well. Matches the backend's sync poll. */
 const POLL_MS = 5 * 60 * 1000
+/**
+ * How often to re-ask while the banner is showing. Someone looking at it is usually fixing the
+ * cause -- reconnecting Google -- and at the five-minute rate it kept saying "stopped" for minutes
+ * after sync had already recovered.
+ */
+const POLL_WHILE_SHOWING_MS = 30 * 1000
 
 function ago(iso: string | null): string {
   if (!iso) return 'never'
@@ -35,16 +41,18 @@ export function DeviceSyncBanner({ onOpenSettings }: { onOpenSettings: () => voi
     }
   }, [])
 
+  const showing = Boolean(attention?.needed)
+
   useEffect(() => {
     void check()
-    const timer = window.setInterval(() => void check(), POLL_MS)
+    const timer = window.setInterval(() => void check(), showing ? POLL_WHILE_SHOWING_MS : POLL_MS)
     const onFocus = () => void check()
     window.addEventListener('focus', onFocus)
     return () => {
       window.clearInterval(timer)
       window.removeEventListener('focus', onFocus)
     }
-  }, [check])
+  }, [check, showing])
 
   if (!attention?.needed) return null
   return (
