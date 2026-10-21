@@ -992,8 +992,51 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
             "last_synced": account.last_seen_at.isoformat(),
             "icon_url": plugin.icon_url if plugin else "",
         })
+    _add_freshness(db, rows)
     rows.sort(key=lambda row: (group_order.get(row["group"], 99), row["source"]))
     return rows
+
+
+def _add_freshness(db: Session, rows: list[dict]) -> None:
+    """How current each account is, in the two ways an account gets data.
+
+    Plaid accounts: the newest account snapshot. Snapshots sync between devices, so this is right
+    whichever device pulled -- unlike ConnectedAccount.last_seen_at, which is device-local and sat a
+    week stale on the device that let its peer do the pulling.
+
+    Statement accounts: the newest transaction date the uploaded statements cover.
+    """
+    by_account = dict(
+        db.query(AccountSnapshot.account_key, func.max(AccountSnapshot.synced_at))
+        .filter(AccountSnapshot.connection_state == "plaid", AccountSnapshot.account_key.isnot(None))
+        .group_by(AccountSnapshot.account_key)
+        .all()
+    )
+    by_source = dict(
+        db.query(AccountSnapshot.source, func.max(AccountSnapshot.synced_at))
+        .filter(AccountSnapshot.connection_state == "plaid")
+        .group_by(AccountSnapshot.source)
+        .all()
+    )
+    statements: dict[str, object] = {}
+    for source, latest in (
+        db.query(Transaction.source, func.max(Transaction.date))
+        .filter(Transaction.origin == "statements")
+        .group_by(Transaction.source)
+        .all()
+    ):
+        key = classify_source(source)
+        if latest and (key not in statements or latest > statements[key]):
+            statements[key] = latest
+
+    def iso(value):
+        return value.isoformat() if value else None
+
+    for row in rows:
+        if row.get("connection_state") == "plaid":
+            synced = by_account.get(row.get("account_key")) or by_source.get(row.get("provider_source") or row.get("source"))
+            row["plaid_synced_at"] = iso(synced)
+        row["statements_through"] = iso(statements.get(row.get("source_key")))
 
 
 @router.post("/csv")

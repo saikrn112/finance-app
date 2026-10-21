@@ -84,6 +84,60 @@ function AccountIcon({ account }: { account: SidebarAccount }) {
 
 
 
+function relativeTime(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  // Hours up to two days: "yesterday" for something 34 hours old reads as fresher than it is.
+  if (hours < 48) return `${hours} h ago`
+  return `${Math.round(hours / 24)} days ago`
+}
+
+function shortDate(isoDate: string): string {
+  // Date-only values are calendar dates, not instants: parse as local so "2026-01-31" is not
+  // shown as Jan 30 west of UTC.
+  const [y, m, d] = isoDate.slice(0, 10).split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  const sameYear = date.getFullYear() === new Date().getFullYear()
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) })
+}
+
+/** Plaid accounts older than this are flagged: the daily pull should never leave one this stale. */
+const STALE_SYNC_HOURS = 48
+
+/**
+ * How current the account is, in the way it actually gets data: the last Plaid refresh for a
+ * linked account, the period the uploaded statements cover for a statement account.
+ */
+function AccountFreshness({ account }: { account: SidebarAccount }) {
+  let text: string | null = null
+  let stale = false
+  let title = ''
+  if (account.connection_state === 'plaid' && account.plaid_synced_at) {
+    text = `Synced ${relativeTime(account.plaid_synced_at)}`
+    stale = Date.now() - new Date(account.plaid_synced_at).getTime() > STALE_SYNC_HOURS * 3600 * 1000
+    title = `Last Plaid refresh: ${new Date(account.plaid_synced_at).toLocaleString()}`
+  } else if (account.statements_through) {
+    text = `Statements to ${shortDate(account.statements_through)}`
+    title = 'Latest transaction covered by uploaded statements'
+  } else if (account.last_synced) {
+    text = `Updated ${shortDate(account.last_synced)}`
+    title = 'Latest uploaded balance'
+  }
+  if (!text) return null
+  return (
+    <span
+      className={`block truncate text-[10px] ${stale ? 'text-amber-400' : ''}`}
+      style={stale ? undefined : { color: 'var(--text-muted)' }}
+      title={title}
+    >
+      {text}
+    </span>
+  )
+}
+
+
 /* Sidebar accounts now return amounts converted to displayCurrency by the backend.
    All display uses displayCurrency — no per-account native currency. */
 
@@ -261,6 +315,7 @@ export function Sidebar({
                               Acct {fmt(secondaryBalance)}
                             </span>
                           ) : null}
+                          <AccountFreshness account={account} />
                         </span>
                       ) : null}
                       {expanded && discrepancy !== null && discrepancy > 1 ? (

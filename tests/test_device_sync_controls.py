@@ -279,3 +279,44 @@ def test_reconnecting_google_starts_a_sync_round(monkeypatch):
     settings_routes._sync_devices_soon()
     started[0]()
     assert ran == ["google-connected"]
+
+
+def test_sidebar_freshness_uses_shared_snapshots_and_statement_coverage(temp_db):
+    """Plaid freshness must come from synced snapshots: the device-local last_seen_at sat a week
+    stale on the device whose peer did the pulling."""
+    from datetime import date, datetime
+
+    from src.api.routes.sync import _add_freshness
+    from src.models import AccountSnapshot, Transaction
+
+    Session, _ = temp_db
+    with Session() as db:
+        for when in (datetime(2026, 10, 3, 19, 2), datetime(2026, 10, 19, 19, 13)):
+            snap = AccountSnapshot(source="Example Bank", account_key="acct-1", account_name="Everyday",
+                                   account_group="bank_account", connection_state="plaid",
+                                   currency="USD", synced_at=when)
+            snap.current_value = 100
+            db.add(snap)
+        for d in (date(2026, 1, 3), date(2026, 1, 31)):
+            txn = Transaction(source="Example Card", source_id=f"s-{d}", origin="statements", date=d,
+                              merchant_raw="X", merchant_clean="X", category="Dining")
+            txn.amount = -1
+            db.add(txn)
+        db.commit()
+
+        rows = [
+            {"source": "Everyday", "connection_state": "plaid", "account_key": "acct-1",
+             "provider_source": "Example Bank", "source_key": "example_bank"},
+            {"source": "Example Card", "connection_state": "manual", "source_key": "example_card"},
+        ]
+        import src.api.routes.sync as sync_routes
+        original = sync_routes.classify_source
+        sync_routes.classify_source = lambda s: s.lower().replace(" ", "_")
+        try:
+            _add_freshness(db, rows)
+        finally:
+            sync_routes.classify_source = original
+
+    assert rows[0]["plaid_synced_at"].startswith("2026-10-19T19:13"), "the newest snapshot, not the oldest"
+    assert rows[1]["statements_through"] == "2026-01-31"
+    assert "plaid_synced_at" not in rows[1], "statement accounts are not given a Plaid time"

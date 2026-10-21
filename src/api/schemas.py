@@ -520,6 +520,11 @@ class SidebarAccountItem(BaseModel):
     snapshot_balance: Optional[float] = None
     currency: str
     last_synced: Optional[str] = None
+    #: When Plaid last refreshed this account, on *any* device: the newest account snapshot, which
+    #: travels with sync. `last_synced` is this device's own pull and goes stale while a peer pulls.
+    plaid_synced_at: Optional[str] = None
+    #: The latest transaction date covered by uploaded statements for this source.
+    statements_through: Optional[str] = None
     filter_source: Optional[str] = None
     icon_url: Optional[str] = None
 

@@ -454,6 +454,10 @@ export interface SidebarAccount {
   ledger_balance: number | null
   snapshot_balance: number | null
   last_synced: string | null
+  /** Newest Plaid refresh of this account on any device (snapshots travel with sync). */
+  plaid_synced_at?: string | null
+  /** Newest transaction date covered by uploaded statements. */
+  statements_through?: string | null
   filter_source: string | null
   icon_url?: string
   currency?: string
