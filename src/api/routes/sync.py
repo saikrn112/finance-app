@@ -1029,13 +1029,33 @@ def _add_freshness(db: Session, rows: list[dict]) -> None:
         if latest and (key not in statements or latest > statements[key]):
             statements[key] = latest
 
+    # Last successful *transaction* sync per Plaid connection. Set only after a clean pull, so a
+    # failing connection keeps an old time. Device-local, so it is combined with the snapshot time
+    # below: whichever is newer, this device's pull or the newest balance any device fetched.
+    item_synced: dict[str, datetime] = {}
+    for account_id, extra in (
+        db.query(ConnectedAccount.id, SyncLog.extra_data)
+        .join(SyncLog, SyncLog.id == ConnectedAccount.sync_log_id)
+        .all()
+    ):
+        raw = (extra or {}).get("last_sync_at")
+        try:
+            item_synced[account_id] = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(tzinfo=None)
+        except (TypeError, ValueError):
+            continue
+
     def iso(value):
         return value.isoformat() if value else None
 
     for row in rows:
         if row.get("connection_state") == "plaid":
-            synced = by_account.get(row.get("account_key")) or by_source.get(row.get("provider_source") or row.get("source"))
-            row["plaid_synced_at"] = iso(synced)
+            balance_at = by_account.get(row.get("account_key")) or by_source.get(row.get("provider_source") or row.get("source"))
+            pulled_at = item_synced.get(row.get("account_key"))
+            candidates = [t for t in (balance_at, pulled_at) if t]
+            row["plaid_synced_at"] = iso(max(candidates)) if candidates else None
+            # Balances are refreshed far less often than transactions -- they cost a paid Plaid
+            # call -- so they are reported separately rather than passed off as "last synced".
+            row["balance_as_of"] = iso(balance_at)
         row["statements_through"] = iso(statements.get(row.get("source_key")))
 
 

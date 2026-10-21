@@ -117,7 +117,8 @@ function AccountFreshness({ account }: { account: SidebarAccount }) {
   if (account.connection_state === 'plaid' && account.plaid_synced_at) {
     text = `Synced ${relativeTime(account.plaid_synced_at)}`
     stale = Date.now() - new Date(account.plaid_synced_at).getTime() > STALE_SYNC_HOURS * 3600 * 1000
-    title = `Last Plaid refresh: ${new Date(account.plaid_synced_at).toLocaleString()}`
+    title = `Transactions synced ${new Date(account.plaid_synced_at).toLocaleString()}` +
+      (account.balance_as_of ? `\nBalance as of ${new Date(account.balance_as_of).toLocaleString()}` : '')
   } else if (account.statements_through) {
     text = `Statements to ${shortDate(account.statements_through)}`
     title = 'Latest transaction covered by uploaded statements'

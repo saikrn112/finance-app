@@ -525,6 +525,9 @@ class SidebarAccountItem(BaseModel):
     plaid_synced_at: Optional[str] = None
     #: The latest transaction date covered by uploaded statements for this source.
     statements_through: Optional[str] = None
+    #: When the balance shown was fetched. Refreshed every two weeks (a paid Plaid call), so it
+    #: lags `plaid_synced_at`, which tracks the free transaction pulls.
+    balance_as_of: Optional[str] = None
     filter_source: Optional[str] = None
     icon_url: Optional[str] = None
 

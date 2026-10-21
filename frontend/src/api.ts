@@ -458,6 +458,8 @@ export interface SidebarAccount {
   plaid_synced_at?: string | null
   /** Newest transaction date covered by uploaded statements. */
   statements_through?: string | null
+  /** When the shown balance was fetched; refreshed less often than transactions. */
+  balance_as_of?: string | null
   filter_source: string | null
   icon_url?: string
   currency?: string

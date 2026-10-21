@@ -320,3 +320,36 @@ def test_sidebar_freshness_uses_shared_snapshots_and_statement_coverage(temp_db)
     assert rows[0]["plaid_synced_at"].startswith("2026-10-19T19:13"), "the newest snapshot, not the oldest"
     assert rows[1]["statements_through"] == "2026-01-31"
     assert "plaid_synced_at" not in rows[1], "statement accounts are not given a Plaid time"
+
+
+def test_pressing_sync_moves_the_synced_time_even_without_a_balance_refresh(temp_db):
+    """Balances refresh every 14 days (a paid call); transactions on every press. The sidebar showed
+    the balance time as "Synced 44 h ago" while Sync was succeeding minutes earlier."""
+    from datetime import datetime
+
+    from src.api.routes.sync import _add_freshness
+    from src.models import AccountSnapshot
+    from src.models.transaction import ConnectedAccount, SyncLog
+
+    Session, _ = temp_db
+    with Session() as db:
+        log = SyncLog(source="plaid", sync_type="plaid", status="connected",
+                      extra_data={"last_sync_at": "2026-10-21T21:48:02"})
+        db.add(log)
+        db.flush()
+        db.add(ConnectedAccount(id="acct-1", sync_log_id=log.id, source_key="example_bank",
+                                source="Example Bank", external_account_id="ext-1", name="Everyday",
+                                display_name="Everyday", account_group="bank_account"))
+        snap = AccountSnapshot(source="Example Bank", account_key="acct-1", account_name="Everyday",
+                               account_group="bank_account", connection_state="plaid", currency="USD",
+                               synced_at=datetime(2026, 10, 19, 19, 13))
+        snap.current_value = 100
+        db.add(snap)
+        db.commit()
+
+        rows = [{"source": "Everyday", "connection_state": "plaid", "account_key": "acct-1",
+                 "provider_source": "Example Bank", "source_key": "example_bank"}]
+        _add_freshness(db, rows)
+
+    assert rows[0]["plaid_synced_at"].startswith("2026-10-21T21:48"), "the transaction pull, not the balance"
+    assert rows[0]["balance_as_of"].startswith("2026-10-19T19:13"), "the balance time is kept, separately"
