@@ -38,7 +38,7 @@ def _txn(db, source_id, *, source="Example Card", origin="plaid", when=date(2026
     txn = Transaction(
         source=source, source_id=source_id, origin=origin, date=when,
         merchant_raw="EXAMPLE STORE", merchant_clean="Example Store", category="Dining",
-        account_last4="7521", currency="USD",
+        account_last4="0042", currency="USD",
     )
     txn.amount = Decimal(amount)
     db.add(txn)
@@ -133,7 +133,7 @@ class TestPromotionCarriesTheWork:
                 "source_id": "posted-1", "pending_transaction_id": "pending-1", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
                 "merchant_raw": "EXAMPLE STORE", "merchant_clean": "Example Store",
-                "account_last4": "7521",
+                "account_last4": "0042",
             },
             matcher,
         )
@@ -157,7 +157,7 @@ class TestPromotionCarriesTheWork:
                 "source_id": "posted-2", "pending_transaction_id": "pending-2", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
                 "merchant_raw": "EXAMPLE STORE", "merchant_clean": "Example Store",
-                "account_last4": "7521",
+                "account_last4": "0042",
             },
             matcher,
         )
@@ -178,7 +178,7 @@ class TestPromotionCarriesTheWork:
                 "source_id": "posted-3", "pending_transaction_id": "pending-3", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
                 "merchant_raw": "EXAMPLE STORE", "merchant_clean": "Example Store",
-                "account_last4": "7521",
+                "account_last4": "0042",
             },
             matcher,
         )
@@ -199,7 +199,7 @@ class TestPromotionCarriesTheWork:
                 "source_id": "posted-4", "pending_transaction_id": "pending-4", "pending": False,
                 "date": date(2026, 9, 12), "amount": -40.00,
                 "merchant_raw": "EXAMPLE STORE", "merchant_clean": "Example Store",
-                "account_last4": "7521",
+                "account_last4": "0042",
             },
             matcher,
         )
@@ -223,7 +223,7 @@ class TestStatementOverlap:
                 "source_id": "plaid-dup-1", "pending_transaction_id": None, "pending": False,
                 "date": date(2026, 9, 10), "amount": -40.00,
                 "merchant_raw": "EXAMPLE STORE", "merchant_clean": "Example Store",
-                "account_last4": "7521",
+                "account_last4": "0042",
             },
             matcher,
         )

@@ -29,7 +29,7 @@ def parse_chase(pdf_path: str) -> dict:
     prev_balance = _amt(prev_match.group(1)) if prev_match else 0
     new_balance = _amt(new_match.group(1)) if new_match else 0
 
-    # Chase year from filename: 20231116-statements-7521-.pdf
+    # Chase year from filename: 20231116-statements-0042-.pdf
     fname = os.path.basename(pdf_path)
     year_match = re.match(r"(\d{4})", fname)
     default_year = int(year_match.group(1)) if year_match else 2024
