@@ -354,6 +354,25 @@ class InvestmentPeriodFact(Base):
     )
 
 
+class AccountInvestmentPeriodFact(Base):
+    """Account-scoped movement grounded in a complete provider activity window."""
+    __tablename__ = "account_investment_period_facts"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    source = Column(String, nullable=False)
+    account_key = Column(String, nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    _beginning_value = Column("beginning_value", Numeric(12, 2), nullable=False)
+    _ending_value = Column("ending_value", Numeric(12, 2), nullable=False)
+    _inflow = Column("inflow", Numeric(12, 2), nullable=False)
+    _market_gain = Column("market_gain", Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    provenance = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (Index("ix_account_investment_period_identity", "source", "account_key", "period_end", "currency", unique=True),)
+
+
 class AccountActivity(Base):
     """Provider activity that belongs to an account detail view, not the household ledger."""
 

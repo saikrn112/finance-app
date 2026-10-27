@@ -257,6 +257,8 @@ def _apply_fact(db, spec, record, ref, incoming_at, report) -> None:
     if spec.name == "transactions":
         facts_changed = _apply_provider_revision(spec, record, existing, report)
         for name in ("identity_aliases", "reconciled_ids"):
+            if name == "identity_aliases" and not provider_facts.valid_revision(record):
+                continue  # Rejected adoption must not sneak in via the ordinary metadata merge.
             merged = sorted(set(getattr(existing, name) or []) | set(record.get(name) or []))
             if merged != (getattr(existing, name) or []):
                 setattr(existing, name, merged)
@@ -332,8 +334,17 @@ def _adopt_transaction_identities(db, records, report):
             continue
         current = db.query(Transaction).filter_by(source=record.get("source"), source_id=record.get("source_id")).first()
         if aliases and not provider_facts.valid_revision(record):
-            report._bump(report.fact_conflicts, spec.name)
-            continue
+            # A legacy peer may echo an identity repair already verified here. It adds
+            # no authority or aliases: accept only identical facts and existing claims.
+            verified_echo = (current is not None
+                and (current.provider_revision or {}).get("digest") == provider_facts.row_digest(current)
+                and provider_facts.wire_digest(record) == provider_facts.row_digest(current)
+                and set(aliases) <= set(current.identity_aliases or []))
+            if verified_echo:
+                aliases = []
+            else:
+                report._bump(report.fact_conflicts, spec.name)
+                continue
         for old_id in aliases:
             old = db.query(Transaction).filter_by(source=record.get("source"), source_id=old_id, origin="plaid").first()
             if old is None or old is current:

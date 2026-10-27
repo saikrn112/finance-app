@@ -452,6 +452,7 @@ export interface SidebarAccount {
   connection_state: 'plaid' | 'manual'
   balance: number | null
   ledger_balance: number | null
+  ledger_balance_at_snapshot?: number | null
   snapshot_balance: number | null
   last_synced: string | null
   /** Newest Plaid refresh of this account on any device (snapshots travel with sync). */

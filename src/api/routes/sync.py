@@ -9,12 +9,13 @@ import logging
 from sqlalchemy import and_, func, literal
 
 from src.models import (
+    AccountInvestmentPeriodFact,
     get_db, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot,
     ExchangeRate, SourceBalanceHistory, InvestmentPeriodFact, AccountActivity, ConnectedAccount,
 )
 from src.config import settings
 from src.demo import get_demo_investments, get_demo_plaid_balances, get_demo_sidebar_accounts
-from src.ingestion.plaid_client import create_link_token, exchange_public_token, remove_item, sync_transactions, get_investment_holdings, get_investment_transactions, get_account_balances
+from src.ingestion.plaid_client import get_consented_products, create_link_token, exchange_public_token, remove_item, sync_transactions, get_investment_holdings, get_investment_transactions, get_account_balances
 from src.ingestion.csv_importer import import_csv_file
 from src.ingestion.import_service import commit_import, preview_import
 from src.ingestion.plaid_sync import apply_plaid_sync_batch
@@ -26,6 +27,7 @@ from src.processing.categorizer import RuleMatcher
 from src.processing.parse_retirement import summarize_retirement_transactions
 from src.plugins.registry import get_all_sources, get_credit_card_sources, classify_source, get_plaid_account_profile
 from src.services.exchange_rates import latest_rate_subquery, ensure_rates_fresh
+from src.services.account_filters import transaction_account_filter
 from src.services import job_lock
 from src.services.plaid_health import blocked_error, record_error, record_success
 from src.services.account_values import latest_account_values, record_account_value
@@ -324,7 +326,7 @@ def _classify_sidebar_group(
 
 def _signed_snapshot_value(group: str, value: float) -> float:
     if group == "credit_card":
-        return -abs(value)
+        return -value
     return round(value, 2)
 
 
@@ -563,6 +565,11 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
             SourceBalanceHistory,
             (SourceBalanceHistory._value * lr.c.rate).label("value"),
             InvestmentPeriodFact,
+            AccountInvestmentPeriodFact,
+            (AccountInvestmentPeriodFact._beginning_value * lr.c.rate).label("account_beginning_value"),
+            (AccountInvestmentPeriodFact._ending_value * lr.c.rate).label("account_ending_value"),
+            (AccountInvestmentPeriodFact._inflow * lr.c.rate).label("account_inflow"),
+            (AccountInvestmentPeriodFact._market_gain * lr.c.rate).label("account_market_gain"),
             (InvestmentPeriodFact._beginning_value * lr.c.rate).label("beginning_value"),
             (InvestmentPeriodFact._ending_value * lr.c.rate).label("ending_value"),
             (InvestmentPeriodFact._inflow * lr.c.rate).label("inflow"),
@@ -574,6 +581,12 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
             InvestmentPeriodFact.source == SourceBalanceHistory.source,
             InvestmentPeriodFact.period_end == SourceBalanceHistory.date,
             InvestmentPeriodFact.currency == SourceBalanceHistory.currency,
+        ))
+        .outerjoin(AccountInvestmentPeriodFact, and_(
+            AccountInvestmentPeriodFact.source == SourceBalanceHistory.source,
+            AccountInvestmentPeriodFact.account_key == SourceBalanceHistory.account_key,
+            AccountInvestmentPeriodFact.period_end == SourceBalanceHistory.date,
+            AccountInvestmentPeriodFact.currency == SourceBalanceHistory.currency,
         ))
         .filter(SourceBalanceHistory.account_group.in_(["investment", "brokerage"]))
         .order_by(SourceBalanceHistory.date.asc(), SourceBalanceHistory.source.asc())
@@ -593,6 +606,9 @@ def _investment_holdings_history(db: Session, currency: str = "USD") -> list[dic
                 value = getattr(row, name)
                 if value is not None:
                     item[name] = round(float(value), 2)
+        if row.AccountInvestmentPeriodFact is not None:
+            for name in ("beginning_value", "ending_value", "inflow", "market_gain"):
+                item[name] = round(float(getattr(row, "account_" + name)), 2)
         history.append(item)
     return history
 
@@ -976,9 +992,14 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
         ).join(lr, and_(lr.c.from_currency == SourceBalanceHistory.currency, lr.c.to_currency == literal(target_currency))).filter(
             SourceBalanceHistory.account_key == account.id,
         ).order_by(SourceBalanceHistory.date.desc(), SourceBalanceHistory.created_at.desc()).first()
-        ledger = db.query(func.sum(Transaction._amount * lr.c.rate)).join(
+        ledger_query = db.query(func.sum(Transaction._amount * lr.c.rate)).join(
             lr, and_(lr.c.from_currency == Transaction.currency, lr.c.to_currency == literal(target_currency)),
-        ).filter(Transaction.plaid_account_id == account.external_account_id).scalar()
+        ).filter(transaction_account_filter([f"account:{account.id}"]))
+        ledger = ledger_query.scalar()
+        ledger_at_snapshot = ledger_query.filter(
+            Transaction.date <= value.SourceBalanceHistory.date,
+            Transaction.pending.is_(False),
+        ).scalar() if value else None
         plugin = all_plugins.get(account.source_key)
         balance = round(float(value.converted), 2) if value else None
         rows.append({
@@ -988,6 +1009,8 @@ def _build_sidebar_accounts(db: Session, target_currency: str = "USD") -> list[d
             "group": account.account_group, "connection_state": "plaid",
             "balance": balance, "snapshot_balance": balance,
             "ledger_balance": round(float(ledger), 2) if ledger is not None else None,
+            "ledger_balance_at_snapshot": round(float(ledger_at_snapshot), 2) if ledger_at_snapshot is not None else None,
+            "balance_as_of": value.SourceBalanceHistory.date.isoformat() if value else None,
             "currency": target_currency, "filter_source": f"account:{account.id}",
             "last_synced": account.last_seen_at.isoformat(),
             "icon_url": plugin.icon_url if plugin else "",
@@ -1055,7 +1078,7 @@ def _add_freshness(db: Session, rows: list[dict]) -> None:
             row["plaid_synced_at"] = iso(max(candidates)) if candidates else None
             # Balances are refreshed far less often than transactions -- they cost a paid Plaid
             # call -- so they are reported separately rather than passed off as "last synced".
-            row["balance_as_of"] = iso(balance_at)
+            row["balance_as_of"] = row.get("balance_as_of") or iso(balance_at)
         row["statements_through"] = iso(statements.get(row.get("source_key")))
 
 
@@ -1095,6 +1118,7 @@ def get_link_token(products: str = "transactions", account_id: str | None = None
     try:
         access_token = None
         requested_products = products
+        additional_products = []
         if account_id:
             log = db.query(SyncLog).filter(SyncLog.id == account_id, SyncLog.source == "plaid", SyncLog.status == "connected").first()
             if not log:
@@ -1104,11 +1128,16 @@ def get_link_token(products: str = "transactions", account_id: str | None = None
                 raise HTTPException(status_code=400, detail="Plaid access token missing for reconnect")
             existing_products = (log.extra_data or {}).get("plaid_products")
             if existing_products:
-                requested_products = ",".join(existing_products)
+                additional_products = sorted(set(products.split(",")) - set(existing_products))
+                # The default reconnect must not accidentally add ordinary transactions.
+                if products == "transactions":
+                    additional_products = []
+                requested_products = ",".join(sorted(set(existing_products) | set(additional_products)))
             if (blocked_error(log) or {}).get("action") == "relink":
                 access_token = None
         try:
-            token = create_link_token(products=requested_products.split(","), access_token=access_token)
+            options = {"additional_consented_products": additional_products} if access_token and additional_products else {}
+            token = create_link_token(products=requested_products.split(","), access_token=access_token, **options)
         except Exception as exc:
             code = _plaid_error_code(exc)
             if code == ITEM_GONE_ERROR_CODE and account_id:
@@ -1182,8 +1211,18 @@ def exchange_token(
                 extra["institution_id"] = institution_id
             if fingerprints:
                 extra["account_fingerprints"] = fingerprints
-            if products and not extra.get("plaid_products"):
-                extra["plaid_products"] = [item for item in products.split(",") if item]
+            requested = {item for item in products.split(",") if item}
+            existing = set(extra.get("plaid_products") or [])
+            additions = requested - existing if products != "transactions" else set()
+            if additions:
+                consented = set(get_consented_products(extra["access_token"]))
+                if not additions <= consented:
+                    raise HTTPException(409, "Investment access was not approved. Complete the connection permission screen and try again.")
+                extra["plaid_products"] = sorted(existing | requested)
+                extra.pop("investments_unavailable", None)
+                extra.pop("last_investment_transactions_sync_at", None)
+            elif products and not existing:
+                extra["plaid_products"] = sorted(requested)
             extra.pop("last_snapshot_refresh_at", None)
             extra.pop("last_sync_error", None)
             extra.pop("sync_stage_errors", None)
@@ -1397,6 +1436,10 @@ def _sync_plaid_locked(db: Session):
                   institution=institution,
                   plaid_item_id=log.plaid_item_id,
               )
+              if not previous_investment_sync:
+                  from src.ingestion.plaid_activity import preview_investment_history_replacements
+                  if preview_investment_history_replacements(db, institution, investment_transactions):
+                      raise ValueError("Investment history identifiers changed. Review overlapping saved records before applying a full history refresh.")
               investment_counts = apply_account_activity_batch(
                   db=db,
                   institution=institution,
@@ -1407,6 +1450,10 @@ def _sync_plaid_locked(db: Session):
               for key, value in investment_counts.as_dict().items():
                   total_counts[key] = total_counts.get(key, 0) + value
                   account_counts[key] = account_counts.get(key, 0) + value
+              from src.ingestion.plaid_activity import persist_account_investment_periods
+              full_start = date.fromisoformat(extra_data.get("investment_history_start", investment_start.isoformat()))
+              persist_account_investment_periods(db, institution, full_start, date.today())
+              extra_data["investment_history_start"] = full_start.isoformat()
               extra_data["last_investment_transactions_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_at"] = datetime.utcnow().isoformat()
           extra_data["last_sync_counts"] = account_counts
@@ -1520,7 +1567,13 @@ def get_investment_activity(
                          "description": r.Transaction.merchant_raw, "merchant": r.Transaction.merchant_clean,
                          "type": "other", "amount": round(float(r.converted), 2),
                          "pending": r.Transaction.pending, "account_last4": r.Transaction.account_last4} for r in ledger_rows)
-        return {"currency": currency, "activity": sorted(activity, key=lambda r: (r["date"], r["id"]), reverse=True)}
+        connection = db.query(SyncLog).filter(SyncLog.source == "plaid", SyncLog.status == "connected", SyncLog.id == account.sync_log_id).first()
+        extra = (connection.extra_data or {}) if connection else {}
+        needs_access = bool(account.account_type == "investment" and connection and extra.get("plaid_products") and "investments" not in extra["plaid_products"])
+        return {"currency": currency, "activity": sorted(activity, key=lambda r: (r["date"], r["id"]), reverse=True),
+                "investment_access_required": needs_access,
+                "connection_id": connection.id if needs_access else None,
+                "investment_last_synced_at": extra.get("last_investment_transactions_sync_at")}
     rates = db.query(lr.c.from_currency, lr.c.rate).filter(lr.c.to_currency == currency).all()
     rate_map = {row[0]: float(row[1]) for row in rates}
     source_key = classify_source(source) or source

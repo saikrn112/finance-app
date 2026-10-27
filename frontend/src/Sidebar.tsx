@@ -118,7 +118,7 @@ function AccountFreshness({ account }: { account: SidebarAccount }) {
     text = `Synced ${relativeTime(account.plaid_synced_at)}`
     stale = Date.now() - new Date(account.plaid_synced_at).getTime() > STALE_SYNC_HOURS * 3600 * 1000
     title = `Transactions synced ${new Date(account.plaid_synced_at).toLocaleString()}` +
-      (account.balance_as_of ? `\nBalance as of ${new Date(account.balance_as_of).toLocaleString()}` : '')
+      (account.balance_as_of ? `\nBalance as of ${shortDate(account.balance_as_of)}` : '')
   } else if (account.statements_through) {
     text = `Statements to ${shortDate(account.statements_through)}`
     title = 'Latest transaction covered by uploaded statements'
@@ -282,16 +282,16 @@ export function Sidebar({
                 {items.map((account) => {
                   const action = accountAction(account, onToggleAccount, onShowInvestments, onShowRetirement)
                   const active = account.filter_source ? isSelected(account.filter_source) && !allSelected : false
-                  const discrepancy =
-                    account.ledger_balance !== null && account.snapshot_balance !== null
-                      ? Math.abs(account.ledger_balance - account.snapshot_balance)
-                      : null
+                  const reportedPosition = account.snapshot_balance
+                  const comparedLedger = account.ledger_balance_at_snapshot ?? account.ledger_balance
+                  const discrepancy = comparedLedger !== null && reportedPosition !== null
+                    ? Math.abs(comparedLedger - reportedPosition) : null
                   const primaryBalance = account.group === 'investment' || account.group === 'retirement'
                     ? account.balance
                     : account.ledger_balance ?? account.balance
                   const secondaryBalance =
                     account.group !== 'investment' && account.group !== 'retirement' && account.ledger_balance !== null && account.snapshot_balance !== null
-                      ? account.snapshot_balance
+                      ? reportedPosition
                       : null
                   return (
                     <button
@@ -308,19 +308,29 @@ export function Sidebar({
                           <span className="block truncate">{account.source}</span>
                           {account.account_last4 ? (
                             <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                              Card •••• {account.account_last4}
+                              {account.group === 'credit_card' ? 'Card' : 'Account'} •••• {account.account_last4}
                             </span>
                           ) : null}
                           {secondaryBalance !== null ? (
                             <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                              Acct {fmt(secondaryBalance)}
+                              Reported {fmt(secondaryBalance)}{account.balance_as_of ? ` · ${shortDate(account.balance_as_of)}` : ''}
+                            </span>
+                          ) : null}
+                          {(account.group === 'investment' || account.group === 'retirement') && account.snapshot_balance !== null ? (
+                            <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                              Reported {fmt(account.snapshot_balance)}{account.balance_as_of ? ` · ${shortDate(account.balance_as_of)}` : ''}
+                            </span>
+                          ) : null}
+                          {(account.group === 'investment' || account.group === 'retirement') && account.ledger_balance !== null ? (
+                            <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }} title="Net change from tracked transactions. Earlier activity may be missing.">
+                              Tracked activity {fmt(account.ledger_balance)}
                             </span>
                           ) : null}
                           <AccountFreshness account={account} />
                         </span>
                       ) : null}
                       {expanded && discrepancy !== null && discrepancy > 1 ? (
-                        <span className="text-[10px] text-amber-400" title={`Local ledger is ${fmt(Math.abs(account.ledger_balance! - account.snapshot_balance!))} ${account.ledger_balance! > account.snapshot_balance! ? 'higher' : 'lower'} than last ${account.connection_state === 'plaid' ? 'Plaid sync' : 'statement balance'}`}>⚠</span>
+                        <span className="text-[10px] text-amber-400" title={`Posted ledger is ${fmt(discrepancy)} ${comparedLedger! > reportedPosition! ? 'higher' : 'lower'} than the reported balance${account.balance_as_of ? ` as of ${shortDate(account.balance_as_of)}` : ''}`}>⚠</span>
                       ) : null}
                       {expanded && primaryBalance !== null ? (
                         <span className="text-[10px] font-medium" style={{ color: primaryBalance >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>

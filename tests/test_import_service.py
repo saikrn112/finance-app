@@ -93,6 +93,65 @@ def test_statement_vs_plaid_heuristic_dedup_still_works(db_session, monkeypatch)
     assert result["skipped"] == 1
 
 
+def test_statement_preview_matches_authorized_date_before_nearby_posted_date(db_session):
+    """A later statement purchase should claim a Plaid row whose authorized date matches it."""
+    from src.ingestion.import_service import NormalizedImportTransaction, _preview_duplicates
+
+    db_session.add(Transaction(
+        source="Example Card",
+        source_id="plaid-example-sports",
+        origin="plaid",
+        account_last4="4242",
+        currency="USD",
+        date=date(2026, 4, 19),
+        authorized_date=date(2026, 4, 18),
+        amount=Decimal("-25.00"),
+        merchant_raw="EXAMPLE SPORTS",
+    ))
+    db_session.commit()
+    statement_rows = [
+        NormalizedImportTransaction("Example Card", "stmt-17", date(2026, 4, 17), -25.0,
+                                    "SQ *EXAMPLE SPORTS ANYTOWN", "4242", origin="statements"),
+        NormalizedImportTransaction("Example Card", "stmt-18", date(2026, 4, 18), -25.0,
+                                    "SQ *EXAMPLE SPORTS ANYTOWN", "4242", origin="statements"),
+    ]
+
+    preview = _preview_duplicates(
+        db_session, statement_rows, existing_log=None, total_records=2,
+        record_type="transactions", payload=None, payloads=None,
+        source="Example Card", kind="statement_pdf",
+    )
+
+    assert preview["items"][0]["duplicate_reason"] is None
+    assert preview["items"][1]["duplicate_reason"]["existing_date"] == "2026-04-19"
+
+
+def test_investment_pdf_matches_prior_csv_by_account_date_and_value(db_session):
+    from src.ingestion.import_service import _preview_investment_duplicates
+
+    db_session.add(SyncLog(
+        source="Example Health Account",
+        sync_type="import_investment_csv",
+        status="success",
+        extra_data={"payload": {
+            "account": {"account_id": "123452468", "statement_date": "2026-02-28"},
+            "summary": {"ending_value": 125.50},
+        }},
+    ))
+    db_session.commit()
+
+    preview = _preview_investment_duplicates(
+        db_session,
+        {"account": {"account_id": "2468", "statement_date": "2026-02-28", "source_id": "pdf-version"},
+         "summary": {"ending_value": 125.50}, "holdings": []},
+        "Example Health Account", "investment_statement_pdf",
+    )
+
+    assert preview["duplicate_count"] == 1
+    assert preview["importable_count"] == 0
+    assert preview["items"][0]["duplicate_reason"]["type"] == "investment_statement"
+
+
 def test_preview_import_marks_cross_source_duplicates(db_session, monkeypatch):
     from src.plugins.registry import get_csv_config
     monkeypatch.setattr(get_csv_config("example_charge_card"), "account_col", "Account")
@@ -400,3 +459,53 @@ def test_retirement_preview_and_commit_skip_existing_rows(db_session):
     assert len(logs) == 2
     assert len(logs[-1].extra_data["payload"]["transactions"]) == 1
     assert logs[-1].extra_data["payload"]["transactions"][0]["date"] == "2026-02-28"
+
+
+def test_card_statement_credit_snapshot_uses_statement_date_and_asset_sign(db_session, monkeypatch):
+    from src.ingestion import import_service
+    from src.models import AccountSnapshot, SourceBalanceHistory
+    monkeypatch.setattr(import_service, '_statement_parser', lambda _: lambda path: {
+        'source': 'Example Card', 'account_last4': '4321',
+        'beginning_balance': 0, 'ending_balance': -25,
+        'end_date': '2026-02-12',
+        'transactions': [{'date': '2026-02-10', 'amount': -25, 'description': 'Example refund'}],
+    })
+    preview = preview_import(db_session, file_bytes=b'synthetic credit statement', filename='example.pdf', source='example_card', kind='statement_pdf')
+    commit_import(db_session, preview['import_id'])
+    snapshot = db_session.query(AccountSnapshot).one()
+    history = db_session.query(SourceBalanceHistory).one()
+    assert snapshot._current_value == 25
+    assert snapshot.synced_at.date() == date(2026, 2, 12)
+    assert history._value == 25
+    assert history.date == date(2026, 2, 12)
+
+
+def test_statement_without_closing_date_does_not_invent_snapshot(db_session, monkeypatch):
+    from src.ingestion import import_service
+    from src.models import AccountSnapshot, SourceBalanceHistory
+    monkeypatch.setattr(import_service, '_statement_parser', lambda _: lambda path: {
+        'source': 'Example Card', 'account_last4': '4321', 'ending_balance': 0,
+        'transactions': [{'date': '2026-02-10', 'amount': 25, 'description': 'Example purchase'}],
+    })
+    preview = preview_import(db_session, file_bytes=b'example activity only', filename='example.pdf', source='example_card', kind='statement_pdf')
+    result = commit_import(db_session, preview['import_id'])
+    assert result['imported'] == 1
+    assert db_session.query(AccountSnapshot).count() == 0
+    assert db_session.query(SourceBalanceHistory).count() == 0
+
+
+def test_same_day_statements_keep_separate_account_balances(db_session, monkeypatch):
+    from src.ingestion import import_service
+    from src.models import SourceBalanceHistory
+    for mask, balance in [('1111', 25), ('2222', 50)]:
+        monkeypatch.setattr(import_service, '_statement_parser', lambda _, mask=mask, balance=balance: lambda path: {
+            'source': 'Example Card', 'account_last4': mask, 'ending_balance': balance,
+            'end_date': '2026-02-12',
+            'transactions': [{'date': '2026-02-10', 'amount': balance, 'description': 'Example purchase'}],
+        })
+        preview = preview_import(db_session, file_bytes=('synthetic '+mask).encode(), filename='example.pdf', source='example_card', kind='statement_pdf')
+        commit_import(db_session, preview['import_id'])
+    history = db_session.query(SourceBalanceHistory).all()
+    assert len(history) == 2
+    assert len({row.account_key for row in history}) == 2
+    assert {row._value for row in history} == {-25, -50}

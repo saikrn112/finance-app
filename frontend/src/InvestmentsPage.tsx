@@ -1,4 +1,6 @@
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { PlaidLinkButton } from './PlaidLink'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchJson } from './api'
 import { useFilterStore } from './store'
 import { formatCount, formatCurrency, formatPercent, formatPlainNumber } from './privacy'
@@ -21,8 +23,8 @@ interface InvestmentHistoryPoint {
   synced_at: string
   source: string
   value: number
-  inflow?: number
-  market_gain?: number
+  inflow?: number | null
+  market_gain?: number | null
   ending_value?: number
 }
 
@@ -38,13 +40,15 @@ interface AccountActivity {
 
 function prettyStatementDate(value: string | null | undefined) {
   if (!value) return 'Unknown'
-  const parsed = new Date(value)
+  const parsed = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00` : value)
   return Number.isNaN(parsed.getTime())
     ? value
     : parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
 export function InvestmentsPage({ onBack, source }: { onBack: () => void; source?: string | null }) {
+  const queryClient = useQueryClient()
+  const [connecting, setConnecting] = useState(false)
   const privacyMode = useFilterStore((state) => state.privacyMode)
   const displayCurrency = useFilterStore((state) => state.displayCurrency)
   const fmt = (n: number) => formatCurrency(n, privacyMode, { currency: displayCurrency })
@@ -63,7 +67,7 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
   const visibleSource = source || null
   const { data: activityData } = useQuery({
     queryKey: ['investment-activity', visibleSource, displayCurrency],
-    queryFn: () => fetchJson<{ activity: AccountActivity[] }>(`/sync/plaid/investments/activity?source=${encodeURIComponent(visibleSource || '')}&currency=${encodeURIComponent(displayCurrency)}`),
+    queryFn: () => fetchJson<{ activity: AccountActivity[]; investment_access_required?: boolean; connection_id?: string; investment_last_synced_at?: string }>(`/sync/plaid/investments/activity?source=${encodeURIComponent(visibleSource || '')}&currency=${encodeURIComponent(displayCurrency)}`),
     enabled: Boolean(visibleSource),
     staleTime: 60_000,
   })
@@ -196,6 +200,11 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
                 <h2 className="font-semibold text-sm">Account Activity</h2>
                 <span className="text-xs text-slate-500">{formatCount(activity.length, privacyMode)} trades and cash events</span>
               </div>
+              {activityData?.investment_access_required ? <div className="mb-3 rounded border border-amber-500/40 p-3 text-sm">
+                <p>Investment activity access is not enabled for this connection. Balance updates do not include trades or transfers. Inflow and gain remain unavailable until activity is complete.</p>
+                {connecting ? <div className="mt-2"><PlaidLinkButton accountId={activityData.connection_id} products="investments" label="Approve investment access" onSuccess={() => { setConnecting(false); queryClient.invalidateQueries() }} /></div>
+                  : <button className="mt-2 text-blue-500 hover:underline" onClick={() => setConnecting(true)}>Enable investment activity</button>}
+              </div> : null}
               {activity.length ? (
                 <div className="max-h-[28rem] overflow-auto rounded-md border border-slate-200 dark:border-slate-700">
                   <table className="w-full min-w-[42rem] text-sm">
@@ -224,6 +233,7 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
                 <h2 className="font-semibold text-sm">Balance History</h2>
                 <span className="text-xs text-slate-500">{formatCount(monthlyHistory.length, privacyMode)} snapshots</span>
               </div>
+              {monthlyHistory.some(row => row.inflow == null || row.market_gain == null) ? <p className="mb-3 text-xs text-slate-500">— means the period breakdown is unavailable, not zero.</p> : null}
               {monthlyHistory.length ? (
                 <table className="w-full text-sm">
                   <thead>
@@ -238,9 +248,9 @@ export function InvestmentsPage({ onBack, source }: { onBack: () => void; source
                     {monthlyHistory.map((row) => (
                       <tr key={`${row.source}-${row.synced_at}`} className="border-b dark:border-slate-700/50">
                         <td className="py-2">{prettyStatementDate(row.synced_at)}</td>
-                        <td className="py-2 text-right font-medium">{row.inflow !== undefined ? fmt(row.inflow) : '—'}</td>
+                        <td className="py-2 text-right font-medium">{row.inflow != null ? fmt(row.inflow) : '—'}</td>
                         <td className={`py-2 text-right font-medium ${((row.market_gain || 0) >= 0) ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-400'}`}>
-                          {row.market_gain !== undefined ? fmt(row.market_gain) : '—'}
+                          {row.market_gain != null ? fmt(row.market_gain) : '—'}
                         </td>
                         <td className="py-2 text-right font-medium">{fmt(row.ending_value ?? row.value)}</td>
                       </tr>

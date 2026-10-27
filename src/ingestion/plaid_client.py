@@ -64,7 +64,7 @@ def _apply_default_timeout(api_client) -> None:
     rest.request = request
 
 
-def create_link_token(user_id: str = "user-1", products: list[str] = None, access_token: str | None = None) -> str:
+def create_link_token(user_id: str = "user-1", products: list[str] = None, access_token: str | None = None, additional_consented_products: list[str] | None = None) -> str:
     """Create a link token for Plaid Link initialization."""
     client = get_plaid_client()
     
@@ -75,11 +75,10 @@ def create_link_token(user_id: str = "user-1", products: list[str] = None, acces
         user=LinkTokenCreateRequestUser(client_user_id=user_id),
     )
     if access_token:
-        # Update mode (re-authenticating an existing Item). Plaid rejects `products` here:
-        # the Item keeps the products it was created with, and naming them again asks for
-        # consent the user has not granted, surfacing as ADDITIONAL_CONSENT_REQUIRED and
-        # leaving the Item stuck in ITEM_LOGIN_REQUIRED.
+        # Product upgrades use additional consent, never the initial products array.
         request_kwargs["access_token"] = access_token
+        if additional_consented_products:
+            request_kwargs["additional_consented_products"] = [Products(p) for p in additional_consented_products]
         request_kwargs["update"] = LinkTokenCreateRequestUpdate(account_selection_enabled=True)
     else:
         request_kwargs["products"] = [Products(p) for p in (products or ["transactions"])]
@@ -231,6 +230,7 @@ def get_investment_transactions(
     offset = 0
     page_size = 500
     transactions: list[dict] = []
+    expected_total = None
     while True:
         response = client.investments_transactions_get(
             InvestmentsTransactionsGetRequest(
@@ -240,6 +240,10 @@ def get_investment_transactions(
                 options=InvestmentsTransactionsGetRequestOptions(count=page_size, offset=offset),
             )
         )
+        total = int(response.total_investment_transactions or 0)
+        if expected_total is not None and total != expected_total:
+            raise RuntimeError("Investment history changed during pagination; retry before applying it")
+        expected_total = total
         accounts = {item["account_id"]: item for item in (account.to_dict() for account in response.accounts)}
         securities = {item.security_id: item for item in response.securities}
         for transaction in response.investment_transactions:
@@ -281,6 +285,8 @@ def get_investment_transactions(
         offset += len(response.investment_transactions)
         if offset >= int(response.total_investment_transactions or 0) or not response.investment_transactions:
             break
+    if len(transactions) != expected_total or len({r["source_id"] for r in transactions}) != len(transactions):
+        raise RuntimeError("Investment history pagination was incomplete; no history was applied")
     return transactions
 
 
@@ -300,3 +306,10 @@ def get_account_balances(access_token: str) -> list[dict]:
 
 
 logger = logging.getLogger(__name__)
+
+
+def get_consented_products(access_token: str) -> list[str]:
+    """Read actual consent after a product-upgrade Link callback."""
+    from plaid.model.item_get_request import ItemGetRequest
+    item = get_plaid_client().item_get(ItemGetRequest(access_token=access_token)).to_dict()["item"]
+    return list(item.get("consented_products") or item.get("products") or [])

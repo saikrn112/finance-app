@@ -1514,3 +1514,75 @@ class TestProjectsAndSplits:
         totals = {m["name"]: m["expenditure"] for m in
                   test_client.get(f"/api/projects/{project_id}?currency=USD").json()["member_totals"]}
         assert totals == {"Ada": 50.0, "Grace": 0.0}
+
+
+def test_connected_sidebar_includes_import_history_and_compares_same_date(client):
+    from src.models import ConnectedAccount
+    from src.services.account_filters import transaction_account_filter
+    test_client, Session = client
+    db = Session()
+    log = SyncLog(id='history-log', source='plaid', sync_type='plaid', status='connected',
+                  extra_data={'institution_name': 'Example History Bank'})
+    account = ConnectedAccount(id='history-account', sync_log_id=log.id,
+        source='Example History Bank', source_key='example_history', external_account_id='history-external',
+        name='Checking', display_name='Checking', mask='4321', account_group='bank_account', currency='USD')
+    db.add_all([log, account])
+    db.flush()
+    specs = [
+        ('imported', 'Example History Bank', '4321', None, 'USD', 200, date(2026, 1, 1), False),
+        ('posted', 'Example History Bank', '4321', 'history-external', 'USD', -30, date(2026, 2, 1), False),
+        ('later', 'Example History Bank', '4321', 'history-external', 'USD', -10, date(2026, 2, 3), False),
+        ('pending', 'Example History Bank', '4321', 'history-external', 'USD', -5, date(2026, 2, 1), True),
+        ('other-mask', 'Example History Bank', '9999', None, 'USD', 900, date(2026, 1, 1), False),
+        ('unknown', 'Example History Bank', None, None, 'USD', 900, date(2026, 1, 1), False),
+        ('other-source', 'Example Other Bank', '4321', None, 'USD', 900, date(2026, 1, 1), False),
+        ('other-currency', 'Example History Bank', '4321', None, 'EUR', 900, date(2026, 1, 1), False),
+        ('other-linked', 'Example History Bank', '4321', 'different-external', 'USD', 900, date(2026, 1, 1), False),
+    ]
+    for ident, source, mask, external, currency, amount, day, pending in specs:
+        db.add(Transaction(id=ident, source_id=ident, source=source, account_last4=mask,
+            plaid_account_id=external, currency=currency, amount=amount, date=day,
+            pending=pending, merchant_raw='Synthetic activity', origin='plaid' if external else 'statements'))
+    db.add(SourceBalanceHistory(source=account.source, account_key=account.id,
+        source_key=account.source_key, account_group='bank_account', date=date(2026, 2, 2),
+        value=170, currency='USD', provenance='account_snapshot'))
+    db.commit()
+    selected = {t.id for t in db.query(Transaction).filter(transaction_account_filter(['account:history-account']))}
+    assert selected == {'imported', 'posted', 'later', 'pending'}
+    response = test_client.get('/api/sync/sidebar-accounts?currency=USD')
+    assert response.status_code == 200
+    row = next(r for r in response.json()['accounts'] if r.get('account_key') == account.id)
+    assert row['ledger_balance'] == 155
+    assert row['ledger_balance_at_snapshot'] == 170
+    assert row['snapshot_balance'] == 170
+    assert row['balance_as_of'] == '2026-02-02'
+    db.add(ConnectedAccount(id='ambiguous-account', sync_log_id=log.id,
+        source=account.source, source_key=account.source_key, external_account_id='other-external',
+        name='Another account', display_name='Another account', mask='4321', account_group='bank_account', currency='USD'))
+    db.commit()
+    selected = {t.id for t in db.query(Transaction).filter(transaction_account_filter(['account:history-account']))}
+    assert selected == {'posted', 'later', 'pending'}
+    db.close()
+
+
+@pytest.mark.parametrize('raw,expected', [(75.0,-75.0), (-25.0,25.0), (0.0,0.0)])
+def test_credit_snapshot_preserves_overpayment_sign(raw, expected):
+    from src.api.routes.sync import _signed_snapshot_value
+    assert _signed_snapshot_value('credit_card', raw) == expected
+    assert _signed_snapshot_value('bank_account', raw) == raw
+
+
+def test_investment_activity_reports_missing_access_without_fabricating_history(client):
+    from src.models import ConnectedAccount
+    test_client, Session = client
+    with Session() as db:
+        log = SyncLog(source="plaid", status="connected", extra_data={"plaid_products": ["transactions"]})
+        db.add(log); db.flush()
+        account = ConnectedAccount(id="example-brokerage", sync_log_id=log.id, source_key="example", source="Example Broker", external_account_id="example-external", name="Brokerage", display_name="Brokerage", account_group="investment", account_type="investment", currency="USD")
+        db.add(account); db.commit()
+        connection_id = log.id
+    response = test_client.get("/api/sync/plaid/investments/activity?source=example-brokerage&currency=USD")
+    assert response.status_code == 200
+    assert response.json()["investment_access_required"] is True
+    assert response.json()["connection_id"] == connection_id
+    assert response.json()["activity"] == []

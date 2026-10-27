@@ -13,7 +13,7 @@ from src.models import (
     TransactionSplit,
 )
 from src.processing.categorizer import RuleMatcher
-from src.processing.overlap_diagnostics import _merchant_matches
+from src.processing.overlap_diagnostics import source_merchant_matches
 from src.sync.provider_facts import observe, row_digest
 
 
@@ -335,7 +335,7 @@ def _find_statement_boundary_overlap(db: Session, institution: str, txn_data: di
             continue
         if round(float(statement_txn._amount), 2) != round(float(txn_data["amount"]), 2):
             continue
-        if _merchant_matches(statement_txn.merchant_raw, txn_data["merchant_raw"]):
+        if source_merchant_matches(institution, statement_txn.merchant_raw, txn_data["merchant_raw"]):
             candidates.append(statement_txn)
     # Several plausible statement rows require a review, not an arbitrary first-row deletion.
     return candidates[0] if len(candidates) == 1 else None

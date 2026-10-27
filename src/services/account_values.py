@@ -32,6 +32,7 @@ def record_account_value(
             SourceBalanceHistory.source == source,
             SourceBalanceHistory.date == observed_day,
             SourceBalanceHistory.account_key == account_key,
+            SourceBalanceHistory.provenance == provenance,
         )
         .first()
     )

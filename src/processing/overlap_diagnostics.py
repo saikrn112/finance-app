@@ -218,3 +218,13 @@ def _compact(value: str) -> str:
 def _tokens(value: str) -> list[str]:
     compacted = re.sub(r"[^a-z0-9]+", " ", value.lower()).split()
     return [token for token in compacted if len(token) > 2 and token not in STOPWORDS]
+
+
+def source_merchant_matches(source: str, left: str, right: str) -> bool:
+    """Apply an optional provider comparison policy to both historical and new rows."""
+    from src.plugins.registry import classify_source, get_all_sources
+    plugin = get_all_sources().get(classify_source(source))
+    normalizer = plugin.overlap_merchant_normalizer if plugin else None
+    if normalizer:
+        left, right = normalizer(left), normalizer(right)
+    return _merchant_matches(left, right)

@@ -226,3 +226,100 @@ def reroute_account_activity_to_transactions(db: Session, *, apply: bool = False
             recategorized += 1
     db.commit()
     return {"candidates": len(rows), "moved": moved, "recategorized": recategorized}
+
+
+def persist_account_investment_periods(db, institution, coverage_start, coverage_end):
+    """Persist complete account intervals; never invent a first balance or missing activity."""
+    from src.models import SourceBalanceHistory, AccountInvestmentPeriodFact
+    accounts = db.query(ConnectedAccount).filter_by(source=institution, active=True, account_type="investment").all()
+    inserted = 0
+    for account in accounts:
+        snapshots = db.query(SourceBalanceHistory).filter(
+            SourceBalanceHistory.account_key == account.id,
+            SourceBalanceHistory.currency == account.currency,
+            SourceBalanceHistory.provenance == "account_snapshot",
+        ).order_by(SourceBalanceHistory.date).all()
+        for previous, ending in zip(snapshots, snapshots[1:]):
+            if previous.date < coverage_start or ending.date > coverage_end or previous.date >= ending.date:
+                continue
+            existing = db.query(AccountInvestmentPeriodFact).filter_by(source=institution, account_key=account.id, period_end=ending.date, currency=account.currency).first()
+            amounts = db.query(AccountActivity._amount).filter(
+                AccountActivity.source == institution,
+                AccountActivity.account_id == account.external_account_id,
+                AccountActivity.currency == account.currency,
+                AccountActivity.pending.is_(False),
+                AccountActivity.activity_type == "transfer",
+                AccountActivity.date > previous.date, AccountActivity.date <= ending.date,
+            ).all()
+            inflow = sum((row[0] for row in amounts), start=0)
+            values = dict(period_start=previous.date, _beginning_value=previous._value,
+                _ending_value=ending._value, _inflow=inflow,
+                _market_gain=ending._value-previous._value-inflow)
+            if existing is not None:
+                if all(getattr(existing, key) == value for key, value in values.items()):
+                    continue
+                # Retire the old immutable observation before publishing its grounded
+                # correction. A stale peer must not restore the earlier calculation.
+                from datetime import datetime, timedelta
+                from src.sync.refs import RefResolver
+                from src.sync.tracking import record_tombstone
+                kind, ref = RefResolver(db).describe(existing)
+                record_tombstone(db, kind, ref)
+                db.flush()
+                from src.models import Tombstone
+                marker = db.get(Tombstone, {"kind": kind, "ref": ref})
+                marker.deleted_at = datetime.utcnow()
+                db.flush()
+                for key, value in values.items():
+                    setattr(existing, key, value)
+                existing.updated_at = datetime.utcnow() + timedelta(microseconds=1)
+            else:
+                db.add(AccountInvestmentPeriodFact(source=institution, account_key=account.id,
+                    period_end=ending.date, currency=account.currency,
+                    provenance="complete_investment_activity_window", **values))
+            inserted += 1
+    return inserted
+
+
+def preview_investment_history_replacements(db, institution, records):
+    """Read-only review: IDs absent from a complete returned account/date window.
+
+    Absence is a review candidate, not authority to delete. Older history and other
+    activity feeds are excluded. This function never mutates the database.
+    """
+    if len({r["source_id"] for r in records}) != len(records):
+        raise ValueError("Investment history contains repeated provider IDs")
+    ranges = {}
+    ids = {r["source_id"] for r in records}
+    for row in records:
+        if not (row.get("raw_data") or {}).get("investment_type") or not row.get("plaid_account_id"):
+            raise ValueError("Complete investment records need feed and account identity")
+        key = (row["plaid_account_id"], row.get("currency") or "USD")
+        ranges[key] = min(ranges.get(key, row["date"]), row["date"])
+    candidates = []
+    for row in db.query(AccountActivity).filter_by(source=institution):
+        key = (row.account_id, row.currency)
+        if (key in ranges and row.date >= ranges[key] and row.source_id not in ids
+                and (row.raw_data or {}).get("investment_type")):
+            candidates.append(row)
+    return candidates
+
+
+def retire_reviewed_account_activity(db, institution, source_ids):
+    """Apply an explicitly reviewed identity list; caller owns preview and backup.
+
+    Record deletions explicitly so CLI use does not depend on startup importing the
+    ORM tracking hook. This is not an automatic absence-based reconciliation.
+    """
+    from src.sync.refs import RefResolver
+    from src.sync.tracking import record_tombstone
+    rows = db.query(AccountActivity).filter(AccountActivity.source == institution, AccountActivity.source_id.in_(source_ids)).all()
+    resolver = RefResolver(db)
+    for row in rows:
+        kind, ref = resolver.describe(row)
+        record_tombstone(db, kind, ref)
+    db.flush()
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    return len(rows)

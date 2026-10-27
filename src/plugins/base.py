@@ -56,4 +56,6 @@ class ParserPlugin:
     # Optional provider-owned presentation policy for individual Plaid accounts.
     # Receives Plaid's normalized account dict and returns any of display_name,
     # group, or detail_view. Generic defaults apply when omitted.
+    # Provider-owned canonical descriptions used only for overlap comparison.
+    overlap_merchant_normalizer: Callable[[str], str] | None = None
     plaid_account_profile: Callable[[dict[str, Any]], dict[str, str]] | None = None

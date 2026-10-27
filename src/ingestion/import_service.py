@@ -10,16 +10,17 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.data_paths import import_manifest_path, import_preview_dir, raw_source_dir
 from src.ingestion.csv_importer import parse_csv
-from src.models import SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot
+from src.models import ConnectedAccount, SyncLog, Transaction, AccountSnapshot, InvestmentHoldingSnapshot, InvestmentPeriodFact, AccountActivity
 from src.services.account_values import record_account_value
 from src.models import Payslip, PayslipLineItem, RetirementTransaction, RetirementStatement
 from src.processing.categorizer import RuleMatcher
-from src.processing.overlap_diagnostics import _merchant_matches
+from src.processing.overlap_diagnostics import source_merchant_matches
 from src.processing.retirement_utils import summarize_retirement_transactions
 from src.plugins.registry import (
     get_all_sources,
@@ -190,16 +191,29 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
             )
         imported = len(txns_to_import)
         ending_balance = (manifest.get("payload") or {}).get("ending_balance")
-        if ending_balance is not None and imported > 0:
-            end_date_str = (manifest.get("payload") or {}).get("end_date")
-            snapshot_date = datetime.fromisoformat(end_date_str) if end_date_str and "-" in str(end_date_str) else datetime.utcnow()
+        end_date_str = (manifest.get("payload") or {}).get("end_date")
+        # An upload time is not an observed balance date. Activity-only exports or
+        # parsers without a closing date must not invent a current balance snapshot.
+        if ending_balance is not None and imported > 0 and end_date_str:
+            snapshot_date = datetime.fromisoformat(end_date_str)
             account_group = "bank_account" if not (plugin and plugin.is_credit_card) else "credit_card"
+            snapshot_value = -float(ending_balance) if account_group == "credit_card" else float(ending_balance)
+            masks = {row.get("account_last4") for row in manifest["transactions"] if row.get("account_last4")}
+            mask = next(iter(masks)) if len(masks) == 1 else None
+            accounts = db.query(ConnectedAccount).filter(
+                ConnectedAccount.source == manifest["source"], ConnectedAccount.mask == mask,
+                ConnectedAccount.currency == currency, ConnectedAccount.active.is_(True),
+            ).all() if mask else []
+            snapshot_key = accounts[0].id if len(accounts) == 1 else (f"statement:{source_key}:{currency}:{mask}" if mask else None)
+            snapshot_name = accounts[0].display_name if len(accounts) == 1 else (f"Account •••• {mask}" if mask else None)
             db.add(
                 AccountSnapshot(
                     source=manifest["source"],
+                    account_key=snapshot_key,
+                    account_name=snapshot_name,
                     account_group=account_group,
                     connection_state="manual",
-                    current_value=round(float(ending_balance), 2),
+                    current_value=round(snapshot_value, 2),
                     currency=currency,
                     synced_at=snapshot_date,
                 )
@@ -208,10 +222,12 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
                 db,
                 source=manifest["source"],
                 account_group=account_group,
-                value=float(ending_balance),
+                value=snapshot_value,
                 observed_at=snapshot_date,
                 currency=currency,
                 provenance="statement",
+                account_key=snapshot_key,
+                account_name=snapshot_name,
             )
     elif manifest["record_type"] == "payslip":
         if duplicate_summary["importable_count"] == 0 and duplicate_summary["duplicate_count"] > 0:
@@ -413,6 +429,30 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
             currency=investment_plugin.currency if investment_plugin else "USD",
             provenance="statement",
         )
+        period_end = date.fromisoformat(statement_date) if statement_date else None
+        if period_end is not None:
+            existing_fact = db.query(InvestmentPeriodFact).filter(
+                InvestmentPeriodFact.source == source_name,
+                InvestmentPeriodFact.period_end == period_end,
+            ).first()
+            if existing_fact is None:
+                beginning = summary.get("beginning_value")
+                ending = round(float(summary.get("ending_value") or 0), 2)
+                market_gain = round(float(summary.get("change_in_investment") or 0), 2)
+                explicit_inflow = summary.get("additions")
+                inflow = round(float(explicit_inflow), 2) if explicit_inflow is not None else round(
+                    ending - float(beginning or 0) - market_gain, 2
+                )
+                db.add(InvestmentPeriodFact(
+                    source_key=manifest.get("source_key"), source=source_name,
+                    period_start=date.fromisoformat(account["period_start"]) if account.get("period_start") else None,
+                    _beginning_value=round(float(beginning), 2) if beginning is not None else None,
+                    _ending_value=ending,
+                    _inflow=inflow,
+                    _market_gain=market_gain,
+                    currency=investment_plugin.currency if investment_plugin else "USD",
+                    provenance="statement",
+                ))
         for holding in holdings:
             db.add(
                 InvestmentHoldingSnapshot(
@@ -431,6 +471,19 @@ def commit_import(db: Session, import_id: str) -> dict[str, Any]:
                     created_at=synced_at,
                 )
             )
+        for activity in payload.get("activities") or []:
+            if db.query(AccountActivity).filter(
+                AccountActivity.source == source_name,
+                AccountActivity.source_id == str(activity.get("source_id") or ""),
+            ).first() is None:
+                db.add(AccountActivity(
+                    source_id=str(activity.get("source_id") or uuid4()),
+                    source_key=manifest.get("source_key"), source=source_name,
+                    date=date.fromisoformat(activity["date"]), _amount=round(float(activity.get("amount") or 0), 2),
+                    description=str(activity.get("description") or "Investment activity"),
+                    activity_type=activity.get("activity_type") or "other", currency=investment_plugin.currency if investment_plugin else "USD",
+                    raw_data=activity,
+                ))
         imported = 1
         skipped = total_records - imported
     else:
@@ -580,10 +633,10 @@ def _parse_upload(file_path: Path, source: str, kind: str) -> dict[str, Any]:
         }
 
     if kind == "retirement_statement_pdf":
-        stmt_parser = get_statement_parser(source)
-        if not stmt_parser:
+        retirement_parser = get_retirement_parser(source)
+        if not retirement_parser:
             raise ValueError(f"Unsupported retirement statement source: {source}")
-        payload = stmt_parser(file_path)
+        payload = retirement_parser(str(file_path))
         payload = {**payload, "filename": file_path.name}
         return {
             "record_type": "retirement",
@@ -598,6 +651,20 @@ def _parse_upload(file_path: Path, source: str, kind: str) -> dict[str, Any]:
         payload = inv_parser(file_path)
         if not payload.get("holdings"):
             raise ValueError("No investment holdings were parsed from this CSV")
+        payload = {**payload, "filename": file_path.name}
+        return {
+            "record_type": "investment",
+            "transactions": [],
+            "payload": payload,
+        }
+
+    if kind == "investment_statement_pdf":
+        inv_parser = get_investment_parser(source)
+        if not inv_parser:
+            raise ValueError(f"No investment parser for source: {source}")
+        payload = inv_parser(str(file_path))
+        if not payload.get("holdings"):
+            raise ValueError("No investment holdings were parsed from this PDF")
         payload = {**payload, "filename": file_path.name}
         return {
             "record_type": "investment",
@@ -670,11 +737,36 @@ def _preview_duplicates(
     items = []
     duplicate_count = 0
     used_ids: set[str] = set()
-    for txn in txns:
+    # Plaid's transaction date may be a day or two after the card's authorized date.
+    # Process statement rows that align exactly with authorized_date first, so an earlier
+    # nearby statement row cannot consume the Plaid match intended for a later row.
+    plaid_rows = db.query(Transaction).filter(
+        Transaction.source == source,
+        Transaction.origin == "plaid",
+    ).all() if kind == "statement_pdf" else []
+
+    def has_authorized_date_match(txn: NormalizedImportTransaction) -> bool:
+        return any(
+            row.authorized_date == txn.date
+            and row.account_last4 == txn.account_last4
+            and row.currency == txn.currency
+            and round(float(row._amount), 2) == round(txn.amount, 2)
+            and source_merchant_matches(txn.source, row.merchant_raw, txn.merchant_raw)
+            for row in plaid_rows
+        )
+
+    match_order = sorted(
+        txns,
+        key=lambda txn: (not has_authorized_date_match(txn), txn.date, txn.source_id),
+    )
+    reasons: dict[int, dict[str, Any] | None] = {}
+    for txn in match_order:
         reason = _duplicate_reason(db, txn, used_ids=used_ids)
         if reason:
             duplicate_count += 1
-        items.append({**txn.as_dict(), "duplicate_reason": reason})
+        reasons[id(txn)] = reason
+    for txn in txns:
+        items.append({**txn.as_dict(), "duplicate_reason": reasons[id(txn)]})
     return {
         "total_transactions": total_records,
         "duplicate_count": duplicate_count,
@@ -841,6 +933,58 @@ def _preview_investment_duplicates(
             "existing_id": existing["existing_id"],
             "existing_origin": existing["existing_origin"],
         }
+    if duplicate_reason is None:
+        statement_date = str(account.get("statement_date") or "")
+        account_last4 = str(account.get("account_id") or "")[-4:]
+        ending_value = round(float(summary.get("ending_value") or 0), 2)
+        previous_imports = (
+            db.query(SyncLog)
+            .filter(
+                SyncLog.source == source,
+                SyncLog.sync_type.in_(("import_investment_csv", "import_investment_statement_pdf")),
+                SyncLog.status == "success",
+            )
+            .order_by(SyncLog.created_at.asc())
+            .all()
+        )
+        for log in previous_imports:
+            prior_payload = (log.extra_data or {}).get("payload") or {}
+            prior_account = prior_payload.get("account") or {}
+            prior_summary = prior_payload.get("summary") or {}
+            prior_account_id = str(prior_account.get("account_id") or "")
+            if (
+                statement_date
+                and account_last4
+                and str(prior_account.get("statement_date") or "") == statement_date
+                and prior_account_id[-4:] == account_last4
+                and round(float(prior_summary.get("ending_value") or 0), 2) == ending_value
+            ):
+                duplicate_reason = {
+                    "type": "investment_statement",
+                    "existing_id": log.id,
+                    "existing_origin": log.sync_type,
+                }
+                break
+        if duplicate_reason is None and statement_date:
+            statement_time = datetime.fromisoformat(f"{statement_date}T00:00:00")
+            next_day = statement_time + timedelta(days=1)
+            snapshot = (
+                db.query(AccountSnapshot)
+                .filter(
+                    AccountSnapshot.source == source,
+                    AccountSnapshot.account_group == "investment",
+                    AccountSnapshot.synced_at >= statement_time,
+                    AccountSnapshot.synced_at < next_day,
+                    AccountSnapshot._current_value == ending_value,
+                )
+                .first()
+            )
+            if snapshot:
+                duplicate_reason = {
+                    "type": "investment_statement",
+                    "existing_id": snapshot.id,
+                    "existing_origin": "account_snapshot",
+                }
     items = []
     if source_id:
         items.append(
@@ -890,7 +1034,7 @@ def _duplicate_reason(db: Session, txn: NormalizedImportTransaction, *, used_ids
             continue
         if round(float(existing._amount), 2) != round(txn.amount, 2):
             continue
-        if not _merchant_matches(existing.merchant_raw, txn.merchant_raw):
+        if not source_merchant_matches(txn.source, existing.merchant_raw, txn.merchant_raw):
             continue
         used_ids.add(existing.id)
         return {
@@ -906,8 +1050,10 @@ def _duplicate_reason(db: Session, txn: NormalizedImportTransaction, *, used_ids
     upper_bound = txn.date + timedelta(days=3)
     nearby = db.query(Transaction).filter(
         Transaction.source == txn.source,
-        Transaction.date >= lower_bound,
-        Transaction.date <= upper_bound,
+        or_(
+            (Transaction.date >= lower_bound) & (Transaction.date <= upper_bound),
+            Transaction.authorized_date == txn.date,
+        ),
         Transaction.origin == "plaid",
     ).all()
     for existing in nearby:
@@ -917,7 +1063,7 @@ def _duplicate_reason(db: Session, txn: NormalizedImportTransaction, *, used_ids
             continue
         if round(float(existing._amount), 2) != round(txn.amount, 2):
             continue
-        if not _merchant_matches(existing.merchant_raw, txn.merchant_raw):
+        if not source_merchant_matches(txn.source, existing.merchant_raw, txn.merchant_raw):
             continue
         used_ids.add(existing.id)
         return {
@@ -1098,6 +1244,8 @@ def _resolve_kind(file_path: Path, source: str, kind: str | None) -> str:
                 return "payslip_pdf"
             if "retirement_statement_pdf" in allowed_kinds:
                 return "retirement_statement_pdf"
+            if "investment_statement_pdf" in allowed_kinds:
+                return "investment_statement_pdf"
             if "statement_pdf" in allowed_kinds:
                 return "statement_pdf"
         if suffix == ".csv":

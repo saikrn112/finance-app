@@ -187,3 +187,111 @@ def test_statement_claim_survives_replay_and_peer_plaid_copy():
     replay = apply_plaid_sync_batch(a, 'Example Bank', [_packet('posted')], [], []); a.commit()
     assert replay.skipped_statement_overlap == 1 and a.query(Transaction).count() == 1
     a.close(); b.close()
+
+@pytest.mark.parametrize('new_alias', [False, True])
+def test_legacy_identity_echo_requires_identical_verified_existing_claim(new_alias):
+    from src.sync.payload import build_payload
+    from src.sync.merge import merge_payload
+    from copy import deepcopy
+    db = _db()
+    apply_plaid_sync_batch(db, 'Example Bank', [_packet('posted')], [], [])
+    row = db.query(Transaction).one()
+    row.identity_aliases = ['retired-example']
+    db.commit()
+    payload = deepcopy(build_payload(db, device_id='example-peer'))
+    record = payload['records']['transactions'][0]
+    record['provider_revision'] = None
+    if new_alias:
+        record['identity_aliases'].append('unverified-example')
+    report = merge_payload(db, payload)
+    assert bool(report.fact_conflicts) is new_alias
+    # Invalid metadata must not be copied by the ordinary fact merge either.
+    assert db.query(Transaction).one().identity_aliases == ['retired-example']
+    db.close()
+
+def test_provider_comparison_policy_covers_historic_statement_without_changing_it(monkeypatch):
+    from src.plugins.base import ParserPlugin
+    from src.plugins import registry
+    plugin = ParserPlugin(source_key='example', label='Example Bank', record_type='transactions', allowed_kinds=set(), domain='financial_accounts', directory_name='example', overlap_merchant_normalizer=lambda text: text.replace('EXMKT', 'Example Market'))
+    monkeypatch.setattr(registry, 'get_registry', lambda: [plugin])
+    db = _db()
+    old = Transaction(source='Example Bank', source_id='statement', date=date(2026, 1, 1), amount=-25, merchant_raw='EXMKT NORTH', origin='statements', account_last4='1111', currency='USD')
+    db.add(old); db.commit()
+    packet = _packet('plaid')
+    packet['merchant_raw'] = 'Example Market'
+    packet['authorized_date'] = date(2026, 1, 1)
+    counts = apply_plaid_sync_batch(db, 'Example Bank', [packet], [], [])
+    db.commit()
+    assert counts.skipped_statement_overlap == 1
+    assert db.query(Transaction).count() == 1
+    assert old.merchant_raw == 'EXMKT NORTH'
+    assert old.reconciled_ids == ['plaid']
+    # A later separate occurrence must not claim the already matched statement row.
+    packet = {**packet, 'source_id': 'other-plaid'}
+    counts = apply_plaid_sync_batch(db, 'Example Bank', [packet], [], [])
+    db.commit()
+    assert counts.added == 1
+    assert db.query(Transaction).count() == 2
+    db.close()
+
+
+def test_account_investment_periods_are_scoped_complete_and_syncable():
+    from src.models import ConnectedAccount, SyncLog, SourceBalanceHistory, AccountActivity, AccountInvestmentPeriodFact
+    from src.ingestion.plaid_activity import persist_account_investment_periods
+    from src.sync.payload import build_payload
+    from src.sync.merge import merge_payload
+    a, b = _db(), _db()
+    log = SyncLog(source='plaid', status='connected'); a.add(log); a.flush()
+    for key in ['one','two']:
+        a.add(ConnectedAccount(id=key, sync_log_id=log.id, source='Example Broker', source_key='example', external_account_id='external-'+key, name=key, display_name=key, account_group='investment', account_type='investment', currency='USD'))
+        for day, value in [(1,100),(15,130)]:
+            a.add(SourceBalanceHistory(source='Example Broker', account_key=key, date=date(2026,1,day), account_group='investment', _value=value, currency='USD', provenance='account_snapshot'))
+    a.add_all([
+        AccountActivity(source='Example Broker',source_id='deposit',account_id='external-one',date=date(2026,1,5),_amount=20,description='Example deposit',activity_type='transfer',currency='USD'),
+        AccountActivity(source='Example Broker',source_id='pending',account_id='external-one',date=date(2026,1,5),_amount=500,description='Pending',activity_type='transfer',currency='USD',pending=True),
+    ]);a.commit()
+    assert persist_account_investment_periods(a,'Example Broker',date(2026,1,2),date(2026,1,31)) == 0
+    assert persist_account_investment_periods(a,'Example Broker',date(2026,1,1),date(2026,1,31)) == 2
+    a.commit()
+    facts={r.account_key:r for r in a.query(AccountInvestmentPeriodFact)}
+    assert facts['one']._inflow == 20 and facts['one']._market_gain == 10
+    assert facts['two']._inflow == 0 and facts['two']._market_gain == 30
+    assert persist_account_investment_periods(a,'Example Broker',date(2026,1,1),date(2026,1,31)) == 0
+    payload=build_payload(a,device_id='example-a');report=merge_payload(b,payload)
+    assert not report.unresolved and not report.fact_conflicts
+    assert b.query(AccountInvestmentPeriodFact).count()==2
+    a.query(AccountActivity).filter_by(source_id='deposit').one()._amount = 25
+    a.commit()
+    assert persist_account_investment_periods(a,'Example Broker',date(2026,1,1),date(2026,1,31)) == 1
+    a.commit()
+    merge_payload(b,build_payload(a,device_id='example-a'))
+    corrected=b.query(AccountInvestmentPeriodFact).filter_by(account_key='one').one()
+    assert corrected._inflow == 25 and corrected._market_gain == 5
+    a.query(AccountActivity).filter_by(source_id='deposit').one()._amount = 28
+    a.commit()
+    persist_account_investment_periods(a,'Example Broker',date(2026,1,1),date(2026,1,31))
+    a.commit()
+    merge_payload(b,build_payload(a,device_id='example-a'))
+    b.expire_all()
+    assert b.query(AccountInvestmentPeriodFact).filter_by(account_key='one').one()._inflow == 28
+    a.close();b.close()
+
+
+def test_reviewed_activity_retirement_survives_stale_peer_and_is_idempotent():
+    from src.models import AccountActivity
+    from src.ingestion.plaid_activity import retire_reviewed_account_activity
+    from src.sync.payload import build_payload
+    from src.sync.merge import merge_payload
+    a,b=_db(),_db()
+    a.add(AccountActivity(source='Example Broker',source_id='old-id',date=date(2026,1,1),_amount=20,description='Example',activity_type='transfer',currency='USD'))
+    a.commit()
+    merge_payload(b,build_payload(a,device_id='example-a'))
+    stale=build_payload(b,device_id='example-b')
+    assert retire_reviewed_account_activity(a,'Example Broker',['old-id'])==1
+    a.commit()
+    assert retire_reviewed_account_activity(a,'Example Broker',['old-id'])==0
+    merge_payload(a,stale)
+    assert a.query(AccountActivity).count()==0
+    merge_payload(b,build_payload(a,device_id='example-a'))
+    assert b.query(AccountActivity).count()==0
+    a.close();b.close()

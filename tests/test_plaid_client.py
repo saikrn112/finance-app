@@ -229,6 +229,11 @@ class TestCreateLinkTokenUpdateMode:
         assert "products" not in request
         assert request["update"].account_selection_enabled is True
 
+    def test_product_upgrade_requests_additional_consent(self, monkeypatch):
+        request = self._captured_request(monkeypatch, products=["transactions"], access_token="synthetic-access", additional_consented_products=["investments"])
+        assert "products" not in request
+        assert [str(p) for p in request["additional_consented_products"]] == ["investments"]
+
     def test_initial_link_still_sends_products(self, monkeypatch):
         request = self._captured_request(monkeypatch, products=["transactions"])
         assert "access_token" not in request

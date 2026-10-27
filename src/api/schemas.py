@@ -517,6 +517,7 @@ class SidebarAccountItem(BaseModel):
     connection_state: Optional[str] = None
     balance: Optional[float] = None
     ledger_balance: Optional[float] = None
+    ledger_balance_at_snapshot: Optional[float] = None
     snapshot_balance: Optional[float] = None
     currency: str
     last_synced: Optional[str] = None

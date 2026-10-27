@@ -121,6 +121,9 @@ function resolveUpload(file: File, source: string, sourceMap: Record<string, Sou
   }
 
   if (option.allowedKinds.includes('investment_csv')) {
+    if (extension === '.pdf' && option.allowedKinds.includes('investment_statement_pdf')) {
+      return { source, kind: 'investment_statement_pdf' as ImportKind, statusPrefix: `Previewing ${option.label} statement...` }
+    }
     if (extension !== '.csv') return { error: `${option.label} imports expect a CSV statement export.` }
     return { source, kind: 'investment_csv' as ImportKind, statusPrefix: `Previewing ${option.label} holdings...` }
   }
@@ -824,6 +827,7 @@ function labelForKind(kind: ImportKind | undefined) {
     retirement_csv: 'Retirement CSV',
     retirement_statement_pdf: 'Retirement Statement PDF',
     investment_csv: 'Investment CSV',
+    investment_statement_pdf: 'Investment Statement PDF',
   }[kind]
 }
 

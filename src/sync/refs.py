@@ -350,3 +350,5 @@ def _is_synced_model(instance) -> bool:
     unnoticed once already.
     """
     return spec_for_instance(instance) is not None
+
+KIND_ACCOUNT_INVESTMENT_PERIOD_FACT = "account_investment_period_fact"

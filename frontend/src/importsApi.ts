@@ -22,7 +22,7 @@ async function requestImport<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface ImportDuplicateReason {
-  type: 'source_id' | 'heuristic' | 'file_hash' | 'legacy_statement' | 'payslip_signature' | 'retirement_source_id'
+  type: 'source_id' | 'heuristic' | 'file_hash' | 'legacy_statement' | 'payslip_signature' | 'retirement_source_id' | 'investment_statement'
   existing_id: string
   existing_origin: string
   existing_date?: string
@@ -30,7 +30,7 @@ export interface ImportDuplicateReason {
   existing_merchant_raw?: string
 }
 
-export type ImportKind = 'csv' | 'statement_pdf' | 'payslip_pdf' | 'retirement_csv' | 'retirement_statement_pdf' | 'investment_csv'
+export type ImportKind = 'csv' | 'statement_pdf' | 'payslip_pdf' | 'retirement_csv' | 'retirement_statement_pdf' | 'investment_csv' | 'investment_statement_pdf'
 export type ImportRecordType = 'transactions' | 'payslip' | 'retirement' | 'investment'
 
 export interface ImportPreviewItem {
